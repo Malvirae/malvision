@@ -1,28 +1,48 @@
 # Malvision
 
-Application native Windows 11 x64 de gestion de connexions distantes, écrite en Rust avec `windows-rs` (Win32 + COM/ActiveX).
+Application native **Windows 11 x64** de gestion de connexions distantes, écrite en **Rust** avec `windows-rs` (Win32 natif + COM/ActiveX + SQLite embarqué + DPAPI).
 
-## Vision du projet
+## Vision et fonctionnalités (Jalon 2)
 
-- **RDP** : connexion intégrée directement dans la fenêtre Malvision via le contrôle ActiveX officiel Microsoft (`MsTscAx.dll` / `IMsRdpClient9`).
-- **AnyDesk** : lancement du client externe (jalon ultérieur).
-- **RustDesk** : lancement du client externe (jalon ultérieur).
-- **Distribution** : un unique exécutable portable `Malvision.exe` (~295 Ko en Release) sans dépendances DLL tierces ni installateur.
+- **Interface sombre moderne Windows 11** :
+  - Thème anthracite profond (`#16181B`), barre de titre sombre DWM (`DWMWA_USE_IMMERSIVE_DARK_MODE`), typographie `Segoe UI`, rendu GDI double-bufferisé sans scintillement et prise en charge HiDPI Per-Monitor V2.
+  - **Panneau latéral gauche redimensionnable** (260 px par défaut, largeur persistée entre `200 px` et `520 px`) comprenant l'en-tête Malvision, les boutons **+ Connexion** et **+ Dossier**, la recherche instantanée en temps réel, la section **Favoris** et l'arborescence multi-niveaux des dossiers et connexions.
+  - **Arborescence hiérarchique (`TreeView`)** à profondeur arbitraire : développer/replier avec persistance de l'état, sélection, double-clic ou touche `Entrée` pour lancer une session, renommage rapide (`F2`), menu contextuel complet (*Se connecter*, *Modifier*, *Renommer*, *Dupliquer*, *Ajouter/Retirer des favoris*, *Déplacer vers un dossier*, *Supprimer avec confirmation*) et **glisser-déposer (Drag & Drop)** avec prévention stricte des cycles de dossiers.
+  - **Zone centrale multi-sessions et tableau de bord** :
+    - Lorsqu'aucune session RDP n'est active : écran d'accueil sobre présentant les accès rapides, les cartes de **Connexions favorites** et les **Connexions récemment utilisées**.
+    - Lorsqu'une ou plusieurs sessions RDP sont ouvertes : **barre d'onglets** avec indicateur visuel d'état, sélection d'onglet, bouton de fermeture individuel (`×`) et bouton d'ouverture rapide (`+`).
+    - Chaque onglet RDP possède son propre contrôle ActiveX `MsTscAx` et son propre cycle de vie COM (`RdpActiveXHost`). Changer d'onglet masque/affiche les hôtes (`SW_HIDE` / `SW_SHOW`) **sans détruire** les sessions inactives.
+  - **Barre d'état inférieure** : affiche le statut réel de la session ou de la sélection, le protocole et l'hôte (`IP/DNS:port`), sans jamais exposer de données sensibles.
+- **Protocoles supportés** :
+  - **RDP** : session intégrée directement dans la fenêtre Malvision via `MsTscAx.dll` (`IMsRdpClient9`, `IMsRdpClientAdvancedSettings8`, `IMsRdpClientNonScriptable3`, `IMsTscAxEvents`).
+  - **AnyDesk** : enregistrement, organisation et formulaire dédiés (lancement externe prévu au Jalon 3).
+  - **RustDesk** : enregistrement, organisation et formulaire dédiés (lancement externe prévu au Jalon 3).
+- **Distribution portable** : un unique exécutable `Malvision.exe` autonome, sans moteur web embarqué et sans aucune DLL tierce à distribuer.
 
-## Architecture technique (Jalon 1 & Jalon 1B)
+## Architecture technique
 
-- [`src/main.rs`](src/main.rs) : Point d'entrée Windows (`windows_subsystem = "windows"`), activation HiDPI Per-Monitor V2 (`SetProcessDpiAwarenessContext`), initialisation COM/OLE STA (`OleInitialize`) et lancement de l'interface.
-- [`src/rdp.rs`](src/rdp.rs) : Hébergement ActiveX natif via `atl.dll` (`AtlAxWinInit` / `AtlAxWin` / `AtlAxGetControl`) et interfaçage COM direct avec `MsTscAx.dll` :
-  - `IMsRdpClient9` (`{28904001-04b6-436c-a55b-0af1a0883dc9}`) : configuration `Server`, `Domain`, `UserName`, `DesktopWidth`, `DesktopHeight`, `ColorDepth`, appels `Connect()`, `Disconnect()`, `get_Connected()`, `UpdateSessionDisplaySettings()` et décodage des erreurs via `ExtendedDisconnectReason` + `GetErrorDescription()`.
-  - `IMsRdpClientAdvancedSettings8` (`{89acb528-2557-4d16-8625-226a30e97e9a}`) : configuration `RDPPort`, `SmartSizing = true`, `EnableCredSspSupport = true` (NLA), `AuthenticationLevel = 2` (avertissement certificat standard Windows), `DisplayConnectionBar = false`, `ClearTextPassword`.
-  - `IMsRdpClientNonScriptable3` (`{b3378d90-0728-45c7-8ed7-b6159fb92219}`) : attachement de la fenêtre parente (`UIParentWindowHandle`) pour les boîtes de dialogue système CredSSP/NLA et certificats, `NegotiateSecurityLayer = true`, `EnableCredSspSupport = true`, gestion en mémoire de `ClearTextPassword` / `ResetPassword`.
-  - `IMsTscAxEvents` (`{336d5562-efa8-482e-8cb3-c5c0fc7a7db6}`) : sink COM dédié (`RdpEventSinkComObject`) répondant à `QueryInterface` pour `DIID_IMsTscAxEvents`, `IDispatch` et `IUnknown`, connecté via `IConnectionPoint::Advise` et relayant en temps réel les événements (`OnConnecting`, `OnConnected`, `OnLoginComplete`, `OnDisconnected`, `OnFatalError`, `OnWarning`, `OnAuthenticationWarningDisplayed`, `OnAutoReconnecting2`) à la fenêtre Win32.
-- [`src/ui.rs`](src/ui.rs) :
-  - Fenêtre principale Win32, barre de connexion (Hôte/IP:port, Utilisateur/Domaine, Mot de passe masqué effacé de l'UI dès l'envoi, boutons Connecter / Déconnecter), barre d'état, redimensionnement dynamique (`WM_SIZE`, `WM_GETMINMAXINFO`).
-  - Double validation de l'état de connexion : écoute événementielle `IMsTscAxEvents` + supervision périodique de `IMsRdpClient::get_Connected()` (`WM_TIMER`) garantissant que l'état « Connecté » n'est affiché que lorsque le contrôle ActiveX confirme `Connected == 1`.
-  - Préservation des styles de cadre `WS_OVERLAPPEDWINDOW` (`WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU`) et filtrage strict de la pompe de messages (`is_keyboard_message`) pour que `IOleInPlaceActiveObject::TranslateAccelerator` et `IsDialogMessageW` n'interceptent jamais les clics souris sur les boutons Minimiser / Maximiser / Restaurer de la barre de titre.
+- [`src/main.rs`](src/main.rs) : Point d'entrée Windows (`windows_subsystem = "windows"`), activation HiDPI Per-Monitor V2 (`SetProcessDpiAwarenessContext`), initialisation COM/OLE STA (`OleInitialize`), initialisation des contrôles communs (`InitCommonControlsEx`) et lancement de l'application.
+- [`src/models.rs`](src/models.rs) : Modèles de données (`Protocol`, `Folder`, `ConnectionItem`, `ConnectionDraft`, `RecentConnectionEntry`) et validation stricte des entrées (hôte/IP/ID, plage de ports `1..=65535`, normalisation `DOMAINE\utilisateur`).
+- [`src/security.rs`](src/security.rs) : Chiffrement et déchiffrement des mots de passe via **Windows DPAPI** (`CryptProtectData` / `CryptUnprotectData` sous contexte utilisateur courant avec entropie applicative dédiée) et conteneur `SecretString` avec effacement mémoire volatil (`write_volatile`) automatique sur `Drop`.
+- [`src/storage.rs`](src/storage.rs) : Persistance locale **SQLite** embarquée (`rusqlite` avec fonctionnalité `bundled`) stockée dans `%LOCALAPPDATA%\Malvision\malvision.db` :
+  - Tables : `folders`, `connections`, `recent_connections`, `settings`.
+  - Migrations de schéma versionnées (`PRAGMA user_version = 1`), intégrité référentielle (`PRAGMA foreign_keys = ON`), journalisation `WAL`, vérification d'intégrité à l'ouverture (`PRAGMA quick_check`) sans écrasement silencieux en cas de corruption.
+  - Détection et blocage des cycles hiérarchiques de dossiers (`would_create_folder_cycle`).
+- [`src/settings.rs`](src/settings.rs) : Chargement et sauvegarde des préférences d'interface (largeur du panneau gauche).
+- [`src/rdp.rs`](src/rdp.rs) : Hébergement ActiveX natif via `atl.dll` (`AtlAxWinInit` / `AtlAxWin` / `AtlAxGetControl`), configuration `IMsRdpClient9` / `IMsRdpClientAdvancedSettings8` / `IMsRdpClientNonScriptable3` (port personnalisé, NLA/CredSSP, résolution dynamique `SmartSizing` + `UpdateSessionDisplaySettings`, partage du presse-papiers `RedirectClipboard`), et sink d'événements COM `IMsTscAxEvents` (`RdpEventSinkComObject`) identifiant chaque onglet par `session_id`.
+- [`src/sessions.rs`](src/sessions.rs) : Gestionnaire multi-sessions (`SessionManager`, `RdpSessionTab`) orchestrant l'ouverture, la commutation d'onglets sans destruction des sessions inactives, le redimensionnement, la supervision périodique de l'état réel (`get_Connected`) et la fermeture propre (`Disconnect` + `Unadvise` + `DestroyWindow`).
+- [`src/ui.rs`](src/ui.rs) : Interface graphique sombre Win32/GDI, arborescence `TreeView` avec glisser-déposer, recherche dynamique, tableau de bord d'accueil, barre d'onglets multi-sessions et boîtes de dialogue modales (création/édition de connexion, création/renommage de dossier, déplacement).
 
-## Compilation et Validation
+## Stockage local et sécurité DPAPI
+
+- **Emplacement de la base SQLite** : `%LOCALAPPDATA%\Malvision\malvision.db`
+- **Protection des secrets (DPAPI)** :
+  - Lorsqu'un mot de passe est enregistré avec l'option *« Enregistrer le mot de passe (chiffré via Windows DPAPI) »*, il est chiffré par `CryptProtectData` avec entropie applicative avant d'être écrit sous forme de `BLOB` dans la colonne `encrypted_password`.
+  - Aucun mot de passe en clair n'est jamais stocké sur disque, ni affiché dans l'interface ou les journaux.
+  - Si l'utilisateur décoche l'enregistrement du mot de passe lors de l'édition d'une connexion, le secret chiffré est immédiatement purgé de la base SQLite (`encrypted_password = NULL`).
+  - **Note de portabilité DPAPI** : Les secrets chiffrés via Windows DPAPI sont liés au compte utilisateur Windows courant (et par défaut à la machine locale). Le fichier `malvision.db` copié vers une autre machine ou un autre compte utilisateur conservera toute l'arborescence et les paramètres de connexion, mais les mots de passe devront être resaisis.
+
+## Compilation et validation
 
 ```powershell
 cargo fmt --check
@@ -32,12 +52,3 @@ cargo build --release
 ```
 
 Binaire généré : `target/release/Malvision.exe`
-
-## Procédure de vérification manuelle (Session RDP réelle)
-
-1. Lancer `.\target\release\Malvision.exe`.
-2. Vérifier dans la barre d'état que le contrôle ActiveX et son sink d'événements sont initialisés (`sink=#1`).
-3. Saisir un hôte RDP valide, un utilisateur et un mot de passe, puis cliquer sur **Connecter**.
-4. Vérifier que la barre d'état passe à **« Connecté à <hôte:port> — ... »** dès que le bureau distant est établi.
-5. Maximiser la fenêtre Malvision, puis la **Restaurer** et la **Minimiser** / **Restaurer** pendant la session active.
-6. Cliquer sur **Déconnecter** (puis tester une **Reconnexion**).

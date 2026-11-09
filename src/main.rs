@@ -1,12 +1,17 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+mod models;
 mod rdp;
+mod security;
+mod sessions;
+mod settings;
+mod storage;
 mod ui;
 
 use windows::Win32::System::Com::CoUninitialize;
 use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
 use windows::Win32::UI::Controls::{
-    ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
+    ICC_STANDARD_CLASSES, ICC_TREEVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -25,7 +30,7 @@ fn main() {
 
         let icc = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_STANDARD_CLASSES,
+            dwICC: ICC_STANDARD_CLASSES | ICC_TREEVIEW_CLASSES,
         };
         let _ = InitCommonControlsEx(&icc);
 

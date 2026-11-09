@@ -27,7 +27,8 @@ use windows_core::{BSTR, GUID, HRESULT, IUnknown, Interface, PCWSTR, s, w};
 /// Message Win32 personnalisé envoyé à la fenêtre principale lors d'un événement COM `IMsTscAxEvents`.
 pub const WM_RDP_EVENT: u32 = WM_APP + 100;
 
-/// Codes d'événements transmis dans `WPARAM` avec `WM_RDP_EVENT`.
+/// Codes d'événements transmis dans les 16 bits de poids faible de `WPARAM` avec `WM_RDP_EVENT`
+/// (les bits `WPARAM >> 16` contiennent le `session_id` interne).
 pub const RDP_EVT_CONNECTING: usize = 1;
 pub const RDP_EVT_CONNECTED: usize = 2;
 pub const RDP_EVT_LOGIN_COMPLETE: usize = 3;
@@ -38,6 +39,20 @@ pub const RDP_EVT_LOGON_ERROR: usize = 7;
 pub const RDP_EVT_AUTH_WARNING_DISPLAYED: usize = 8;
 pub const RDP_EVT_AUTH_WARNING_DISMISSED: usize = 9;
 pub const RDP_EVT_AUTO_RECONNECTING: usize = 10;
+
+/// Encode `(session_id, event_code)` dans un `WPARAM`.
+#[inline]
+pub fn pack_rdp_event_wparam(session_id: u32, event_code: usize) -> WPARAM {
+    WPARAM(((session_id as usize) << 16) | (event_code & 0xFFFF))
+}
+
+/// Décode `(session_id, event_code)` depuis le `WPARAM` de `WM_RDP_EVENT`.
+#[inline]
+pub fn unpack_rdp_event_wparam(wparam: WPARAM) -> (u32, usize) {
+    let session_id = (wparam.0 >> 16) as u32;
+    let event_code = wparam.0 & 0xFFFF;
+    (session_id, event_code)
+}
 
 /// DIID de l'interface source d'événements `IMsTscAxEvents` (`{336d5562-efa8-482e-8cb3-c5c0fc7a7db6}`).
 pub const DIID_IMS_TSC_AX_EVENTS: GUID = GUID::from_u128(0x336d5562_efa8_482e_8cb3_c5c0fc7a7db6);
@@ -75,7 +90,7 @@ const RDP_CONTROL_IDENTIFIERS: &[PCWSTR] = &[
 type AtlAxWinInitFn = unsafe extern "system" fn() -> i32;
 type AtlAxGetControlFn = unsafe extern "system" fn(HWND, *mut Option<IUnknown>) -> HRESULT;
 
-/// Paramètres de connexion RDP fournis par l'utilisateur.
+/// Paramètres de connexion RDP fournis par l'utilisateur ou le gestionnaire de connexions.
 #[derive(Debug, Clone)]
 pub struct RdpConnectionConfig {
     pub host: String,
@@ -85,6 +100,8 @@ pub struct RdpConnectionConfig {
     pub password: String,
     pub width: u32,
     pub height: u32,
+    pub dynamic_resolution: bool,
+    pub redirect_clipboard: bool,
 }
 
 /// Analyse une chaîne d'hôte (`ip`, `dns`, `ip:port`, `[ipv6]:port`) et retourne `(host, port)`.
@@ -201,6 +218,7 @@ struct RdpEventSinkComObject {
     vtbl: *const RawDispatchVtbl,
     ref_count: AtomicU32,
     notify_hwnd: HWND,
+    session_id: u32,
 }
 
 static RDP_EVENT_SINK_VTBL: RawDispatchVtbl = RawDispatchVtbl {
@@ -214,11 +232,12 @@ static RDP_EVENT_SINK_VTBL: RawDispatchVtbl = RawDispatchVtbl {
 };
 
 impl RdpEventSinkComObject {
-    fn new_com_unknown(notify_hwnd: HWND) -> IUnknown {
+    fn new_com_unknown(notify_hwnd: HWND, session_id: u32) -> IUnknown {
         let boxed = Box::new(Self {
             vtbl: &RDP_EVENT_SINK_VTBL,
             ref_count: AtomicU32::new(1),
             notify_hwnd,
+            session_id,
         });
         unsafe { IUnknown::from_raw(Box::into_raw(boxed).cast()) }
     }
@@ -320,6 +339,7 @@ unsafe extern "system" fn sink_invoke(
     unsafe {
         let obj = &*(this as *const RdpEventSinkComObject);
         let notify_hwnd = obj.notify_hwnd;
+        let session_id = obj.session_id;
 
         let first_int_arg = || -> isize {
             if pdispparams.is_null() {
@@ -351,7 +371,7 @@ unsafe extern "system" fn sink_invoke(
                 let _ = PostMessageW(
                     Some(notify_hwnd),
                     WM_RDP_EVENT,
-                    WPARAM(RDP_EVT_CONNECTING),
+                    pack_rdp_event_wparam(session_id, RDP_EVT_CONNECTING),
                     LPARAM(0),
                 );
             }
@@ -360,7 +380,7 @@ unsafe extern "system" fn sink_invoke(
                 let _ = PostMessageW(
                     Some(notify_hwnd),
                     WM_RDP_EVENT,
-                    WPARAM(RDP_EVT_CONNECTED),
+                    pack_rdp_event_wparam(session_id, RDP_EVT_CONNECTED),
                     LPARAM(0),
                 );
             }
@@ -369,7 +389,7 @@ unsafe extern "system" fn sink_invoke(
                 let _ = PostMessageW(
                     Some(notify_hwnd),
                     WM_RDP_EVENT,
-                    WPARAM(RDP_EVT_LOGIN_COMPLETE),
+                    pack_rdp_event_wparam(session_id, RDP_EVT_LOGIN_COMPLETE),
                     LPARAM(0),
                 );
             }
@@ -379,7 +399,7 @@ unsafe extern "system" fn sink_invoke(
                 let _ = PostMessageW(
                     Some(notify_hwnd),
                     WM_RDP_EVENT,
-                    WPARAM(RDP_EVT_DISCONNECTED),
+                    pack_rdp_event_wparam(session_id, RDP_EVT_DISCONNECTED),
                     LPARAM(reason),
                 );
             }
@@ -389,7 +409,7 @@ unsafe extern "system" fn sink_invoke(
                 let _ = PostMessageW(
                     Some(notify_hwnd),
                     WM_RDP_EVENT,
-                    WPARAM(RDP_EVT_FATAL_ERROR),
+                    pack_rdp_event_wparam(session_id, RDP_EVT_FATAL_ERROR),
                     LPARAM(code),
                 );
             }
@@ -399,7 +419,7 @@ unsafe extern "system" fn sink_invoke(
                 let _ = PostMessageW(
                     Some(notify_hwnd),
                     WM_RDP_EVENT,
-                    WPARAM(RDP_EVT_WARNING),
+                    pack_rdp_event_wparam(session_id, RDP_EVT_WARNING),
                     LPARAM(code),
                 );
             }
@@ -421,7 +441,7 @@ unsafe extern "system" fn sink_invoke(
                 let _ = PostMessageW(
                     Some(notify_hwnd),
                     WM_RDP_EVENT,
-                    WPARAM(RDP_EVT_AUTH_WARNING_DISPLAYED),
+                    pack_rdp_event_wparam(session_id, RDP_EVT_AUTH_WARNING_DISPLAYED),
                     LPARAM(0),
                 );
             }
@@ -430,7 +450,7 @@ unsafe extern "system" fn sink_invoke(
                 let _ = PostMessageW(
                     Some(notify_hwnd),
                     WM_RDP_EVENT,
-                    WPARAM(RDP_EVT_AUTH_WARNING_DISMISSED),
+                    pack_rdp_event_wparam(session_id, RDP_EVT_AUTH_WARNING_DISMISSED),
                     LPARAM(0),
                 );
             }
@@ -440,7 +460,7 @@ unsafe extern "system" fn sink_invoke(
                 let _ = PostMessageW(
                     Some(notify_hwnd),
                     WM_RDP_EVENT,
-                    WPARAM(RDP_EVT_LOGON_ERROR),
+                    pack_rdp_event_wparam(session_id, RDP_EVT_LOGON_ERROR),
                     LPARAM(code),
                 );
             }
@@ -450,7 +470,7 @@ unsafe extern "system" fn sink_invoke(
                 let _ = PostMessageW(
                     Some(notify_hwnd),
                     WM_RDP_EVENT,
-                    WPARAM(RDP_EVT_AUTO_RECONNECTING),
+                    pack_rdp_event_wparam(session_id, RDP_EVT_AUTO_RECONNECTING),
                     LPARAM(reason),
                 );
             }
@@ -463,6 +483,7 @@ unsafe extern "system" fn sink_invoke(
 
 /// Encapsule l'instance ActiveX `MsTscAx` hébergée dans la fenêtre parente.
 pub struct RdpActiveXHost {
+    session_id: u32,
     parent_hwnd: HWND,
     ax_hwnd: HWND,
     rdp_client: IUnknown,
@@ -470,11 +491,13 @@ pub struct RdpActiveXHost {
     advise_cookie: u32,
     _event_sink: Option<IUnknown>,
     control_id: String,
+    dynamic_resolution: bool,
 }
 
 impl RdpActiveXHost {
     /// Initialise `atl.dll` et crée la fenêtre conteneur `AtlAxWin` hébergeant le contrôle RDP Microsoft.
     pub fn create(
+        session_id: u32,
         parent_hwnd: HWND,
         x: i32,
         y: i32,
@@ -557,12 +580,13 @@ impl RdpActiveXHost {
                 .FindConnectionPoint(&DIID_IMS_TSC_AX_EVENTS)
                 .map_err(|e| format!("FindConnectionPoint(IMsTscAxEvents) a échoué : {e}"))?;
 
-            let sink_unk = RdpEventSinkComObject::new_com_unknown(parent_hwnd);
+            let sink_unk = RdpEventSinkComObject::new_com_unknown(parent_hwnd, session_id);
             let advise_cookie = cp
                 .Advise(&sink_unk)
                 .map_err(|e| format!("IConnectionPoint::Advise(IMsTscAxEvents) a échoué : {e}"))?;
 
             let host = Self {
+                session_id,
                 parent_hwnd,
                 ax_hwnd: created_hwnd,
                 rdp_client,
@@ -570,10 +594,24 @@ impl RdpActiveXHost {
                 advise_cookie,
                 _event_sink: Some(sink_unk),
                 control_id: active_control_id,
+                dynamic_resolution: true,
             };
 
             host.configure_defaults()?;
             Ok(host)
+        }
+    }
+
+    /// Retourne l'identifiant interne de la session RDP.
+    pub fn session_id(&self) -> u32 {
+        self.session_id
+    }
+
+    /// Affiche ou masque la fenêtre conteneur ActiveX (changement d'onglet sans détruire la session).
+    pub fn set_visible(&self, visible: bool) {
+        use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW, ShowWindow};
+        unsafe {
+            let _ = ShowWindow(self.ax_hwnd, if visible { SW_SHOW } else { SW_HIDE });
         }
     }
 
@@ -693,10 +731,12 @@ impl RdpActiveXHost {
     }
 
     /// Lance une connexion RDP vers l'hôte configuré.
-    pub fn connect(&self, config: &RdpConnectionConfig) -> Result<(), String> {
+    pub fn connect(&mut self, config: &RdpConnectionConfig) -> Result<(), String> {
         if self.is_active() {
             return Err("Une session RDP est déjà active ou en cours de connexion.".to_string());
         }
+
+        self.dynamic_resolution = config.dynamic_resolution;
 
         unsafe {
             // 1. Server (oVft = 56)
@@ -730,18 +770,16 @@ impl RdpActiveXHost {
                     config.host, config.port
                 ),
             );
-            let _ = self.put_bstr(
-                &self.rdp_client,
-                104,
-                "Aucune session RDP active. Saisissez un hôte et cliquez sur Connecter.",
-            );
+            let _ = self.put_bstr(&self.rdp_client, 104, "Session RDP terminée.");
 
-            // 6. Configuration avancée (Port RDP, NLA, SmartSizing, Mot de passe)
+            // 6. Configuration avancée (Port RDP, NLA, SmartSizing, Presse-papiers, Mot de passe)
             if let Some(adv) = self.advanced_settings8() {
                 // RDPPort (oVft = 280)
                 let _ = self.put_i32(&adv, 280, i32::from(config.port));
                 // SmartSizing (oVft = 832)
-                let _ = self.put_bool(&adv, 832, true);
+                let _ = self.put_bool(&adv, 832, config.dynamic_resolution);
+                // RedirectClipboard (oVft = 1192)
+                let _ = self.put_bool(&adv, 1192, config.redirect_clipboard);
                 // EnableCredSspSupport (oVft = 1384)
                 let _ = self.put_bool(&adv, 1384, true);
                 // AuthenticationLevel (oVft = 1176) -> 2 (avertissement certificat standard Windows)
@@ -816,7 +854,7 @@ impl RdpActiveXHost {
             let _ = MoveWindow(self.ax_hwnd, x, y, w, h, true);
 
             let state = self.connection_state();
-            if state == 1 {
+            if state == 1 && self.dynamic_resolution {
                 // Connecté : tenter UpdateSessionDisplaySettings (oVft = 552 sur IMsRdpClient9)
                 // pour adapter dynamiquement le bureau distant (avec SmartSizing en secours automatique)
                 type UpdateDisplayFn = unsafe extern "system" fn(
@@ -1108,7 +1146,7 @@ mod tests {
     #[test]
     fn test_sink_responds_to_diid_ims_tsc_ax_events() {
         unsafe {
-            let sink = RdpEventSinkComObject::new_com_unknown(HWND::default());
+            let sink = RdpEventSinkComObject::new_com_unknown(HWND::default(), 7);
             let mut out_ptr: *mut c_void = std::ptr::null_mut();
 
             // Vérifier que QueryInterface accepte DIID_IMS_TSC_AX_EVENTS
@@ -1158,10 +1196,11 @@ mod tests {
             )
             .expect("Création fenêtre parente de test");
 
-            let host = RdpActiveXHost::create(parent, 0, 0, 800, 600)
+            let host = RdpActiveXHost::create(1, parent, 0, 0, 800, 600)
                 .expect("Instanciation du contrôle ActiveX MsTscAx.dll");
 
             assert!(!host.hwnd().is_invalid());
+            assert_eq!(host.session_id(), 1);
             // Le cookie d'abonnement IConnectionPoint::Advise(IMsTscAxEvents) DOIT être non nul
             assert_ne!(
                 host.advise_cookie(),
