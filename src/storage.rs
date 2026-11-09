@@ -15,7 +15,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const CURRENT_SCHEMA_VERSION: i32 = 2;
+const CURRENT_SCHEMA_VERSION: i32 = 3;
 
 pub struct Storage {
     conn: Connection,
@@ -186,7 +186,7 @@ impl Storage {
                 ("max_recent_connections", "10"),
                 ("rdp_default_clipboard", "1"),
                 ("rdp_default_dynamic_resolution", "1"),
-                ("rdp_keyboard_hook_mode", "fullscreen_only"),
+                ("rdp_keyboard_hook_mode", "remote"),
             ];
             for (k, v) in default_pairs {
                 tx.execute(
@@ -201,6 +201,39 @@ impl Storage {
 
             tx.commit()
                 .map_err(|e| format!("Échec de validation de la migration SQLite v2 : {e}"))?;
+        }
+
+        if version < 3 {
+            let now = unix_timestamp();
+            let tx = self
+                .conn
+                .transaction()
+                .map_err(|e| format!("Échec d'ouverture de transaction de migration v3 : {e}"))?;
+
+            // Si la base v2 contenait l'ancienne valeur préparée 'fullscreen_only', mettre à jour vers 'remote' (Jalon 3)
+            let _ = tx.execute(
+                "UPDATE settings SET value = 'remote', updated_at = ?1 WHERE key = 'rdp_keyboard_hook_mode' AND value = 'fullscreen_only'",
+                params![now],
+            );
+
+            let default_pairs = [
+                ("anydesk_path", ""),
+                ("rustdesk_path", ""),
+                ("rdp_keyboard_hook_mode", "remote"),
+            ];
+            for (k, v) in default_pairs {
+                tx.execute(
+                    "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)",
+                    params![k, v, now],
+                )
+                .map_err(|e| format!("Échec initialisation préférence '{k}' (v3) : {e}"))?;
+            }
+
+            tx.execute_batch("PRAGMA user_version = 3;")
+                .map_err(|e| format!("Échec mise à jour user_version = 3 : {e}"))?;
+
+            tx.commit()
+                .map_err(|e| format!("Échec de validation de la migration SQLite v3 : {e}"))?;
         }
 
         if version > CURRENT_SCHEMA_VERSION {
@@ -1125,10 +1158,25 @@ mod tests {
     #[test]
     fn test_schema_migration_and_settings() {
         let mut store = Storage::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 2);
+        assert_eq!(store.schema_version().unwrap(), 3);
         assert_eq!(
             store.get_setting("theme_mode").unwrap().as_deref(),
             Some("dark")
+        );
+        assert_eq!(
+            store
+                .get_setting("rdp_keyboard_hook_mode")
+                .unwrap()
+                .as_deref(),
+            Some("remote")
+        );
+        assert_eq!(
+            store.get_setting("anydesk_path").unwrap().as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            store.get_setting("rustdesk_path").unwrap().as_deref(),
+            Some("")
         );
 
         store.set_setting("sidebar_width", "280").unwrap();

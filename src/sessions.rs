@@ -25,6 +25,7 @@ use crate::rdp::{
     RdpConnectionConfig,
 };
 use crate::security::SecretString;
+use crate::settings::RdpKeyboardHookMode;
 use windows::Win32::Foundation::{HWND, RECT};
 
 /// État courant d'un onglet de session RDP.
@@ -129,6 +130,7 @@ impl SessionManager {
         viewport: RECT,
         conn: &ConnectionItem,
         decrypted_password: Option<SecretString>,
+        keyboard_hook_mode: RdpKeyboardHookMode,
     ) -> Result<u32, String> {
         let session_id = self.next_session_id;
         self.next_session_id = self.next_session_id.wrapping_add(1).max(1);
@@ -155,6 +157,8 @@ impl SessionManager {
             height: height as u32,
             dynamic_resolution: conn.dynamic_resolution,
             redirect_clipboard: conn.redirect_clipboard,
+            redirect_drives: conn.redirect_clipboard,
+            keyboard_hook_mode,
         };
 
         let connect_res = host.connect(&cfg);
@@ -266,6 +270,39 @@ impl SessionManager {
         if let Some(active) = self.active_tab_mut() {
             active.host.resize(x, y, w, h);
         }
+    }
+
+    /// Envoie Ctrl + Alt + Suppr à la session RDP active via l'API officielle SendKeys.
+    pub fn send_cad_to_active(&self) -> Result<(), String> {
+        let Some(tab) = self.active_tab() else {
+            return Err("Aucun onglet RDP actif pour envoyer Ctrl + Alt + Suppr.".to_string());
+        };
+        tab.host.send_cad()
+    }
+
+    /// Envoie Ctrl + Alt + Fin à la session RDP active (invoque l'écran de sécurité distant sous RDP).
+    pub fn send_ctrl_alt_end_to_active(&self) -> Result<(), String> {
+        let Some(tab) = self.active_tab() else {
+            return Err("Aucun onglet RDP actif pour envoyer Ctrl + Alt + Fin.".to_string());
+        };
+        tab.host.send_ctrl_alt_end()
+    }
+
+    /// Bascule la session RDP active entre mode plein écran et fenêtré.
+    pub fn toggle_active_fullscreen(&mut self) -> Result<bool, String> {
+        let Some(tab) = self.active_tab() else {
+            return Err("Aucun onglet RDP actif pour basculer le plein écran.".to_string());
+        };
+        let new_state = !tab.host.is_full_screen();
+        tab.host.set_full_screen(new_state)?;
+        Ok(new_state)
+    }
+
+    /// Indique si la session RDP active est actuellement en plein écran.
+    pub fn is_active_fullscreen(&self) -> bool {
+        self.active_tab()
+            .map(|t| t.host.is_full_screen())
+            .unwrap_or(false)
     }
 
     /// Traite un événement COM `IMsTscAxEvents` reçu pour `session_id` et ferme automatiquement

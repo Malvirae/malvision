@@ -28,6 +28,8 @@ const KEY_RDP_DEFAULT_CLIPBOARD: &str = "rdp_default_clipboard";
 const KEY_RDP_DEFAULT_DYNAMIC_RES: &str = "rdp_default_dynamic_resolution";
 const KEY_RDP_KEYBOARD_HOOK_MODE: &str = "rdp_keyboard_hook_mode";
 const KEY_RESTORABLE_RDP_IDS: &str = "restorable_rdp_connection_ids";
+const KEY_ANYDESK_PATH: &str = "anydesk_path";
+const KEY_RUSTDESK_PATH: &str = "rustdesk_path";
 
 pub const DEFAULT_SIDEBAR_WIDTH: i32 = 260;
 pub const MIN_SIDEBAR_WIDTH: i32 = 200;
@@ -211,8 +213,24 @@ impl RdpKeyboardHookMode {
     pub fn from_db_str(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
             "local" => Self::OnLocal,
-            "remote" => Self::OnRemote,
-            _ => Self::InFullScreenOnly,
+            "fullscreen_only" => Self::InFullScreenOnly,
+            _ => Self::OnRemote,
+        }
+    }
+
+    pub fn to_combo_index(self) -> usize {
+        match self {
+            Self::OnRemote => 0,
+            Self::OnLocal => 1,
+            Self::InFullScreenOnly => 2,
+        }
+    }
+
+    pub fn from_combo_index(idx: usize) -> Self {
+        match idx {
+            1 => Self::OnLocal,
+            2 => Self::InFullScreenOnly,
+            _ => Self::OnRemote,
         }
     }
 }
@@ -252,6 +270,8 @@ pub struct AppSettings {
     pub rdp_default_dynamic_resolution: bool,
     pub rdp_keyboard_hook_mode: RdpKeyboardHookMode,
     pub restorable_rdp_connection_ids: Vec<i64>,
+    pub anydesk_path: String,
+    pub rustdesk_path: String,
 }
 
 impl Default for AppSettings {
@@ -268,8 +288,10 @@ impl Default for AppSettings {
             max_recent_connections: DEFAULT_MAX_RECENT_CONNECTIONS,
             rdp_default_clipboard: true,
             rdp_default_dynamic_resolution: true,
-            rdp_keyboard_hook_mode: RdpKeyboardHookMode::InFullScreenOnly,
+            rdp_keyboard_hook_mode: RdpKeyboardHookMode::OnRemote,
             restorable_rdp_connection_ids: Vec::new(),
+            anydesk_path: String::new(),
+            rustdesk_path: String::new(),
         }
     }
 }
@@ -382,6 +404,18 @@ impl AppSettings {
             })
             .unwrap_or_default();
 
+        let anydesk_path = storage
+            .get_setting(KEY_ANYDESK_PATH)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
+        let rustdesk_path = storage
+            .get_setting(KEY_RUSTDESK_PATH)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
         Self {
             sidebar_width,
             theme_mode,
@@ -396,6 +430,8 @@ impl AppSettings {
             rdp_default_dynamic_resolution,
             rdp_keyboard_hook_mode,
             restorable_rdp_connection_ids,
+            anydesk_path,
+            rustdesk_path,
         }
     }
 
@@ -469,6 +505,8 @@ impl AppSettings {
             KEY_RDP_KEYBOARD_HOOK_MODE,
             self.rdp_keyboard_hook_mode.as_str(),
         )?;
+        storage.set_setting(KEY_ANYDESK_PATH, &self.anydesk_path)?;
+        storage.set_setting(KEY_RUSTDESK_PATH, &self.rustdesk_path)?;
         Ok(())
     }
 
@@ -734,6 +772,12 @@ mod tests {
         assert_eq!(settings.max_recent_connections, 10);
         assert!(settings.rdp_default_clipboard);
         assert!(settings.rdp_default_dynamic_resolution);
+        assert_eq!(
+            settings.rdp_keyboard_hook_mode,
+            RdpKeyboardHookMode::OnRemote
+        );
+        assert_eq!(settings.anydesk_path, "");
+        assert_eq!(settings.rustdesk_path, "");
 
         // Modifier toutes les préférences et sauvegarder
         settings.theme_mode = ThemeMode::Light;
@@ -746,11 +790,26 @@ mod tests {
         settings.max_recent_connections = 25;
         settings.rdp_default_clipboard = false;
         settings.rdp_default_dynamic_resolution = false;
+        settings.rdp_keyboard_hook_mode = RdpKeyboardHookMode::OnLocal;
+        settings.anydesk_path = r"C:\Program Files (x86)\AnyDesk\AnyDesk.exe".to_string();
+        settings.rustdesk_path = r"C:\Program Files\RustDesk\rustdesk.exe".to_string();
         settings.save_all(&mut store).unwrap();
         settings.save_restorable_rdp_sessions(&mut store, &[10, 20, 10]);
 
         let reloaded = AppSettings::load(&store);
         assert_eq!(reloaded.theme_mode, ThemeMode::Light);
+        assert_eq!(
+            reloaded.rdp_keyboard_hook_mode,
+            RdpKeyboardHookMode::OnLocal
+        );
+        assert_eq!(
+            reloaded.anydesk_path,
+            r"C:\Program Files (x86)\AnyDesk\AnyDesk.exe"
+        );
+        assert_eq!(
+            reloaded.rustdesk_path,
+            r"C:\Program Files\RustDesk\rustdesk.exe"
+        );
         assert_eq!(reloaded.resolved_theme(), ResolvedTheme::Light);
         assert!(reloaded.close_to_tray);
         assert!(reloaded.start_minimized_to_tray);

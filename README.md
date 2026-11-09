@@ -2,27 +2,56 @@
 
 Application native **Windows 11 x64** de gestion de connexions distantes, écrite en **Rust** avec `windows-rs` (Win32 natif + COM/ActiveX + SQLite embarqué + DPAPI).
 
-## Vision et fonctionnalités (Jalons 2, 2B & 2C)
+## Vision et fonctionnalités (Jalons 1 à 3)
 
+- **Intégration externe native d'AnyDesk et RustDesk (Jalon 3)** :
+  - **Gestion centralisée dans Paramètres > Applications externes** :
+    - Chemins configurables vers `AnyDesk.exe` et `rustdesk.exe`.
+    - Bouton **Parcourir...** exploitant le sélecteur standard moderne Windows (`IFileOpenDialog` avec filtre `*.exe`).
+    - Bouton **Détecter** scannant automatiquement le Registre Windows (`HKLM`/`HKCU` `App Paths`) et les dossiers standards (`Program Files`, `Program Files (x86)`, `APPDATA`, `LOCALAPPDATA`).
+    - Bouton **Tester** exécutant l'application pour valider le binaire en toute sécurité.
+    - Persistance SQLite dans la table `settings` (schéma v3).
+  - **Lancement sécurisé des sessions distantes** :
+    - Exécution exclusive via l'API Win32 native `CreateProcessW` sans intermédiaire shell (`cmd.exe` ou PowerShell), protégeant contre toute injection d'arguments.
+    - Assainissement strict des identifiants distants (`[a-zA-Z0-9_\-\.@\s]`), rejetant immédiatement tout caractère de contrôle, guillemet ou redirection.
+    - Ligne de commande UTF-16 normalisée : `"<chemin>"` pour AnyDesk et `"<chemin>" --connect "<id>"` pour RustDesk.
+    - Aucun mot de passe n'est jamais passé en ligne de commande : l'authentification et l'affichage restent intégralement délégués aux clients officiels.
+    - Aucun faux onglet RDP n'est ouvert pour les outils tiers.
+- **RDP Avancé — Raccourcis Windows (`KeyboardHookMode`)** :
+  - Propriété COM Microsoft `IMsRdpClientSecuredSettings2::put_KeyboardHookMode` configurée avant connexion :
+    - `0` : Raccourcis exécutés sur le poste local.
+    - `1` : Raccourcis envoyés à la session distante (**défaut recommandé**).
+    - `2` : Raccourcis envoyés à distance uniquement en plein écran.
+  - Fonctionnement vérifié avec `Win+R`, `Win+E`, `Win+D`, `Alt+Tab`, `Alt+F4`, `Ctrl+C` et `Ctrl+V`.
+  - Transfert de focus fluide et documentation claire des limites imposées par Windows (le raccourci noyau SAS Ctrl+Alt+Suppr ne pouvant être détourné en mode fenêtre, Malvision utilise l'injection COM dédiée).
+- **RDP Avancé — Menu d'actions de session active** :
+  - Menu contextuel accessible via le bouton d'action `⚡` sur l'onglet actif RDP ainsi que par clic droit sur l'onglet :
+    - 🔒 **Envoyer Ctrl + Alt + Suppr** : injecté directement dans le flux RDP via `IMsRdpClientNonScriptable::SendKeys`.
+    - 🛡️ **Envoyer Ctrl + Alt + Fin** : équivalent standard RDP injecté via `IMsRdpClientNonScriptable::SendKeys`.
+    - 🔲 **Basculer / Quitter le mode plein écran** : pilotage COM officiel via `IMsRdpClient9::put_FullScreen` / `get_FullScreen`.
+    - ❌ **Fermer / Déconnecter la session** : fermeture propre avec confirmation et libération ActiveX.
+- **RDP Avancé — Redirection presse-papiers et copie de fichiers** :
+  - Redirection du presse-papiers texte/images (`RedirectClipboard`).
+  - Activation de la redirection de disques (`IMsRdpClientAdvancedSettings8::put_RedirectDrives`) liée au partage du presse-papiers, permettant la copie/collage natif de fichiers entre l'hôte et la session distante via l'Explorateur Windows.
 - **Thèmes visuels dynamiques Windows 11 (Sombre / Clair / Système)** :
   - **Thème sombre** par défaut : anthracite profond (`#16181B`), barre de titre sombre DWM (`DWMWA_USE_IMMERSIVE_DARK_MODE`), typographie `Segoe UI`, rendu GDI double-bufferisé sans scintillement et prise en charge HiDPI Per-Monitor V2 (`DpiMetrics` 100 % / 125 % / 150 %).
   - **Thème clair** haute lisibilité : fond blanc pur (`#FFFFFF`), panneau latéral gris-bleu Fluent (`#F3F5F9`), bordures douces et contrastes optimisés, sans inversion brutale.
   - **Thème système** : synchronisation automatique et dynamique avec les préférences Windows 11 (`AppsUseLightTheme`).
   - Application immédiate du thème sans redémarrage requis sur l'ensemble de l'interface (panneau principal, TreeView, dialogues, formulaires, menus).
 - **Centre de Paramètres complet & persistant** :
-  - Bouton **Paramètres** élégant avec icône vectorielle d'engrenage au bas du volet latéral gauche.
-  - Fenêtre de réglages dédiée articulée en 4 sections :
+  - Bouton **Paramètres** avec icône vectorielle d'engrenage au bas du volet latéral gauche.
+  - Fenêtre de réglages dédiée articulée en 5 sections :
     - **Apparence** : sélection du mode de thème (Sombre / Clair / Système).
     - **Comportement & System Tray** : fermeture vers la zone de notification, démarrage minimisé, confirmation avant fermeture en présence de sessions actives, restauration des sessions RDP au lancement.
     - **Démarrage avec Windows** : activation/désactivation immédiate d'un raccourci utilisateur `.lnk` (`Malvision.lnk`) dans le dossier Startup (`FOLDERID_Startup`, `IShellLinkW` + `IPersistFile`), sans droits administrateur, avec détection de déplacement et réparation automatique de la cible vers l'exécutable réel.
     - **Accueil** : affichage optionnel et nombre maximal paramétrable (1 à 50, défaut 10) des connexions récentes.
-    - **Options RDP par défaut** : partage du presse-papiers et ajustement automatique de la résolution (SmartSizing).
+    - **Options RDP par défaut** : presse-papiers, SmartSizing et mode des raccourcis Windows (`KeyboardHookMode`).
+    - **Applications externes** : configuration, détection et tests d'exécutables pour AnyDesk et RustDesk.
 - **Intégration Windows System Tray (`Shell_NotifyIconW`)** :
-  - Véritable icône Malvision intégrée en mémoire (générée dynamiquement via GDI DIBSection sans dépendance à un fichier `.ico` externe).
+  - Icône Malvision générée dynamiquement en mémoire (aucune dépendance externe `.ico`).
   - Double-clic pour restaurer et amener Malvision au premier plan.
-  - Menu contextuel standard (*Ouvrir Malvision*, *Quitter Malvision*).
-  - Prise en charge du message `TaskbarCreated` pour restaurer automatiquement l'icône en cas de redémarrage d'Explorer.
-  - Masquage transparent de la fenêtre lors du clic sur la croix `[X]` si l'option est activée, maintenant actives les sessions RDP en arrière-plan.
+  - Prise en charge du message `TaskbarCreated` pour restaurer l'icône lors du redémarrage d'Explorer.
+  - Masquage transparent de la fenêtre lors du clic sur la croix `[X]` si activé, conservant actives les sessions distantes.
 - **Cycle de vie et qualité d'expérience RDP** :
   - **Fermeture automatique des onglets déconnectés** : déconnexion volontaire, fermeture de session Windows distante ou rupture réseau confirmée ferment immédiatement l'onglet, libèrent proprement les ressources ActiveX et reviennent à un autre onglet ou à l'Accueil.
   - **Maintien pendant la reconnexion automatique** : aucune fermeture intempestive en phase de reconnexion réseau (`AutoReconnecting`).
@@ -32,21 +61,19 @@ Application native **Windows 11 x64** de gestion de connexions distantes, écrit
   - Panneau latéral redimensionnable avec recherche instantanée, favoris, arborescence `TreeView` multi-niveaux à rendu propriétaire `NM_CUSTOMDRAW`, badges de protocoles vectoriels (`RDP`, `ANY`, `RST`) et glisser-déposer anti-cycle.
   - Sessions RDP multiples fonctionnant simultanément dans des onglets dédiés.
   - Chiffrement matériel local des mots de passe par Windows DPAPI (`CryptProtectData`).
-- **Distribution portable** : un unique exécutable `Malvision.exe` autonome d'environ 2,4 Mo, sans moteur web lourd (ni Electron ni WebView2).
+- **Distribution portable** : un unique exécutable `Malvision.exe` autonome d'environ 2,4 Mo, sans runtime web lourd (ni Electron ni WebView2).
 
 ## Architecture technique
 
-- [`src/main.rs`](src/main.rs) : Point d'entrée Windows (`windows_subsystem = "windows"`), activation HiDPI Per-Monitor V2 (`SetProcessDpiAwarenessContext`), initialisation COM/OLE STA (`OleInitialize`), initialisation des contrôles communs (`InitCommonControlsEx`) et lancement de l'application.
-- [`src/models.rs`](src/models.rs) : Modèles de données (`Protocol`, `Folder`, `ConnectionItem`, `ConnectionDraft`, `RecentConnectionEntry`) et validation stricte des entrées (hôte/IP/ID, plage de ports `1..=65535`, normalisation `DOMAINE\utilisateur`).
-- [`src/security.rs`](src/security.rs) : Chiffrement et déchiffrement des mots de passe via **Windows DPAPI** (`CryptProtectData` / `CryptUnprotectData` sous contexte utilisateur courant avec entropie applicative dédiée) et conteneur `SecretString` avec effacement mémoire volatil (`write_volatile`) automatique sur `Drop`.
-- [`src/storage.rs`](src/storage.rs) : Persistance locale **SQLite** embarquée (`rusqlite` avec fonctionnalité `bundled`) stockée dans `%LOCALAPPDATA%\Malvision\malvision.db` :
-  - Tables : `folders`, `connections`, `recent_connections`, `settings`.
-  - Migrations de schéma versionnées (`PRAGMA user_version = 2`), initialisation des préférences utilisateur, intégrité référentielle (`PRAGMA foreign_keys = ON`), journalisation `WAL`, vérification d'intégrité à l'ouverture (`PRAGMA quick_check`) sans écrasement silencieux en cas de corruption.
-  - Détection et blocage des cycles hiérarchiques de dossiers (`would_create_folder_cycle`).
-- [`src/settings.rs`](src/settings.rs) : Modèle et persistance de toutes les préférences de l'application (largeur du volet, mode de thème, comportement du System Tray, confirmation de fermeture, restauration de session, intégration Startup Windows via `IShellLinkW`, nombre de connexions récentes, options RDP par défaut).
-- [`src/rdp.rs`](src/rdp.rs) : Hébergement ActiveX natif via `atl.dll` (`AtlAxWinInit` / `AtlAxWin` / `AtlAxGetControl`), configuration `IMsRdpClient9` / `IMsRdpClientAdvancedSettings8` / `IMsRdpClientNonScriptable3` (port personnalisé, NLA/CredSSP, résolution dynamique `SmartSizing` + `UpdateSessionDisplaySettings`, partage du presse-papiers `RedirectClipboard`), et sink d'événements COM `IMsTscAxEvents` (`RdpEventSinkComObject`) avec désactivation atomique `deactivate_events` prévenant toute réentrance à la fermeture.
-- [`src/sessions.rs`](src/sessions.rs) : Gestionnaire multi-sessions (`SessionManager`, `RdpSessionTab`) orchestrant l'ouverture, la commutation d'onglets sans destruction des sessions inactives, le redimensionnement, la supervision périodique de l'état réel (`get_Connected`), la fermeture automatique des onglets déconnectés et la libération propre des ressources COM (`Disconnect` + `Unadvise` + `DestroyWindow`).
-- [`src/ui.rs`](src/ui.rs) : Interface graphique Win32/GDI avec thématisation dynamique intégrale (Sombre / Clair / Système), arborescence `TreeView` avec glisser-déposer, recherche dynamique, tableau de bord d'accueil, barre d'onglets multi-sessions, boîte de dialogue des Paramètres, intégration System Tray (`Shell_NotifyIconW`), sous-classement pour la sélection automatique du port (`EM_SETSEL`) et boîtes de dialogue modales sécurisées.
+- [`src/main.rs`](src/main.rs) : Point d'entrée Windows (`windows_subsystem = "windows"`), activation HiDPI Per-Monitor V2, initialisation COM/OLE STA (`OleInitialize`), contrôles communs et boucle principale.
+- [`src/external_apps.rs`](src/external_apps.rs) : Module complet d'intégration pour AnyDesk et RustDesk (détection via Registre et dossiers standards, validation de chemins, assainissement strict des ID distants, génération de lignes de commande UTF-16 sécurisées, création de processus via `CreateProcessW` sans shell, sélecteur de fichier Win32 `IFileOpenDialog`).
+- [`src/models.rs`](src/models.rs) : Modèles de données (`Protocol`, `Folder`, `ConnectionItem`, `ConnectionDraft`, `RecentConnectionEntry`) et validation stricte des entrées.
+- [`src/security.rs`](src/security.rs) : Chiffrement/déchiffrement des mots de passe via Windows DPAPI (`CryptProtectData` / `CryptUnprotectData`) et conteneur mémoire sécurisé `SecretString` à effacement volatil sur `Drop`.
+- [`src/storage.rs`](src/storage.rs) : Persistance locale SQLite embarquée (`malvision.db`) avec schéma v3, tables `folders`, `connections`, `recent_connections`, `settings`, journalisation WAL et intégrité référentielle.
+- [`src/settings.rs`](src/settings.rs) : Modèle et persistance de l'ensemble des réglages applicatifs (chemins AnyDesk/RustDesk, `RdpKeyboardHookMode`, System Tray, thèmes, Startup shortcut).
+- [`src/rdp.rs`](src/rdp.rs) : Hébergement ActiveX natif (`AtlAxWin`), interfaces Microsoft RDP `IMsRdpClient9`, `IMsRdpClientAdvancedSettings8`, `IMsRdpClientSecuredSettings2`, `IMsRdpClientNonScriptable` (`SendKeys` pour Ctrl+Alt+Del et Ctrl+Alt+Fin, `put_FullScreen`, `put_KeyboardHookMode`, `put_RedirectDrives`, `put_RedirectClipboard`), sink d'événements COM avec désactivation atomique.
+- [`src/sessions.rs`](src/sessions.rs) : Gestionnaire multi-sessions (`SessionManager`, `RdpSessionTab`) orchestrant l'ouverture, la commutation d'onglets, la transmission des raccourcis spéciaux de session et la fermeture automatique des onglets déconnectés.
+- [`src/ui.rs`](src/ui.rs) : Interface graphique Win32/GDI avec thématisation dynamique intégrale (Sombre / Clair / Système), arborescence `TreeView`, barre d'onglets avec bouton d'action contextuel `⚡`, menu de session popup, boîte de dialogue des Paramètres (avec sections RDP et Applications externes) et dialogue modal moderne.
 
 ## Stockage local et sécurité DPAPI
 

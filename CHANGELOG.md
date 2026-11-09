@@ -2,6 +2,44 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
+## [Jalon 3] — Intégrations AnyDesk et RustDesk, RDP avancé et actions de session
+
+### Ajouté
+- **Intégration d'AnyDesk** :
+  - Section *Paramètres > Applications externes* avec champ de chemin vers `AnyDesk.exe`.
+  - Bouton **Parcourir...** avec dialogue de sélection de fichier Win32 standard (`IFileOpenDialog` et filtre `*.exe`).
+  - Bouton **Détecter** recherchant automatiquement `AnyDesk.exe` dans le Registre Windows (`HKLM`/`HKCU` `SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths`) et dans les dossiers standards (`Program Files`, `Program Files (x86)`, `APPDATA`, `LOCALAPPDATA`).
+  - Bouton **Tester** démarrant le client pour vérifier le binaire.
+  - Lancement des sessions AnyDesk depuis l'arborescence, les favoris ou l'accueil via l'API Win32 `CreateProcessW` sans intermédiaire shell ni concaténation, avec assainissement strict des ID distants et délégation totale de l'authentification et de la fenêtre à AnyDesk.
+- **Intégration de RustDesk** :
+  - Section *Paramètres > Applications externes* avec champ de chemin vers `rustdesk.exe`.
+  - Bouton **Parcourir...**, **Détecter** et **Tester** dédiés à RustDesk.
+  - Lancement direct de la session avec syntaxe officielle `--connect <id>` via `CreateProcessW`.
+  - Rejet immédiat de toute tentative d'injection d'arguments dans l'identifiant distant.
+- **Raccourcis clavier RDP (`KeyboardHookMode`)** :
+  - Paramètre configurable dans *Paramètres > Options RDP par défaut* :
+    - `0` : Raccourcis exécutés sur le poste local.
+    - `1` : Raccourcis envoyés à la session distante (**défaut recommandé**).
+    - `2` : Raccourcis envoyés à distance uniquement en plein écran.
+  - Programmation COM sur `IMsRdpClientSecuredSettings2::put_KeyboardHookMode` (vtable offset 104) avant connexion.
+  - Prise en charge des combinaisons Windows (`Win+R`, `Win+E`, `Win+D`, `Alt+Tab`, `Alt+F4`, `Ctrl+C`, `Ctrl+V`).
+- **Menu d'actions de session active RDP** :
+  - Bouton d'action contextuel `⚡` intégré sur l'onglet RDP actif et ouverture par clic droit sur l'onglet.
+  - Actions disponibles :
+    - 🔒 **Envoyer Ctrl + Alt + Suppr** via `IMsRdpClientNonScriptable::SendKeys` (vtable offset 112).
+    - 🛡️ **Envoyer Ctrl + Alt + Fin** (équivalent natif RDP) via `IMsRdpClientNonScriptable::SendKeys`.
+    - 🔲 **Basculer en plein écran / Quitter le plein écran** via `IMsRdpClient9::put_FullScreen` / `get_FullScreen`.
+    - ❌ **Fermer / Déconnecter la session** avec libération propre des ressources COM.
+- **Redirection de disques et partage de fichiers RDP** :
+  - Activation de `put_RedirectDrives` (vtable offset 968) sur `IMsRdpClientAdvancedSettings8` couplée au partage de presse-papiers (`RedirectClipboard`), autorisant le copier/coller natif de fichiers entre l'hôte et la session distante.
+- **Migration de base de données SQLite (schéma v3)** :
+  - Ajout des clés `anydesk_path`, `rustdesk_path` et mise à jour de `rdp_keyboard_hook_mode` vers `remote`.
+- **Tests unitaires et d'intégration automatisés (36 tests)** :
+  - `test_sanitize_remote_id_accepts_valid_ids` et `test_sanitize_remote_id_rejects_empty_and_injections`.
+  - `test_validate_executable_path_checks_existence_and_extension`.
+  - `test_build_anydesk_command_line_encoding` et `test_build_rustdesk_command_line_encoding`.
+  - `test_ui_rdp_session_menu_actions_and_external_app_launch_wiring` : validation des actions de session et du routage sans crash.
+
 ## [Jalon 2C] — Finitions UX, Thèmes Sombre/Clair/Système, Paramètres persistants, System Tray et gestion des sessions RDP
 
 ### Ajouté

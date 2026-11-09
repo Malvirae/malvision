@@ -90,6 +90,8 @@ const RDP_CONTROL_IDENTIFIERS: &[PCWSTR] = &[
 type AtlAxWinInitFn = unsafe extern "system" fn() -> i32;
 type AtlAxGetControlFn = unsafe extern "system" fn(HWND, *mut Option<IUnknown>) -> HRESULT;
 
+use crate::settings::RdpKeyboardHookMode;
+
 /// Paramètres de connexion RDP fournis par l'utilisateur ou le gestionnaire de connexions.
 #[derive(Debug, Clone)]
 pub struct RdpConnectionConfig {
@@ -102,6 +104,8 @@ pub struct RdpConnectionConfig {
     pub height: u32,
     pub dynamic_resolution: bool,
     pub redirect_clipboard: bool,
+    pub redirect_drives: bool,
+    pub keyboard_hook_mode: RdpKeyboardHookMode,
 }
 
 /// Analyse une chaîne d'hôte (`ip`, `dns`, `ip:port`, `[ipv6]:port`) et retourne `(host, port)`.
@@ -785,6 +789,8 @@ impl RdpActiveXHost {
                 let _ = self.put_bool(&adv, 832, config.dynamic_resolution);
                 // RedirectClipboard (oVft = 1192)
                 let _ = self.put_bool(&adv, 1192, config.redirect_clipboard);
+                // RedirectDrives (oVft = 968) -> active le copier-coller de fichiers via le presse-papiers RDP
+                let _ = self.put_bool(&adv, 968, config.redirect_drives);
                 // EnableCredSspSupport (oVft = 1384)
                 let _ = self.put_bool(&adv, 1384, true);
                 // AuthenticationLevel (oVft = 1176) -> 2 (avertissement certificat standard Windows)
@@ -794,6 +800,17 @@ impl RdpActiveXHost {
                     // ClearTextPassword sur IMsRdpClientAdvancedSettings (oVft = 896)
                     let _ = self.put_bstr(&adv, 896, &config.password);
                 }
+            }
+
+            // 6b. Configuration de la capture des raccourcis clavier (KeyboardHookMode)
+            if let Some(secured) = self.secured_settings2() {
+                let mode_val: i32 = match config.keyboard_hook_mode {
+                    RdpKeyboardHookMode::OnLocal => 0,
+                    RdpKeyboardHookMode::OnRemote => 1,
+                    RdpKeyboardHookMode::InFullScreenOnly => 2,
+                };
+                // put_KeyboardHookMode (oVft = 104)
+                let _ = self.put_i32(&secured, 104, mode_val);
             }
 
             // 7. Configuration IMsRdpClientNonScriptable3 (mot de passe ou demande d'identifiants Windows)
@@ -980,6 +997,135 @@ impl RdpActiveXHost {
                 return Some(IUnknown::from_raw(qi_ptr));
             }
             None
+        }
+    }
+
+    unsafe fn secured_settings2(&self) -> Option<IUnknown> {
+        unsafe {
+            // get_SecuredSettings2 est à oVft = 320 sur IMsRdpClient9
+            type GetSecuredSettings2Fn =
+                unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT;
+            let func: GetSecuredSettings2Fn =
+                std::mem::transmute(vtable_entry(&self.rdp_client, 320));
+            let mut ptr: *mut c_void = std::ptr::null_mut();
+            if func(self.rdp_client.as_raw(), &mut ptr) == S_OK && !ptr.is_null() {
+                return Some(IUnknown::from_raw(ptr));
+            }
+
+            // Repli sur get_SecuredSettings à oVft = 240
+            type GetSecuredSettingsFn =
+                unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT;
+            let func2: GetSecuredSettingsFn =
+                std::mem::transmute(vtable_entry(&self.rdp_client, 240));
+            let mut ptr2: *mut c_void = std::ptr::null_mut();
+            if func2(self.rdp_client.as_raw(), &mut ptr2) == S_OK && !ptr2.is_null() {
+                return Some(IUnknown::from_raw(ptr2));
+            }
+            None
+        }
+    }
+
+    /// Envoie une séquence de touches au contrôle RDP via l'API officielle `IMsRdpClientNonScriptable::SendKeys`.
+    pub fn send_keys(
+        &self,
+        keys: &[(
+            windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
+            bool,
+        )],
+    ) -> Result<(), String> {
+        if !self.is_active() {
+            return Err("Aucune session RDP active pour envoyer les touches.".to_string());
+        }
+        unsafe {
+            if let Some(non_scriptable) = self.non_scriptable3() {
+                // SendKeys est à oVft = 112 sur IMsRdpClientNonScriptable
+                type SendKeysFn =
+                    unsafe extern "system" fn(*mut c_void, i32, *const i16, *const i32) -> HRESULT;
+                let func: SendKeysFn = std::mem::transmute(vtable_entry(&non_scriptable, 112));
+                let num_keys = keys.len() as i32;
+                let mut up_array: Vec<i16> = Vec::with_capacity(keys.len());
+                let mut key_data: Vec<i32> = Vec::with_capacity(keys.len());
+                for (vk, is_up) in keys {
+                    up_array.push(if *is_up { -1 } else { 0 }); // VARIANT_TRUE / VARIANT_FALSE
+                    key_data.push(vk.0 as i32);
+                }
+                let hr = func(
+                    non_scriptable.as_raw(),
+                    num_keys,
+                    up_array.as_ptr(),
+                    key_data.as_ptr(),
+                );
+                if hr == S_OK {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "IMsRdpClientNonScriptable::SendKeys a échoué (HRESULT 0x{:08X}).",
+                        hr.0 as u32
+                    ))
+                }
+            } else {
+                Err("Interface IMsRdpClientNonScriptable3 indisponible.".to_string())
+            }
+        }
+    }
+
+    /// Envoie la combinaison Ctrl + Alt + Suppr à la session distante via `SendKeys`.
+    pub fn send_cad(&self) -> Result<(), String> {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_DELETE, VK_MENU};
+        let sequence = [
+            (VK_CONTROL, false),
+            (VK_MENU, false),
+            (VK_DELETE, false),
+            (VK_DELETE, true),
+            (VK_MENU, true),
+            (VK_CONTROL, true),
+        ];
+        self.send_keys(&sequence)
+    }
+
+    /// Envoie la combinaison Ctrl + Alt + Fin (équivalent standard RDP de SAS pour invoquer l'écran de sécurité distant).
+    pub fn send_ctrl_alt_end(&self) -> Result<(), String> {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_END, VK_MENU};
+        let sequence = [
+            (VK_CONTROL, false),
+            (VK_MENU, false),
+            (VK_END, false),
+            (VK_END, true),
+            (VK_MENU, true),
+            (VK_CONTROL, true),
+        ];
+        self.send_keys(&sequence)
+    }
+
+    /// Bascule la session RDP en mode plein écran ou fenêtré (`put_FullScreen` à oVft = 336 sur `IMsRdpClient9`).
+    pub fn set_full_screen(&self, full_screen: bool) -> Result<(), String> {
+        unsafe {
+            type PutFullScreenFn = unsafe extern "system" fn(*mut c_void, i16) -> HRESULT;
+            let func: PutFullScreenFn = std::mem::transmute(vtable_entry(&self.rdp_client, 336));
+            let val: i16 = if full_screen { -1 } else { 0 };
+            let hr = func(self.rdp_client.as_raw(), val);
+            if hr == S_OK {
+                Ok(())
+            } else {
+                Err(format!(
+                    "put_FullScreen({full_screen}) a retourné HRESULT 0x{:08X}.",
+                    hr.0 as u32
+                ))
+            }
+        }
+    }
+
+    /// Indique si la session est actuellement en mode plein écran (`get_FullScreen` à oVft = 344 sur `IMsRdpClient9`).
+    pub fn is_full_screen(&self) -> bool {
+        unsafe {
+            type GetFullScreenFn = unsafe extern "system" fn(*mut c_void, *mut i16) -> HRESULT;
+            let func: GetFullScreenFn = std::mem::transmute(vtable_entry(&self.rdp_client, 344));
+            let mut val: i16 = 0;
+            if func(self.rdp_client.as_raw(), &mut val) == S_OK {
+                val != 0
+            } else {
+                false
+            }
         }
     }
 

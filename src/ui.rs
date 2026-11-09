@@ -7,8 +7,8 @@ use crate::rdp::{WM_RDP_EVENT, unpack_rdp_event_wparam};
 use crate::security::SecretString;
 use crate::sessions::{SessionManager, SessionStatus};
 use crate::settings::{
-    AppSettings, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, ResolvedTheme, ThemeMode,
-    apply_startup_shortcut, sync_settings_with_real_startup_shortcut,
+    AppSettings, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, RdpKeyboardHookMode, ResolvedTheme,
+    ThemeMode, apply_startup_shortcut, sync_settings_with_real_startup_shortcut,
 };
 use crate::storage::Storage;
 use std::collections::HashMap;
@@ -229,6 +229,12 @@ const CMD_CTX_DELETE: u32 = 3007;
 const CMD_CTX_NEW_CONN_HERE: u32 = 3008;
 const CMD_CTX_NEW_SUBFOLDER: u32 = 3009;
 
+// Commandes du menu d'actions de session active RDP
+const CMD_SESSION_CAD: u32 = 3201;
+const CMD_SESSION_CTRL_ALT_END: u32 = 3202;
+const CMD_SESSION_FULLSCREEN: u32 = 3203;
+const CMD_SESSION_DISCONNECT: u32 = 3204;
+
 /// Métriques de mise à l'échelle DPI (100 % = 96 DPI, 125 % = 120 DPI, 150 % = 144 DPI).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DpiMetrics {
@@ -315,6 +321,7 @@ enum InteractiveZone {
     BtnSettings,
     TabSelect(u32),
     TabClose(u32),
+    TabActions(u32),
     TabNewConnection,
     HomeCardConnect(i64),
     HomeCardEdit(i64),
@@ -1987,18 +1994,6 @@ impl AppWindowState {
                     }),
                 );
 
-                let tab_label = format!("{} {}", proto.badge_prefix(), title);
-                draw_text_line(
-                    hdc,
-                    &tab_label,
-                    RECT {
-                        left: tab_rc.left + 24,
-                        top: tab_rc.top,
-                        right: tab_rc.right - 30,
-                        bottom: tab_rc.bottom,
-                    },
-                );
-
                 // Bouton de fermeture d'onglet "×"
                 let close_rc = RECT {
                     left: tab_rc.right - 26,
@@ -2006,6 +2001,55 @@ impl AppWindowState {
                     right: tab_rc.right - 6,
                     bottom: tab_rc.bottom - 5,
                 };
+
+                // Bouton d'actions de session pour l'onglet actif RDP (menu Ctrl+Alt+Del, plein écran...)
+                let (actions_rc, text_right) = if is_active && proto == Protocol::Rdp {
+                    let act_rc = RECT {
+                        left: tab_rc.right - 48,
+                        top: tab_rc.top + 6,
+                        right: tab_rc.right - 28,
+                        bottom: tab_rc.bottom - 5,
+                    };
+                    (Some(act_rc), act_rc.left - 4)
+                } else {
+                    (None, close_rc.left - 4)
+                };
+
+                let tab_label = format!("{} {}", proto.badge_prefix(), title);
+                draw_text_line(
+                    hdc,
+                    &tab_label,
+                    RECT {
+                        left: tab_rc.left + 24,
+                        top: tab_rc.top,
+                        right: text_right,
+                        bottom: tab_rc.bottom,
+                    },
+                );
+
+                if let Some(act_rc) = actions_rc {
+                    let is_act_hover = self.hovered_zone == Some(InteractiveZone::TabActions(sid));
+                    if is_act_hover {
+                        let _ = FillRect(hdc, &act_rc, self.palette.brush_bg_hover);
+                    }
+                    let _ = SelectObject(hdc, self.palette.font_ui.into());
+                    let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
+                    draw_text_line(
+                        hdc,
+                        "⚡",
+                        RECT {
+                            left: act_rc.left + 3,
+                            top: act_rc.top - 1,
+                            right: act_rc.right,
+                            bottom: act_rc.bottom,
+                        },
+                    );
+                    self.hit_zones.push(HitZone {
+                        rect: act_rc,
+                        zone: InteractiveZone::TabActions(sid),
+                    });
+                }
+
                 let is_close_hover = self.hovered_zone == Some(InteractiveZone::TabClose(sid));
                 if is_close_hover {
                     let err_brush = CreateSolidBrush(COLORREF(col_status_err()));
@@ -2025,7 +2069,7 @@ impl AppWindowState {
                     },
                 );
 
-                // Enregistrer d'abord le bouton Close (prioritaire au test de clic) puis l'onglet
+                // Enregistrer d'abord les boutons interactifs (prioritaires au test de clic) puis l'onglet
                 self.hit_zones.push(HitZone {
                     rect: close_rc,
                     zone: InteractiveZone::TabClose(sid),
@@ -2034,7 +2078,11 @@ impl AppWindowState {
                     rect: RECT {
                         left: tab_rc.left,
                         top: tab_rc.top,
-                        right: close_rc.left,
+                        right: if let Some(act) = actions_rc {
+                            act.left
+                        } else {
+                            close_rc.left
+                        },
                         bottom: tab_rc.bottom,
                     },
                     zone: InteractiveZone::TabSelect(sid),
@@ -2936,6 +2984,22 @@ impl AppWindowState {
                     self.sessions.close_tab(sid, viewport);
                     self.invalidate_canvas();
                 }
+                InteractiveZone::TabActions(sid) => {
+                    let action_x = self
+                        .hit_zones
+                        .iter()
+                        .find(|z| z.zone == InteractiveZone::TabActions(sid))
+                        .map(|z| z.rect.left)
+                        .unwrap_or(0);
+                    let mut pt = POINT {
+                        x: action_x,
+                        y: TABBAR_HEIGHT,
+                    };
+                    unsafe {
+                        let _ = ClientToScreen(self.hwnd, &mut pt);
+                        self.show_session_actions_menu(sid, pt);
+                    }
+                }
                 InteractiveZone::HomeCardConnect(cid) => {
                     self.launch_connection_by_id(cid);
                 }
@@ -3073,10 +3137,13 @@ impl AppWindowState {
                 };
 
                 let viewport = self.rdp_viewport_rect();
-                match self
-                    .sessions
-                    .open_rdp_session(self.hwnd, viewport, &conn, decrypted_pwd)
-                {
+                match self.sessions.open_rdp_session(
+                    self.hwnd,
+                    viewport,
+                    &conn,
+                    decrypted_pwd,
+                    self.settings.rdp_keyboard_hook_mode,
+                ) {
                     Ok(_sid) => {
                         self.status_override = None;
                         self.invalidate_canvas();
@@ -3092,18 +3159,144 @@ impl AppWindowState {
                     }
                 }
             }
-            Protocol::AnyDesk | Protocol::RustDesk => {
-                let proto_name = conn.protocol.display_name();
-                let info = format!(
-                    "La fiche {} « {} » (identifiant : {}) est enregistrée et prête.\n\nLe lancement automatisé du client externe {} fait partie du Jalon 3.",
-                    proto_name, conn.name, conn.host, proto_name
-                );
-                self.status_override = Some(format!(
-                    "{proto_name} ({}) enregistré — Lancement client externe prévu au Jalon 3.",
-                    conn.host
-                ));
-                self.invalidate_canvas();
-                show_info_dialog(self.hwnd, &format!("Connexion {proto_name}"), &info);
+            Protocol::AnyDesk => {
+                match crate::external_apps::launch_anydesk_connection(
+                    &self.settings.anydesk_path,
+                    &conn.host,
+                ) {
+                    Ok(pid) => {
+                        let msg = format!(
+                            "Session AnyDesk vers « {} » (ID: {}) lancée (PID: {}).",
+                            conn.name, conn.host, pid
+                        );
+                        self.status_override = Some(msg);
+                        self.invalidate_canvas();
+                    }
+                    Err(err) => {
+                        let msg = format!(
+                            "Impossible de lancer AnyDesk pour « {} » : {err}",
+                            conn.name
+                        );
+                        self.status_override = Some(msg.clone());
+                        self.invalidate_canvas();
+                        show_error_dialog(self.hwnd, "Erreur de lancement AnyDesk", &msg);
+                    }
+                }
+            }
+            Protocol::RustDesk => {
+                match crate::external_apps::launch_rustdesk_connection(
+                    &self.settings.rustdesk_path,
+                    &conn.host,
+                ) {
+                    Ok(pid) => {
+                        let msg = format!(
+                            "Session RustDesk vers « {} » (ID: {}) lancée (PID: {}).",
+                            conn.name, conn.host, pid
+                        );
+                        self.status_override = Some(msg);
+                        self.invalidate_canvas();
+                    }
+                    Err(err) => {
+                        let msg = format!(
+                            "Impossible de lancer RustDesk pour « {} » : {err}",
+                            conn.name
+                        );
+                        self.status_override = Some(msg.clone());
+                        self.invalidate_canvas();
+                        show_error_dialog(self.hwnd, "Erreur de lancement RustDesk", &msg);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn on_right_button_up(&mut self, x: i32, y: i32) {
+        if let Some(InteractiveZone::TabSelect(sid) | InteractiveZone::TabActions(sid)) =
+            self.hit_test_zone(x, y)
+        {
+            let mut screen_pt = POINT { x, y };
+            unsafe {
+                let _ = ClientToScreen(self.hwnd, &mut screen_pt);
+                self.show_session_actions_menu(sid, screen_pt);
+            }
+        }
+    }
+
+    unsafe fn show_session_actions_menu(&mut self, session_id: u32, screen_pt: POINT) {
+        unsafe {
+            let Ok(hmenu) = CreatePopupMenu() else { return };
+            let is_fullscreen = self.sessions.is_active_fullscreen();
+            let fs_label = if is_fullscreen {
+                "Quitter le mode plein écran\tCtrl+Alt+Pause"
+            } else {
+                "Basculer en plein écran\tCtrl+Alt+Pause"
+            };
+
+            let _ = AppendMenuW(
+                hmenu,
+                MF_STRING,
+                CMD_SESSION_CAD as usize,
+                w!("Envoyer Ctrl + Alt + Suppr"),
+            );
+            let _ = AppendMenuW(
+                hmenu,
+                MF_STRING,
+                CMD_SESSION_CTRL_ALT_END as usize,
+                w!("Envoyer Ctrl + Alt + Fin"),
+            );
+            let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+            let fs_label_w: Vec<u16> = fs_label.encode_utf16().chain(std::iter::once(0)).collect();
+            let _ = AppendMenuW(
+                hmenu,
+                MF_STRING,
+                CMD_SESSION_FULLSCREEN as usize,
+                PCWSTR(fs_label_w.as_ptr()),
+            );
+            let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(
+                hmenu,
+                MF_STRING,
+                CMD_SESSION_DISCONNECT as usize,
+                w!("Fermer / Déconnecter"),
+            );
+
+            let _ = SetForegroundWindow(self.hwnd);
+            let cmd = TrackPopupMenu(
+                hmenu,
+                TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
+                screen_pt.x,
+                screen_pt.y,
+                Some(0),
+                self.hwnd,
+                None,
+            );
+            let _ = DestroyMenu(hmenu);
+
+            match cmd.0 as u32 {
+                CMD_SESSION_CAD => {
+                    if let Err(e) = self.sessions.send_cad_to_active() {
+                        self.status_override = Some(format!("Erreur Ctrl+Alt+Suppr : {e}"));
+                        self.invalidate_canvas();
+                    }
+                }
+                CMD_SESSION_CTRL_ALT_END => {
+                    if let Err(e) = self.sessions.send_ctrl_alt_end_to_active() {
+                        self.status_override = Some(format!("Erreur Ctrl+Alt+Fin : {e}"));
+                        self.invalidate_canvas();
+                    }
+                }
+                CMD_SESSION_FULLSCREEN => {
+                    if let Err(e) = self.sessions.toggle_active_fullscreen() {
+                        self.status_override = Some(format!("Erreur Plein écran : {e}"));
+                        self.invalidate_canvas();
+                    }
+                }
+                CMD_SESSION_DISCONNECT => {
+                    let viewport = self.rdp_viewport_rect();
+                    self.sessions.close_tab(session_id, viewport);
+                    self.invalidate_canvas();
+                }
+                _ => {}
             }
         }
     }
@@ -6252,6 +6445,15 @@ pub const IDC_SET_SHOW_RECENT: usize = 4207;
 pub const IDC_SET_MAX_RECENT: usize = 4208;
 pub const IDC_SET_RDP_CLIP: usize = 4209;
 pub const IDC_SET_RDP_DYNRES: usize = 4210;
+pub const IDC_SET_RDP_HOOK_MODE: usize = 4211;
+pub const IDC_SET_ANYDESK_PATH: usize = 4212;
+pub const IDC_SET_ANYDESK_BROWSE: usize = 4213;
+pub const IDC_SET_ANYDESK_DETECT: usize = 4214;
+pub const IDC_SET_ANYDESK_TEST: usize = 4215;
+pub const IDC_SET_RUSTDESK_PATH: usize = 4216;
+pub const IDC_SET_RUSTDESK_BROWSE: usize = 4217;
+pub const IDC_SET_RUSTDESK_DETECT: usize = 4218;
+pub const IDC_SET_RUSTDESK_TEST: usize = 4219;
 
 struct SettingsDialogState {
     owner: HWND,
@@ -6266,6 +6468,8 @@ struct SettingsDialogState {
     labels: Vec<DialogLabel>,
     dividers_y: Vec<i32>,
     edit_box_rc: RECT,
+    anydesk_rc: RECT,
+    rustdesk_rc: RECT,
     base_settings: AppSettings,
     cb_theme: HWND,
     chk_close_tray: HWND,
@@ -6277,6 +6481,15 @@ struct SettingsDialogState {
     ed_max_recent: HWND,
     chk_rdp_clip: HWND,
     chk_rdp_dynres: HWND,
+    cb_rdp_hook_mode: HWND,
+    ed_anydesk_path: HWND,
+    btn_anydesk_browse: HWND,
+    btn_anydesk_detect: HWND,
+    btn_anydesk_test: HWND,
+    ed_rustdesk_path: HWND,
+    btn_rustdesk_browse: HWND,
+    btn_rustdesk_detect: HWND,
+    btn_rustdesk_test: HWND,
     result: Option<AppSettings>,
 }
 
@@ -6345,7 +6558,15 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                     }
                     if d.CtlType == ODT_BUTTON {
                         let id = d.CtlID as usize;
-                        if id == IDC_DLG_OK || id == IDC_DLG_CANCEL {
+                        if id == IDC_DLG_OK
+                            || id == IDC_DLG_CANCEL
+                            || id == IDC_SET_ANYDESK_BROWSE
+                            || id == IDC_SET_ANYDESK_DETECT
+                            || id == IDC_SET_ANYDESK_TEST
+                            || id == IDC_SET_RUSTDESK_BROWSE
+                            || id == IDC_SET_RUSTDESK_DETECT
+                            || id == IDC_SET_RUSTDESK_TEST
+                        {
                             draw_owner_button(d, id == IDC_DLG_OK, state.font_ui, state.font_bold);
                         } else {
                             draw_owner_checkbox(d, state.font_ui, state.dpi);
@@ -6434,13 +6655,21 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                     draw_text_line(hdc, &lbl.text, lbl.rect);
                 }
 
-                let focused = GetFocus() == state.ed_max_recent;
-                draw_rounded_box(
-                    hdc,
-                    state.edit_box_rc,
-                    col_bg_input(),
-                    if focused { col_accent() } else { col_border() },
-                );
+                for &(rc_box, ctrl_hwnd) in &[
+                    (state.edit_box_rc, state.ed_max_recent),
+                    (state.anydesk_rc, state.ed_anydesk_path),
+                    (state.rustdesk_rc, state.ed_rustdesk_path),
+                ] {
+                    if rc_box.right > rc_box.left {
+                        let focused = GetFocus() == ctrl_hwnd;
+                        draw_rounded_box(
+                            hdc,
+                            rc_box,
+                            col_bg_input(),
+                            if focused { col_accent() } else { col_border() },
+                        );
+                    }
+                }
 
                 let _ = windows::Win32::Graphics::Gdi::BitBlt(
                     hdc_screen,
@@ -6549,6 +6778,15 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                             state.ed_max_recent,
                             state.chk_rdp_clip,
                             state.chk_rdp_dynres,
+                            state.cb_rdp_hook_mode,
+                            state.ed_anydesk_path,
+                            state.btn_anydesk_browse,
+                            state.btn_anydesk_detect,
+                            state.btn_anydesk_test,
+                            state.ed_rustdesk_path,
+                            state.btn_rustdesk_browse,
+                            state.btn_rustdesk_detect,
+                            state.btn_rustdesk_test,
                         ] {
                             let _ = InvalidateRect(Some(ctrl), None, true);
                         }
@@ -6572,6 +6810,114 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                         }
                         let _ = EnableWindow(state.chk_start_min_tray, tray_enabled);
                         let _ = InvalidateRect(Some(state.chk_start_min_tray), None, false);
+                    } else if id == IDC_SET_ANYDESK_BROWSE {
+                        if let Some(path) = crate::external_apps::browse_for_executable(
+                            hwnd,
+                            "Sélectionner l'exécutable AnyDesk (AnyDesk.exe)",
+                        ) {
+                            set_window_text(state.ed_anydesk_path, &path.to_string_lossy());
+                        }
+                    } else if id == IDC_SET_ANYDESK_DETECT {
+                        if let Some(path) = crate::external_apps::detect_anydesk_path() {
+                            set_window_text(state.ed_anydesk_path, &path.to_string_lossy());
+                            show_info_dialog(
+                                hwnd,
+                                "Détection AnyDesk",
+                                &format!(
+                                    "AnyDesk a été détecté automatiquement :\n{}",
+                                    path.display()
+                                ),
+                            );
+                        } else {
+                            show_warning_dialog(
+                                hwnd,
+                                "Détection AnyDesk",
+                                "AnyDesk n'a pas été détecté automatiquement dans les dossiers standards ou le Registre.\nVeuillez utiliser le bouton « Parcourir » pour sélectionner AnyDesk.exe.",
+                            );
+                        }
+                    } else if id == IDC_SET_ANYDESK_TEST {
+                        let path_str = get_window_text(state.ed_anydesk_path).trim().to_string();
+                        if path_str.is_empty() {
+                            show_warning_dialog(
+                                hwnd,
+                                "Test de lancement AnyDesk",
+                                "Veuillez d'abord renseigner ou détecter le chemin vers AnyDesk.exe.",
+                            );
+                        } else {
+                            let p = std::path::Path::new(&path_str);
+                            match crate::external_apps::test_launch_app(p) {
+                                Ok(pid) => {
+                                    show_info_dialog(
+                                        hwnd,
+                                        "Test AnyDesk réussi",
+                                        &format!(
+                                            "Le client AnyDesk a été démarré avec succès (PID : {pid}).\nLa fenêtre de l'application doit être visible."
+                                        ),
+                                    );
+                                }
+                                Err(err) => {
+                                    show_error_dialog(
+                                        hwnd,
+                                        "Échec du test AnyDesk",
+                                        &format!("Impossible de démarrer AnyDesk :\n{err}"),
+                                    );
+                                }
+                            }
+                        }
+                    } else if id == IDC_SET_RUSTDESK_BROWSE {
+                        if let Some(path) = crate::external_apps::browse_for_executable(
+                            hwnd,
+                            "Sélectionner l'exécutable RustDesk (rustdesk.exe)",
+                        ) {
+                            set_window_text(state.ed_rustdesk_path, &path.to_string_lossy());
+                        }
+                    } else if id == IDC_SET_RUSTDESK_DETECT {
+                        if let Some(path) = crate::external_apps::detect_rustdesk_path() {
+                            set_window_text(state.ed_rustdesk_path, &path.to_string_lossy());
+                            show_info_dialog(
+                                hwnd,
+                                "Détection RustDesk",
+                                &format!(
+                                    "RustDesk a été détecté automatiquement :\n{}",
+                                    path.display()
+                                ),
+                            );
+                        } else {
+                            show_warning_dialog(
+                                hwnd,
+                                "Détection RustDesk",
+                                "RustDesk n'a pas été détecté automatiquement dans les dossiers standards ou le Registre.\nVeuillez utiliser le bouton « Parcourir » pour sélectionner rustdesk.exe.",
+                            );
+                        }
+                    } else if id == IDC_SET_RUSTDESK_TEST {
+                        let path_str = get_window_text(state.ed_rustdesk_path).trim().to_string();
+                        if path_str.is_empty() {
+                            show_warning_dialog(
+                                hwnd,
+                                "Test de lancement RustDesk",
+                                "Veuillez d'abord renseigner ou détecter le chemin vers RustDesk.exe.",
+                            );
+                        } else {
+                            let p = std::path::Path::new(&path_str);
+                            match crate::external_apps::test_launch_app(p) {
+                                Ok(pid) => {
+                                    show_info_dialog(
+                                        hwnd,
+                                        "Test RustDesk réussi",
+                                        &format!(
+                                            "Le client RustDesk a été démarré avec succès (PID : {pid}).\nLa fenêtre de l'application doit être visible."
+                                        ),
+                                    );
+                                }
+                                Err(err) => {
+                                    show_error_dialog(
+                                        hwnd,
+                                        "Échec du test RustDesk",
+                                        &format!("Impossible de démarrer RustDesk :\n{err}"),
+                                    );
+                                }
+                            }
+                        }
                     } else if id == IDC_DLG_OK || id == 1 {
                         let theme_sel = SendMessageW(
                             state.cb_theme,
@@ -6658,6 +7004,53 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                         )
                         .0 != 0;
 
+                        let rdp_hook_sel = SendMessageW(
+                            state.cb_rdp_hook_mode,
+                            CB_GETCURSEL,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(0)),
+                        )
+                        .0;
+                        let rdp_keyboard_hook_mode =
+                            RdpKeyboardHookMode::from_combo_index(if rdp_hook_sel >= 0 {
+                                rdp_hook_sel as usize
+                            } else {
+                                0
+                            });
+
+                        let anydesk_path =
+                            get_window_text(state.ed_anydesk_path).trim().to_string();
+                        let rustdesk_path =
+                            get_window_text(state.ed_rustdesk_path).trim().to_string();
+
+                        if !anydesk_path.is_empty() {
+                            let p = std::path::Path::new(&anydesk_path);
+                            if let Err(err) = crate::external_apps::validate_executable_path(p) {
+                                show_warning_dialog(
+                                    hwnd,
+                                    "Chemin AnyDesk invalide",
+                                    &format!(
+                                        "Le chemin spécifié pour AnyDesk est invalide :\n{err}\n\nVeuillez vérifier le chemin ou laisser le champ vide."
+                                    ),
+                                );
+                                return LRESULT(0);
+                            }
+                        }
+
+                        if !rustdesk_path.is_empty() {
+                            let p = std::path::Path::new(&rustdesk_path);
+                            if let Err(err) = crate::external_apps::validate_executable_path(p) {
+                                show_warning_dialog(
+                                    hwnd,
+                                    "Chemin RustDesk invalide",
+                                    &format!(
+                                        "Le chemin spécifié pour RustDesk est invalide :\n{err}\n\nVeuillez vérifier le chemin ou laisser le champ vide."
+                                    ),
+                                );
+                                return LRESULT(0);
+                            }
+                        }
+
                         let mut updated = state.base_settings.clone();
                         updated.theme_mode = theme_mode;
                         updated.close_to_tray = close_to_tray;
@@ -6669,6 +7062,9 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                         updated.max_recent_connections = max_recent_connections;
                         updated.rdp_default_clipboard = rdp_default_clipboard;
                         updated.rdp_default_dynamic_resolution = rdp_default_dynamic_resolution;
+                        updated.rdp_keyboard_hook_mode = rdp_keyboard_hook_mode;
+                        updated.anydesk_path = anydesk_path;
+                        updated.rustdesk_path = rustdesk_path;
 
                         state.result = Some(updated);
                         let owner = state.owner;
@@ -6721,8 +7117,8 @@ fn run_settings_dialog(
         } else {
             DpiMetrics::for_window(owner)
         };
-        let client_w = dpi.scale(660);
-        let client_h = dpi.scale(615);
+        let client_w = dpi.scale(680);
+        let client_h = dpi.scale(790);
         let dlg_style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
         let (win_w, win_h) = calc_dialog_window_size(dlg_style, client_w, client_h);
 
@@ -6776,9 +7172,12 @@ fn run_settings_dialog(
                 dpi.scale(152),
                 dpi.scale(342),
                 dpi.scale(450),
-                dpi.scale(548),
+                dpi.scale(578),
+                dpi.scale(726),
             ],
             edit_box_rc: RECT::default(),
+            anydesk_rc: RECT::default(),
+            rustdesk_rc: RECT::default(),
             base_settings: current.clone(),
             cb_theme: HWND::default(),
             chk_close_tray: HWND::default(),
@@ -6790,6 +7189,15 @@ fn run_settings_dialog(
             ed_max_recent: HWND::default(),
             chk_rdp_clip: HWND::default(),
             chk_rdp_dynres: HWND::default(),
+            cb_rdp_hook_mode: HWND::default(),
+            ed_anydesk_path: HWND::default(),
+            btn_anydesk_browse: HWND::default(),
+            btn_anydesk_detect: HWND::default(),
+            btn_anydesk_test: HWND::default(),
+            ed_rustdesk_path: HWND::default(),
+            btn_rustdesk_browse: HWND::default(),
+            btn_rustdesk_detect: HWND::default(),
+            btn_rustdesk_test: HWND::default(),
             result: None,
         });
 
@@ -7094,10 +7502,229 @@ fn run_settings_dialog(
             Some(LPARAM(0)),
         );
 
+        let y_hook = dpi.scale(542);
+        dlg_state.labels.push(DialogLabel {
+            text: "Raccourcis Windows (KeyboardHookMode) :".to_string(),
+            rect: RECT {
+                left: pad_x,
+                top: y_hook,
+                right: pad_x + dpi.scale(260),
+                bottom: y_hook + field_h,
+            },
+            muted: false,
+            bold: false,
+        });
+        let rc_hook = RECT {
+            left: pad_x + dpi.scale(270),
+            top: y_hook,
+            right: field_right,
+            bottom: y_hook + field_h,
+        };
+        let cb_rdp_hook_mode = create_dark_combobox(
+            hwnd,
+            hinstance.into(),
+            rc_hook,
+            dpi.scale(160),
+            IDC_SET_RDP_HOOK_MODE,
+            palette.font_ui,
+            dpi,
+        );
+        for lbl in [
+            w!("Envoyés à la session distante (défaut recommandé)"),
+            w!("Exécutés sur le poste local"),
+            w!("Envoyés à distance uniquement en plein écran"),
+        ] {
+            let _ = SendMessageW(
+                cb_rdp_hook_mode,
+                CB_ADDSTRING,
+                Some(WPARAM(0)),
+                Some(LPARAM(lbl.as_ptr() as isize)),
+            );
+        }
+        let _ = SendMessageW(
+            cb_rdp_hook_mode,
+            CB_SETCURSEL,
+            Some(WPARAM(current.rdp_keyboard_hook_mode.to_combo_index())),
+            Some(LPARAM(0)),
+        );
+
+        // --- SECTION 5 : APPLICATIONS EXTERNES (ANYDESK & RUSTDESK) ---
+        dlg_state.labels.push(DialogLabel {
+            text: "Applications externes (AnyDesk & RustDesk)".to_string(),
+            rect: RECT {
+                left: pad_x,
+                top: dpi.scale(588),
+                right: field_right,
+                bottom: dpi.scale(608),
+            },
+            muted: false,
+            bold: true,
+        });
+        dlg_state.labels.push(DialogLabel {
+            text: "Exécutables utilisés pour lancer automatiquement vos sessions externes."
+                .to_string(),
+            rect: RECT {
+                left: pad_x,
+                top: dpi.scale(610),
+                right: field_right,
+                bottom: dpi.scale(626),
+            },
+            muted: true,
+            bold: false,
+        });
+
+        let btn_w_act = dpi.scale(70);
+        let btn_gap_act = dpi.scale(6);
+        let total_btns_w = btn_w_act * 3 + btn_gap_act * 2;
+
+        // AnyDesk
+        let y_any = dpi.scale(634);
+        dlg_state.labels.push(DialogLabel {
+            text: "AnyDesk.exe :".to_string(),
+            rect: RECT {
+                left: pad_x,
+                top: y_any,
+                right: pad_x + dpi.scale(110),
+                bottom: y_any + field_h,
+            },
+            muted: false,
+            bold: false,
+        });
+        let rc_anydesk = RECT {
+            left: pad_x + dpi.scale(115),
+            top: y_any,
+            right: field_right - total_btns_w - dpi.scale(8),
+            bottom: y_any + field_h,
+        };
+        dlg_state.anydesk_rc = rc_anydesk;
+        let ed_anydesk_path = create_dark_edit(
+            hwnd,
+            hinstance.into(),
+            rc_anydesk,
+            IDC_SET_ANYDESK_PATH,
+            false,
+            palette.font_ui,
+            dpi,
+        );
+        set_window_text(ed_anydesk_path, &current.anydesk_path);
+        install_auto_select_on_focus(ed_anydesk_path);
+
+        let btn_anydesk_browse = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Parcourir"),
+            RECT {
+                left: field_right - total_btns_w,
+                top: y_any,
+                right: field_right - total_btns_w + btn_w_act,
+                bottom: y_any + field_h,
+            },
+            IDC_SET_ANYDESK_BROWSE,
+            palette.font_ui,
+        );
+        let btn_anydesk_detect = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Détecter"),
+            RECT {
+                left: field_right - btn_w_act * 2 - btn_gap_act,
+                top: y_any,
+                right: field_right - btn_w_act - btn_gap_act,
+                bottom: y_any + field_h,
+            },
+            IDC_SET_ANYDESK_DETECT,
+            palette.font_ui,
+        );
+        let btn_anydesk_test = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Tester"),
+            RECT {
+                left: field_right - btn_w_act,
+                top: y_any,
+                right: field_right,
+                bottom: y_any + field_h,
+            },
+            IDC_SET_ANYDESK_TEST,
+            palette.font_ui,
+        );
+
+        // RustDesk
+        let y_rust = dpi.scale(678);
+        dlg_state.labels.push(DialogLabel {
+            text: "RustDesk.exe :".to_string(),
+            rect: RECT {
+                left: pad_x,
+                top: y_rust,
+                right: pad_x + dpi.scale(110),
+                bottom: y_rust + field_h,
+            },
+            muted: false,
+            bold: false,
+        });
+        let rc_rustdesk = RECT {
+            left: pad_x + dpi.scale(115),
+            top: y_rust,
+            right: field_right - total_btns_w - dpi.scale(8),
+            bottom: y_rust + field_h,
+        };
+        dlg_state.rustdesk_rc = rc_rustdesk;
+        let ed_rustdesk_path = create_dark_edit(
+            hwnd,
+            hinstance.into(),
+            rc_rustdesk,
+            IDC_SET_RUSTDESK_PATH,
+            false,
+            palette.font_ui,
+            dpi,
+        );
+        set_window_text(ed_rustdesk_path, &current.rustdesk_path);
+        install_auto_select_on_focus(ed_rustdesk_path);
+
+        let btn_rustdesk_browse = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Parcourir"),
+            RECT {
+                left: field_right - total_btns_w,
+                top: y_rust,
+                right: field_right - total_btns_w + btn_w_act,
+                bottom: y_rust + field_h,
+            },
+            IDC_SET_RUSTDESK_BROWSE,
+            palette.font_ui,
+        );
+        let btn_rustdesk_detect = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Détecter"),
+            RECT {
+                left: field_right - btn_w_act * 2 - btn_gap_act,
+                top: y_rust,
+                right: field_right - btn_w_act - btn_gap_act,
+                bottom: y_rust + field_h,
+            },
+            IDC_SET_RUSTDESK_DETECT,
+            palette.font_ui,
+        );
+        let btn_rustdesk_test = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Tester"),
+            RECT {
+                left: field_right - btn_w_act,
+                top: y_rust,
+                right: field_right,
+                bottom: y_rust + field_h,
+            },
+            IDC_SET_RUSTDESK_TEST,
+            palette.font_ui,
+        );
+
         // --- BOUTONS ENREGISTRER / ANNULER ---
         let btn_w = dpi.scale(130);
         let btn_h = dpi.scale(36);
-        let btn_y = dpi.scale(564);
+        let btn_y = dpi.scale(738);
         let btn_gap = dpi.scale(12);
         let rc_cancel = RECT {
             left: field_right - btn_w,
@@ -7139,6 +7766,15 @@ fn run_settings_dialog(
         dlg_state.ed_max_recent = ed_max_recent;
         dlg_state.chk_rdp_clip = chk_rdp_clip;
         dlg_state.chk_rdp_dynres = chk_rdp_dynres;
+        dlg_state.cb_rdp_hook_mode = cb_rdp_hook_mode;
+        dlg_state.ed_anydesk_path = ed_anydesk_path;
+        dlg_state.btn_anydesk_browse = btn_anydesk_browse;
+        dlg_state.btn_anydesk_detect = btn_anydesk_detect;
+        dlg_state.btn_anydesk_test = btn_anydesk_test;
+        dlg_state.ed_rustdesk_path = ed_rustdesk_path;
+        dlg_state.btn_rustdesk_browse = btn_rustdesk_browse;
+        dlg_state.btn_rustdesk_detect = btn_rustdesk_detect;
+        dlg_state.btn_rustdesk_test = btn_rustdesk_test;
 
         let tab_order = [
             cb_theme,
@@ -7151,6 +7787,15 @@ fn run_settings_dialog(
             ed_max_recent,
             chk_rdp_clip,
             chk_rdp_dynres,
+            cb_rdp_hook_mode,
+            ed_anydesk_path,
+            btn_anydesk_browse,
+            btn_anydesk_detect,
+            btn_anydesk_test,
+            ed_rustdesk_path,
+            btn_rustdesk_browse,
+            btn_rustdesk_detect,
+            btn_rustdesk_test,
             btn_ok,
             btn_cancel,
         ];
@@ -7219,6 +7864,9 @@ unsafe fn set_window_text(hwnd: HWND, text: &str) {
 }
 
 fn show_error_dialog(hwnd: HWND, title: &str, message: &str) {
+    if cfg!(test) {
+        return;
+    }
     unsafe {
         let mut title_w: Vec<u16> = title.encode_utf16().collect();
         title_w.push(0);
@@ -7234,6 +7882,9 @@ fn show_error_dialog(hwnd: HWND, title: &str, message: &str) {
 }
 
 fn show_warning_dialog(hwnd: HWND, title: &str, message: &str) {
+    if cfg!(test) {
+        return;
+    }
     unsafe {
         let mut title_w: Vec<u16> = title.encode_utf16().collect();
         title_w.push(0);
@@ -7249,6 +7900,9 @@ fn show_warning_dialog(hwnd: HWND, title: &str, message: &str) {
 }
 
 fn show_info_dialog(hwnd: HWND, title: &str, message: &str) {
+    if cfg!(test) {
+        return;
+    }
     unsafe {
         let mut title_w: Vec<u16> = title.encode_utf16().collect();
         title_w.push(0);
@@ -7395,6 +8049,15 @@ unsafe extern "system" fn main_wnd_proc(
                     let x = (lparam.0 & 0xFFFF) as i16 as i32;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                     (*ptr).on_left_button_up(x, y);
+                }
+                LRESULT(0)
+            }
+            WM_RBUTTONUP => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+                if !ptr.is_null() {
+                    let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                    (*ptr).on_right_button_up(x, y);
                 }
                 LRESULT(0)
             }
@@ -8423,6 +9086,18 @@ mod tests {
             // Configurer le nombre maximal de connexions récentes à 15
             set_window_text(ed_max, "15");
 
+            // Contrôles Jalon 3 (KeyboardHookMode et Applications Externes)
+            let cb_hook = GetDlgItem(Some(dlg), IDC_SET_RDP_HOOK_MODE as i32).unwrap_or_default();
+            let ed_anydesk = GetDlgItem(Some(dlg), IDC_SET_ANYDESK_PATH as i32).unwrap_or_default();
+            let ed_rustdesk =
+                GetDlgItem(Some(dlg), IDC_SET_RUSTDESK_PATH as i32).unwrap_or_default();
+            assert!(IsWindow(Some(cb_hook)).as_bool());
+            assert!(IsWindow(Some(ed_anydesk)).as_bool());
+            assert!(IsWindow(Some(ed_rustdesk)).as_bool());
+
+            // Basculer KeyboardHookMode sur "FullScreenOnly" (index 2)
+            let _ = SendMessageW(cb_hook, CB_SETCURSEL, Some(WPARAM(2)), Some(LPARAM(0)));
+
             let btn_ok = GetDlgItem(Some(dlg), IDC_DLG_OK as i32).unwrap_or_default();
             let _ = SendMessageW(btn_ok, BM_CLICK, Some(WPARAM(0)), Some(LPARAM(0)));
         }
@@ -8449,6 +9124,10 @@ mod tests {
             assert!((*ptr).settings.close_to_tray);
             assert!((*ptr).settings.start_minimized_to_tray);
             assert_eq!((*ptr).settings.max_recent_connections, 15);
+            assert_eq!(
+                (*ptr).settings.rdp_keyboard_hook_mode,
+                RdpKeyboardHookMode::InFullScreenOnly
+            );
 
             // Vérifier la persistance dans SQLite
             let reopened = Storage::open_at_path(&db_path).unwrap();
@@ -8457,6 +9136,10 @@ mod tests {
             assert!(loaded.close_to_tray);
             assert!(loaded.start_minimized_to_tray);
             assert_eq!(loaded.max_recent_connections, 15);
+            assert_eq!(
+                loaded.rdp_keyboard_hook_mode,
+                RdpKeyboardHookMode::InFullScreenOnly
+            );
 
             // Remettre le thème sombre et quitter proprement
             (*ptr).settings.theme_mode = ThemeMode::Dark;
@@ -8531,9 +9214,13 @@ mod tests {
                 updated_at: 0,
                 last_connected_at: None,
             };
-            let _ = (*ptr)
-                .sessions
-                .open_rdp_session(hwnd, viewport, &dummy_conn, None);
+            let _ = (*ptr).sessions.open_rdp_session(
+                hwnd,
+                viewport,
+                &dummy_conn,
+                None,
+                crate::settings::RdpKeyboardHookMode::OnRemote,
+            );
             assert_eq!((*ptr).sessions.tabs().len(), 1);
 
             // Simuler un clic sur "Annuler" dans la boîte de confirmation (-1)
@@ -8553,6 +9240,92 @@ mod tests {
                 !IsWindow(Some(hwnd)).as_bool(),
                 "La sortie explicite confirmée doit détruire la fenêtre et nettoyer les ressources"
             );
+        }
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_ui_rdp_session_menu_actions_and_external_app_launch_wiring() {
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!("malvision_jalon3_test_{unique_id}.db"));
+        let _ = std::fs::remove_file(&db_path);
+
+        unsafe {
+            let hwnd = create_isolated_test_main_window(&db_path);
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+
+            // 1. Ouvrir une session RDP fictive
+            let viewport = (*ptr).rdp_viewport_rect();
+            let dummy_conn = ConnectionItem {
+                id: 42,
+                name: "SRV-TEST-JALON3".to_string(),
+                protocol: Protocol::Rdp,
+                host: "127.0.0.1".to_string(),
+                port: 3389,
+                username: "admin".to_string(),
+                domain: String::new(),
+                folder_id: None,
+                description: String::new(),
+                is_favorite: false,
+                save_password: false,
+                has_saved_password: false,
+                dynamic_resolution: true,
+                redirect_clipboard: true,
+                sort_order: 0,
+                created_at: 0,
+                updated_at: 0,
+                last_connected_at: None,
+            };
+            let sid = (*ptr)
+                .sessions
+                .open_rdp_session(
+                    hwnd,
+                    viewport,
+                    &dummy_conn,
+                    None,
+                    crate::settings::RdpKeyboardHookMode::OnRemote,
+                )
+                .expect("La session RDP de test doit s'initialiser");
+            assert_eq!((*ptr).sessions.tabs().len(), 1);
+            assert_eq!((*ptr).sessions.active_session_id(), Some(sid));
+
+            // 2. Tester les méthodes de commandes de session sans crash
+            let _ = (*ptr).sessions.send_cad_to_active();
+            let _ = (*ptr).sessions.send_ctrl_alt_end_to_active();
+            assert!(!(*ptr).sessions.is_active_fullscreen());
+            let _ = (*ptr).sessions.toggle_active_fullscreen();
+
+            // 3. Tester le lancement de connexions AnyDesk et RustDesk
+            let mut store = Storage::open_at_path(&db_path).unwrap();
+            let any_draft = ConnectionDraft {
+                folder_id: None,
+                name: "AnyDesk-Remote".to_string(),
+                protocol: Protocol::AnyDesk,
+                host: "123456789".to_string(),
+                port: 0,
+                username: String::new(),
+                domain: String::new(),
+                description: String::new(),
+                is_favorite: false,
+                save_password: false,
+                password: SecretString::new(String::new()),
+                keep_existing_password: false,
+                dynamic_resolution: false,
+                redirect_clipboard: false,
+            };
+            let any_conn = store.create_connection(any_draft).unwrap();
+
+            // Lancement AnyDesk sans exécutable configuré -> doit définir un status_override clair sans paniquer
+            (*ptr).launch_connection_by_id(any_conn.id);
+            assert!((*ptr).status_override.is_some());
+
+            // 4. Nettoyer et détruire la fenêtre
+            (*ptr).sessions.close_all();
+            let _ = DestroyWindow(hwnd);
         }
         let _ = std::fs::remove_file(&db_path);
     }

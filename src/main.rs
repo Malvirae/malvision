@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+mod external_apps;
 mod models;
 mod rdp;
 mod security;
