@@ -2,12 +2,13 @@
 
 Application native **Windows 11 x64** de gestion de connexions distantes, écrite en **Rust** avec `windows-rs` (Win32 natif + COM/ActiveX + SQLite embarqué + DPAPI).
 
-## Vision et fonctionnalités (Jalon 2)
+## Vision et fonctionnalités (Jalons 2 & 2B)
 
 - **Interface sombre moderne Windows 11** :
-  - Thème anthracite profond (`#16181B`), barre de titre sombre DWM (`DWMWA_USE_IMMERSIVE_DARK_MODE`), typographie `Segoe UI`, rendu GDI double-bufferisé sans scintillement et prise en charge HiDPI Per-Monitor V2.
+  - Thème anthracite profond (`#16181B`), barre de titre sombre DWM (`DWMWA_USE_IMMERSIVE_DARK_MODE`), typographie `Segoe UI`, rendu GDI double-bufferisé sans scintillement et prise en charge HiDPI Per-Monitor V2 (`DpiMetrics` 100 % / 125 % / 150 %).
+  - **Dialogues modaux sombres sur-mesure** (`680 × 660` pour le formulaire de connexion, `480 × 215` pour les dialogues de dossier) : libellés rendus directement en GDI transparent (aucun fond blanc), boutons `BS_OWNERDRAW` avec survol/focus, listes déroulantes `CBS_OWNERDRAWFIXED` sombres à chevrons vectoriels et cases à cocher sombres vectorielles.
   - **Panneau latéral gauche redimensionnable** (260 px par défaut, largeur persistée entre `200 px` et `520 px`) comprenant l'en-tête Malvision, les boutons **+ Connexion** et **+ Dossier**, la recherche instantanée en temps réel, la section **Favoris** et l'arborescence multi-niveaux des dossiers et connexions.
-  - **Arborescence hiérarchique (`TreeView`)** à profondeur arbitraire : développer/replier avec persistance de l'état, sélection, double-clic ou touche `Entrée` pour lancer une session, renommage rapide (`F2`), menu contextuel complet (*Se connecter*, *Modifier*, *Renommer*, *Dupliquer*, *Ajouter/Retirer des favoris*, *Déplacer vers un dossier*, *Supprimer avec confirmation*) et **glisser-déposer (Drag & Drop)** avec prévention stricte des cycles de dossiers.
+  - **Arborescence hiérarchique (`TreeView` avec `NM_CUSTOMDRAW`)** à profondeur arbitraire : rendu propriétaire avec sélection pleine ligne, barre d'accentuation bleue, icônes vectorielles GDI (chevrons, dossiers, étoile, couches) et badges de protocole arrondis (`RDP`, `ANY`, `RST`), développer/replier avec persistance de l'état, sélection, double-clic ou touche `Entrée` pour lancer une session, renommage rapide (`F2`), menu contextuel complet (*Se connecter*, *Modifier*, *Renommer*, *Dupliquer*, *Ajouter/Retirer des favoris*, *Déplacer vers un dossier*, *Supprimer avec confirmation*) et **glisser-déposer (Drag & Drop)** avec prévention stricte des cycles de dossiers.
   - **Zone centrale multi-sessions et tableau de bord** :
     - Lorsqu'aucune session RDP n'est active : écran d'accueil sobre présentant les accès rapides, les cartes de **Connexions favorites** et les **Connexions récemment utilisées**.
     - Lorsqu'une ou plusieurs sessions RDP sont ouvertes : **barre d'onglets** avec indicateur visuel d'état, sélection d'onglet, bouton de fermeture individuel (`×`) et bouton d'ouverture rapide (`+`).

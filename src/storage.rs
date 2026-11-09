@@ -54,7 +54,6 @@ impl Storage {
     }
 
     /// Crée une base SQLite en mémoire (utile pour les tests unitaires et d'intégration rapides).
-    #[cfg(test)]
     pub fn open_in_memory() -> Result<Self, String> {
         let conn =
             Connection::open_in_memory().map_err(|e| format!("SQLite in-memory error : {e}"))?;
