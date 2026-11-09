@@ -39,6 +39,8 @@ pub const RDP_EVT_LOGON_ERROR: usize = 7;
 pub const RDP_EVT_AUTH_WARNING_DISPLAYED: usize = 8;
 pub const RDP_EVT_AUTH_WARNING_DISMISSED: usize = 9;
 pub const RDP_EVT_AUTO_RECONNECTING: usize = 10;
+pub const RDP_EVT_ENTER_FULLSCREEN: usize = 11;
+pub const RDP_EVT_LEAVE_FULLSCREEN: usize = 12;
 
 /// Encode `(session_id, event_code)` dans un `WPARAM`.
 #[inline]
@@ -412,6 +414,24 @@ unsafe extern "system" fn sink_invoke(
                     LPARAM(reason),
                 );
             }
+            5 => {
+                // OnEnterFullScreenMode (DISPID 5)
+                let _ = PostMessageW(
+                    Some(notify_hwnd),
+                    WM_RDP_EVENT,
+                    pack_rdp_event_wparam(session_id, RDP_EVT_ENTER_FULLSCREEN),
+                    LPARAM(0),
+                );
+            }
+            6 => {
+                // OnLeaveFullScreenMode (DISPID 6)
+                let _ = PostMessageW(
+                    Some(notify_hwnd),
+                    WM_RDP_EVENT,
+                    pack_rdp_event_wparam(session_id, RDP_EVT_LEAVE_FULLSCREEN),
+                    LPARAM(0),
+                );
+            }
             10 => {
                 // OnFatalError(errorCode: LONG) (DISPID 10)
                 let code = first_int_arg();
@@ -696,13 +716,15 @@ impl RdpActiveXHost {
                 let _ = self.put_bool(&adv, 832, true);
                 // AuthenticationLevel (oVft = 1176) -> 2 = Avertir l'utilisateur si l'authentification serveur échoue (comportement standard Windows)
                 let _ = self.put_u32(&adv, 1176, 2);
-                // DisplayConnectionBar (oVft = 904) -> false (intégré dans la fenêtre Malvision)
-                let _ = self.put_bool(&adv, 904, false);
-                // ContainerHandledFullScreen (oVft = 136) -> 1 (géré par le conteneur)
-                let _ = self.put_i32(&adv, 136, 1);
+                // DisplayConnectionBar (oVft = 904) -> true pour afficher la barre déroulante Microsoft en plein écran
+                let _ = self.put_bool(&adv, 904, true);
+                // ContainerHandledFullScreen (oVft = 136) -> 0 pour que le contrôle RDP prenne en charge nativement le mode plein écran
+                let _ = self.put_i32(&adv, 136, 0);
+                // PinConnectionBar (oVft = 920) -> false (déroulante à la souris)
+                let _ = self.put_bool(&adv, 920, false);
             }
 
-            // Paramétrer IMsRdpClientNonScriptable3 (fenêtre parente pour les dialogues NLA/certificats)
+            // Paramétrer IMsRdpClientNonScriptable3 (fenêtre parente pour les dialogues NLA/certificats et ConnectionBarText)
             if let Some(non_scriptable) = self.non_scriptable3() {
                 // put_UIParentWindowHandle (oVft = 120)
                 type PutHwndFn = unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT;
@@ -713,6 +735,8 @@ impl RdpActiveXHost {
                 let _ = self.put_bool(&non_scriptable, 168, true);
                 // put_EnableCredSspSupport (oVft = 184) -> VARIANT_TRUE
                 let _ = self.put_bool(&non_scriptable, 184, true);
+                // put_ConnectionBarText (oVft = 280) -> texte affiché sur la barre plein écran
+                let _ = self.put_bstr(&non_scriptable, 280, "Malvision — Bureau à distance");
             }
 
             Ok(())
@@ -1026,6 +1050,11 @@ impl RdpActiveXHost {
     }
 
     /// Envoie une séquence de touches au contrôle RDP via l'API officielle `IMsRdpClientNonScriptable::SendKeys`.
+    ///
+    /// Respecte strictement la spécification Microsoft :
+    /// - `pbArrayKeyUp` : tableau de `VARIANT_BOOL` (0 = Enfoncé, -1 = Relâché).
+    /// - `plKeyData` : tableau de `LONG` représentant exactement la structure `lParam` de `WM_KEYDOWN` / `WM_KEYUP`
+    ///   avec le code de scan matériel (bits 16-23), le drapeau de touche étendue (bit 24) et l'état ALT (bit 29).
     pub fn send_keys(
         &self,
         keys: &[(
@@ -1033,22 +1062,33 @@ impl RdpActiveXHost {
             bool,
         )],
     ) -> Result<(), String> {
-        if !self.is_active() {
-            return Err("Aucune session RDP active pour envoyer les touches.".to_string());
+        if self.connection_state() != 1 {
+            return Err("Aucune session RDP connectée pour envoyer les touches. L'envoi nécessite une session active.".to_string());
         }
         unsafe {
             if let Some(non_scriptable) = self.non_scriptable3() {
+                self.focus_control();
                 // SendKeys est à oVft = 112 sur IMsRdpClientNonScriptable
                 type SendKeysFn =
                     unsafe extern "system" fn(*mut c_void, i32, *const i16, *const i32) -> HRESULT;
                 let func: SendKeysFn = std::mem::transmute(vtable_entry(&non_scriptable, 112));
-                let num_keys = keys.len() as i32;
-                let mut up_array: Vec<i16> = Vec::with_capacity(keys.len());
-                let mut key_data: Vec<i32> = Vec::with_capacity(keys.len());
-                for (vk, is_up) in keys {
+                let num_keys = keys.len().min(20) as i32;
+                let mut up_array: Vec<i16> = Vec::with_capacity(num_keys as usize);
+                let mut key_data: Vec<i32> = Vec::with_capacity(num_keys as usize);
+                let mut alt_down = false;
+
+                for (vk, is_up) in keys.iter().take(num_keys as usize) {
+                    let (sc, ext) = virtual_key_to_scan_code_and_ext(*vk);
+                    if *vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_MENU
+                        || *vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_LMENU
+                        || *vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_RMENU
+                    {
+                        alt_down = !*is_up;
+                    }
                     up_array.push(if *is_up { -1 } else { 0 }); // VARIANT_TRUE / VARIANT_FALSE
-                    key_data.push(vk.0 as i32);
+                    key_data.push(build_send_keys_lparam(sc, ext, alt_down, *is_up));
                 }
+
                 let hr = func(
                     non_scriptable.as_raw(),
                     num_keys,
@@ -1083,7 +1123,7 @@ impl RdpActiveXHost {
         self.send_keys(&sequence)
     }
 
-    /// Envoie la combinaison Ctrl + Alt + Fin (équivalent standard RDP de SAS pour invoquer l'écran de sécurité distant).
+    /// Envoie la combinaison Ctrl + Alt + Fin (équivalent officiel RDP de SAS pour invoquer l'écran de sécurité distant).
     pub fn send_ctrl_alt_end(&self) -> Result<(), String> {
         use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_END, VK_MENU};
         let sequence = [
@@ -1099,7 +1139,15 @@ impl RdpActiveXHost {
 
     /// Bascule la session RDP en mode plein écran ou fenêtré (`put_FullScreen` à oVft = 336 sur `IMsRdpClient9`).
     pub fn set_full_screen(&self, full_screen: bool) -> Result<(), String> {
+        let state = self.connection_state();
+        if state != 1 {
+            return Err("La session RDP n'est pas connectée. Le passage en plein écran nécessite une session active.".to_string());
+        }
         unsafe {
+            if let Some(non_scriptable) = self.non_scriptable3() {
+                let _ = self.put_bstr(&non_scriptable, 280, "Malvision — Bureau à distance");
+            }
+            self.focus_control();
             type PutFullScreenFn = unsafe extern "system" fn(*mut c_void, i16) -> HRESULT;
             let func: PutFullScreenFn = std::mem::transmute(vtable_entry(&self.rdp_client, 336));
             let val: i16 = if full_screen { -1 } else { 0 };
@@ -1108,7 +1156,7 @@ impl RdpActiveXHost {
                 Ok(())
             } else {
                 Err(format!(
-                    "put_FullScreen({full_screen}) a retourné HRESULT 0x{:08X}.",
+                    "put_FullScreen({full_screen}) a retourné le code HRESULT 0x{:08X}.",
                     hr.0 as u32
                 ))
             }
@@ -1193,8 +1241,52 @@ impl RdpActiveXHost {
             if hr == S_OK { Ok(()) } else { Err(hr) }
         }
     }
+}
 
-    /// Désactive immédiatement le sink d'événements COM (`IMsTscAxEvents`) et se désabonne
+/// Convertit une touche virtuelle en code de scan matériel PS/2 et indique si la touche est étendue.
+fn virtual_key_to_scan_code_and_ext(
+    vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
+) -> (u32, bool) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+    match vk {
+        VK_CONTROL | VK_LCONTROL => (0x1D, false),
+        VK_RCONTROL => (0x1D, true),
+        VK_MENU | VK_LMENU => (0x38, false),
+        VK_RMENU => (0x38, true),
+        VK_END => (0x4F, true),
+        VK_DELETE => (0x53, true),
+        VK_INSERT => (0x52, true),
+        VK_HOME => (0x47, true),
+        VK_PRIOR => (0x49, true),
+        VK_NEXT => (0x51, true),
+        VK_LEFT => (0x4B, true),
+        VK_UP => (0x48, true),
+        VK_RIGHT => (0x4D, true),
+        VK_DOWN => (0x50, true),
+        _ => unsafe {
+            let sc = MapVirtualKeyW(vk.0 as u32, MAPVK_VK_TO_VSC);
+            (sc, false)
+        },
+    }
+}
+
+/// Construit la valeur 32-bit `plKeyData` au format exact du paramètre `lParam` de `WM_KEYDOWN` / `WM_KEYUP`.
+fn build_send_keys_lparam(scan_code: u32, extended: bool, alt_down: bool, is_up: bool) -> i32 {
+    let mut lp: u32 = 1; // repeat count = 1
+    lp |= (scan_code & 0xFF) << 16;
+    if extended {
+        lp |= 1 << 24;
+    }
+    if alt_down {
+        lp |= 1 << 29;
+    }
+    if is_up {
+        lp |= (1 << 30) | (1 << 31);
+    }
+    lp as i32
+}
+
+impl RdpActiveXHost {
     /// (`IConnectionPoint::Unadvise`) avant toute opération de déconnexion ou de destruction,
     /// évitant ainsi toute réentrance ou double destruction depuis un callback COM tardif.
     pub fn deactivate_events(&mut self) {
@@ -1387,5 +1479,41 @@ mod tests {
             let _ = DestroyWindow(parent);
             OleUninitialize();
         }
+    }
+
+    #[test]
+    fn test_rdp_scan_code_and_lparam_construction() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_DELETE, VK_END, VK_MENU};
+
+        // 1. Touches modificatrices standard
+        let (sc_ctrl, ext_ctrl) = virtual_key_to_scan_code_and_ext(VK_CONTROL);
+        assert_eq!(sc_ctrl, 0x1D);
+        assert!(!ext_ctrl);
+
+        let (sc_alt, ext_alt) = virtual_key_to_scan_code_and_ext(VK_MENU);
+        assert_eq!(sc_alt, 0x38);
+        assert!(!ext_alt);
+
+        // 2. Touches de navigation étendues
+        let (sc_end, ext_end) = virtual_key_to_scan_code_and_ext(VK_END);
+        assert_eq!(sc_end, 0x4F);
+        assert!(ext_end);
+
+        let (sc_del, ext_del) = virtual_key_to_scan_code_and_ext(VK_DELETE);
+        assert_eq!(sc_del, 0x53);
+        assert!(ext_del);
+
+        // 3. Construction des LPARAMs
+        let lp_down = build_send_keys_lparam(0x1D, false, false, false);
+        assert_eq!((lp_down >> 16) & 0xFF, 0x1D);
+        assert_eq!((lp_down >> 24) & 1, 0);
+        assert_eq!((lp_down >> 31) & 1, 0);
+
+        let lp_up = build_send_keys_lparam(0x4F, true, true, true);
+        assert_eq!((lp_up >> 16) & 0xFF, 0x4F);
+        assert_eq!((lp_up >> 24) & 1, 1); // Extended flag
+        assert_eq!((lp_up >> 29) & 1, 1); // Alt context
+        assert_eq!((lp_up >> 30) & 1, 1); // Previous state
+        assert_eq!((lp_up >> 31) & 1, 1); // Transition state (Key Up)
     }
 }

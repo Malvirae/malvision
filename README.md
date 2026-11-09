@@ -4,31 +4,42 @@ Application native **Windows 11 x64** de gestion de connexions distantes, écrit
 
 ## Vision et fonctionnalités (Jalons 1 à 3)
 
-- **Intégration externe native d'AnyDesk et RustDesk (Jalon 3)** :
+- **Intégration externe native d'AnyDesk et RustDesk (Jalons 3 et 3B)** :
   - **Gestion centralisée dans Paramètres > Applications externes** :
     - Chemins configurables vers `AnyDesk.exe` et `rustdesk.exe`.
     - Bouton **Parcourir...** exploitant le sélecteur standard moderne Windows (`IFileOpenDialog` avec filtre `*.exe`).
     - Bouton **Détecter** scannant automatiquement le Registre Windows (`HKLM`/`HKCU` `App Paths`) et les dossiers standards (`Program Files`, `Program Files (x86)`, `APPDATA`, `LOCALAPPDATA`).
     - Bouton **Tester** exécutant l'application pour valider le binaire en toute sécurité.
     - Persistance SQLite dans la table `settings` (schéma v3).
-  - **Lancement sécurisé des sessions distantes** :
+  - **Formulaire de connexion adaptatif au protocole (Jalon 3B)** :
+    - Le dialogue de création/édition adapte instantanément ses champs selon le protocole sélectionné (`RDP`, `AnyDesk`, `RustDesk`).
+    - Pour AnyDesk et RustDesk : masquage propre des champs spécifiques RDP (Port, Utilisateur, Domaine, Résolution dynamique, Presse-papiers), élargissement du champ Identifiant distant sur toute la largeur, adaptation des libellés de mot de passe et affichage de notes contextuelles.
+    - Préservation totale des valeurs saisies lors de basculements successifs entre protocoles.
+  - **Lancement sécurisé des sessions distantes et gestion des secrets (Jalon 3B)** :
     - Exécution exclusive via l'API Win32 native `CreateProcessW` sans intermédiaire shell (`cmd.exe` ou PowerShell), protégeant contre toute injection d'arguments.
     - Assainissement strict des identifiants distants (`[a-zA-Z0-9_\-\.@\s]`), rejetant immédiatement tout caractère de contrôle, guillemet ou redirection.
-    - Ligne de commande UTF-16 normalisée : `"<chemin>"` pour AnyDesk et `"<chemin>" --connect "<id>"` pour RustDesk.
-    - Aucun mot de passe n'est jamais passé en ligne de commande : l'authentification et l'affichage restent intégralement délégués aux clients officiels.
+    - **AnyDesk** : transmission sécurisée du mot de passe d'accès sans surveillance via un tube anonyme Win32 standard input (`--with-password`), sans mot de passe en ligne de commande ni dans les logs, avec fermeture immédiate du tube (`EOF`) et effacement mémoire (`write_volatile`).
+    - **RustDesk** : lancement direct `--connect "<id>"`. L'audit CLI confirmant l'absence de transmission de secret distant sur stdin/CLI, le mot de passe est conservé en coffre DPAPI pour référence de l'utilisateur avec mention explicite dans l'interface que l'authentification reste gérée par le client RustDesk.
     - Aucun faux onglet RDP n'est ouvert pour les outils tiers.
+- **RDP Avancé — Plein écran natif et actions de session (Jalons 3 et 3B)** :
+  - **Plein écran RDP natif ActiveX (`IMsRdpClient9::put_FullScreen`)** :
+    - Mode plein écran natif (`ContainerHandledFullScreen = 0`) avec barre de connexion supérieure (`DisplayConnectionBar = true`, `put_ConnectionBarText`).
+    - Synchronisation d'état via les événements ActiveX `OnEnterFullScreenMode` et `OnLeaveFullScreenMode`.
+    - Sortie fiable en plein écran via le raccourci Windows natif `Ctrl+Alt+Pause` ou la barre de connexion.
+  - **Envoi précis des combinaisons spéciales (`IMsRdpClientNonScriptable::SendKeys`)** :
+    - Conversion des touches en scan codes matériels PS/2 réels et encodage conforme des entiers 32 bits `lParam` (touches étendues, contexte Alt, transition up/down).
+    - Envoi fonctionnel de **Ctrl + Alt + Fin** (séquence SAS officielle de session distante RDP) et de **Ctrl + Alt + Suppr** selon les stratégies système Windows.
 - **RDP Avancé — Raccourcis Windows (`KeyboardHookMode`)** :
   - Propriété COM Microsoft `IMsRdpClientSecuredSettings2::put_KeyboardHookMode` configurée avant connexion :
     - `0` : Raccourcis exécutés sur le poste local.
     - `1` : Raccourcis envoyés à la session distante (**défaut recommandé**).
     - `2` : Raccourcis envoyés à distance uniquement en plein écran.
   - Fonctionnement vérifié avec `Win+R`, `Win+E`, `Win+D`, `Alt+Tab`, `Alt+F4`, `Ctrl+C` et `Ctrl+V`.
-  - Transfert de focus fluide et documentation claire des limites imposées par Windows (le raccourci noyau SAS Ctrl+Alt+Suppr ne pouvant être détourné en mode fenêtre, Malvision utilise l'injection COM dédiée).
 - **RDP Avancé — Menu d'actions de session active** :
   - Menu contextuel accessible via le bouton d'action `⚡` sur l'onglet actif RDP ainsi que par clic droit sur l'onglet :
-    - 🔒 **Envoyer Ctrl + Alt + Suppr** : injecté directement dans le flux RDP via `IMsRdpClientNonScriptable::SendKeys`.
-    - 🛡️ **Envoyer Ctrl + Alt + Fin** : équivalent standard RDP injecté via `IMsRdpClientNonScriptable::SendKeys`.
-    - 🔲 **Basculer / Quitter le mode plein écran** : pilotage COM officiel via `IMsRdpClient9::put_FullScreen` / `get_FullScreen`.
+    - 🔒 **Envoyer Ctrl + Alt + Suppr** : injection via `SendKeys` avec scan codes PS/2.
+    - 🛡️ **Envoyer Ctrl + Alt + Fin** : séquence SAS distante RDP officielle via `SendKeys`.
+    - 🔲 **Basculer / Quitter le mode plein écran** : pilotage COM officiel avec barre de connexion.
     - ❌ **Fermer / Déconnecter la session** : fermeture propre avec confirmation et libération ActiveX.
 - **RDP Avancé — Redirection presse-papiers et copie de fichiers** :
   - Redirection du presse-papiers texte/images (`RedirectClipboard`).
@@ -37,7 +48,7 @@ Application native **Windows 11 x64** de gestion de connexions distantes, écrit
   - **Thème sombre** par défaut : anthracite profond (`#16181B`), barre de titre sombre DWM (`DWMWA_USE_IMMERSIVE_DARK_MODE`), typographie `Segoe UI`, rendu GDI double-bufferisé sans scintillement et prise en charge HiDPI Per-Monitor V2 (`DpiMetrics` 100 % / 125 % / 150 %).
   - **Thème clair** haute lisibilité : fond blanc pur (`#FFFFFF`), panneau latéral gris-bleu Fluent (`#F3F5F9`), bordures douces et contrastes optimisés, sans inversion brutale.
   - **Thème système** : synchronisation automatique et dynamique avec les préférences Windows 11 (`AppsUseLightTheme`).
-  - Application immédiate du thème sans redémarrage requis sur l'ensemble de l'interface (panneau principal, TreeView, dialogues, formulaires, menus).
+  - **Finition de rendu (Jalon 3B)** : traitement de `WM_CTLCOLORSTATIC` sur le champ de recherche pour éliminer tout artefact lors du basculement dynamique de thème.
 - **Centre de Paramètres complet & persistant** :
   - Bouton **Paramètres** avec icône vectorielle d'engrenage au bas du volet latéral gauche.
   - Fenêtre de réglages dédiée articulée en 5 sections :

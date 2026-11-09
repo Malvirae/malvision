@@ -205,13 +205,20 @@ pub fn sanitize_remote_id(raw_id: &str) -> Result<String, String> {
 }
 
 /// Construit la ligne de commande UTF-16 correctement échappée pour AnyDesk :
-/// `"C:\Path\To\AnyDesk.exe" "<id>"`
-pub fn build_anydesk_command_line(exe_path: &Path, remote_id: Option<&str>) -> Vec<u16> {
+/// `"C:\Path\To\AnyDesk.exe" "<id>" [--with-password]`
+pub fn build_anydesk_command_line(
+    exe_path: &Path,
+    remote_id: Option<&str>,
+    with_password: bool,
+) -> Vec<u16> {
     let mut cmd = format!("\"{}\"", exe_path.display());
     if let Some(id) = remote_id
         && let Ok(safe_id) = sanitize_remote_id(id)
     {
         cmd.push_str(&format!(" \"{safe_id}\""));
+        if with_password {
+            cmd.push_str(" --with-password");
+        }
     }
     let mut utf16: Vec<u16> = cmd.encode_utf16().collect();
     utf16.push(0);
@@ -230,6 +237,109 @@ pub fn build_rustdesk_command_line(exe_path: &Path, remote_id: Option<&str>) -> 
     let mut utf16: Vec<u16> = cmd.encode_utf16().collect();
     utf16.push(0);
     utf16
+}
+
+/// Lance un processus Windows via l'API Win32 native `CreateProcessW` avec un pipe anonyme
+/// connecté à `stdin`, écrit le mot de passe de manière synchrone, ferme immédiatement le
+/// descripteur d'écriture pour envoyer `EOF`, et efface immédiatement la mémoire du mot de passe.
+pub fn launch_process_with_stdin_pipe(
+    exe_path: &Path,
+    cmd_line: &[u16],
+    stdin_content: &str,
+) -> Result<u32, String> {
+    use windows::Win32::Foundation::{
+        HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation,
+    };
+    use windows::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows::Win32::Storage::FileSystem::WriteFile;
+    use windows::Win32::System::Pipes::CreatePipe;
+    use windows::Win32::System::Threading::STARTF_USESTDHANDLES;
+
+    let valid_exe = validate_executable_path(exe_path)?;
+
+    unsafe {
+        let mut read_pipe = HANDLE::default();
+        let mut write_pipe = HANDLE::default();
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: std::ptr::null_mut(),
+            bInheritHandle: true.into(), // handle héritable par l'enfant
+        };
+
+        CreatePipe(&mut read_pipe, &mut write_pipe, Some(&sa), 0)
+            .map_err(|e| format!("Échec de création du pipe stdin pour AnyDesk : {e}"))?;
+
+        // S'assurer que le descripteur d'écriture du parent N'EST PAS hérité par l'enfant
+        let _ = SetHandleInformation(write_pipe, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0));
+
+        let startup_info = STARTUPINFOW {
+            cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+            hStdInput: read_pipe,
+            dwFlags: STARTF_USESTDHANDLES,
+            ..Default::default()
+        };
+        let mut process_info = PROCESS_INFORMATION::default();
+
+        let mut app_name_w: Vec<u16> = valid_exe.as_os_str().encode_wide().collect();
+        app_name_w.push(0);
+
+        let mut cmd_buf = cmd_line.to_vec();
+
+        let working_dir_w: Option<Vec<u16>> = valid_exe.parent().map(|dir| {
+            let mut w: Vec<u16> = dir.as_os_str().encode_wide().collect();
+            w.push(0);
+            w
+        });
+        let lp_working_dir = working_dir_w
+            .as_ref()
+            .map(|w| PCWSTR(w.as_ptr()))
+            .unwrap_or(PCWSTR::null());
+
+        let res = CreateProcessW(
+            PCWSTR(app_name_w.as_ptr()),
+            Some(PWSTR(cmd_buf.as_mut_ptr())),
+            None,
+            None,
+            true, // bInheritHandles = TRUE pour transmettre read_pipe à AnyDesk
+            Default::default(),
+            None,
+            lp_working_dir,
+            &startup_info,
+            &mut process_info,
+        );
+
+        // Fermer immédiatement le handle de lecture dans le parent (l'enfant a sa propre copie)
+        let _ = CloseHandle(read_pipe);
+
+        if let Err(err) = res {
+            let _ = CloseHandle(write_pipe);
+            return Err(format!(
+                "Échec de CreateProcessW pour '{}' : {}",
+                valid_exe.display(),
+                err.message()
+            ));
+        }
+
+        // Écrire le mot de passe sur le pipe d'entrée standard
+        let mut pwd_bytes = stdin_content.as_bytes().to_vec();
+        pwd_bytes.push(b'\n');
+        let mut bytes_written = 0u32;
+        let _ = WriteFile(write_pipe, Some(&pwd_bytes), Some(&mut bytes_written), None);
+
+        // Fermer immédiatement le descripteur d'écriture pour envoyer EOF à AnyDesk
+        let _ = CloseHandle(write_pipe);
+
+        // Effacer immédiatement le mot de passe de la mémoire vive (zeroize)
+        for b in &mut pwd_bytes {
+            std::ptr::write_volatile(b, 0);
+        }
+
+        let pid = process_info.dwProcessId;
+        let _ = CloseHandle(process_info.hThread);
+        let _ = CloseHandle(process_info.hProcess);
+
+        Ok(pid)
+    }
 }
 
 /// Lance un processus Windows via l'API Win32 native `CreateProcessW`.
@@ -293,7 +403,7 @@ pub fn launch_external_process(exe_path: &Path, cmd_line: &[u16]) -> Result<u32,
 /// Teste le lancement simple d'un exécutable externe (sans connexion) pour vérifier que le chemin fonctionne.
 pub fn test_launch_app(exe_path: &Path) -> Result<String, String> {
     let valid_exe = validate_executable_path(exe_path)?;
-    let cmd_line = build_anydesk_command_line(&valid_exe, None);
+    let cmd_line = build_anydesk_command_line(&valid_exe, None, false);
     let pid = launch_external_process(&valid_exe, &cmd_line)?;
     Ok(format!(
         "Lancement réussi de '{}' (Process ID : {}).",
@@ -305,8 +415,12 @@ pub fn test_launch_app(exe_path: &Path) -> Result<String, String> {
     ))
 }
 
-/// Lance une connexion AnyDesk vers un identifiant ou alias distant.
-pub fn launch_anydesk_connection(configured_path: &str, remote_id: &str) -> Result<String, String> {
+/// Lance une connexion AnyDesk vers un identifiant ou alias distant, avec ou sans mot de passe sur stdin.
+pub fn launch_anydesk_connection(
+    configured_path: &str,
+    remote_id: &str,
+    password: Option<&str>,
+) -> Result<String, String> {
     let exe_path = if configured_path.trim().is_empty() {
         detect_anydesk_path().ok_or_else(|| {
             "Le chemin de AnyDesk.exe n'est pas configuré et aucune installation standard n'a été détectée. Veuillez renseigner le chemin dans Paramètres > Applications externes.".to_string()
@@ -316,12 +430,21 @@ pub fn launch_anydesk_connection(configured_path: &str, remote_id: &str) -> Resu
     };
 
     let safe_id = sanitize_remote_id(remote_id)?;
-    let cmd_line = build_anydesk_command_line(&exe_path, Some(&safe_id));
-    let pid = launch_external_process(&exe_path, &cmd_line)?;
+    let has_pwd = password.is_some_and(|p| !p.trim().is_empty());
+    let cmd_line = build_anydesk_command_line(&exe_path, Some(&safe_id), has_pwd);
 
-    Ok(format!(
-        "Processus AnyDesk lancé (PID {pid}) vers l'identifiant '{safe_id}'. La fenêtre AnyDesk prend en charge la négociation et l'authentification."
-    ))
+    if has_pwd {
+        let pwd_val = password.unwrap();
+        let pid = launch_process_with_stdin_pipe(&exe_path, &cmd_line, pwd_val)?;
+        Ok(format!(
+            "Processus AnyDesk lancé (PID {pid}) vers l'identifiant '{safe_id}' avec transmission sécurisée du mot de passe sur stdin (--with-password)."
+        ))
+    } else {
+        let pid = launch_external_process(&exe_path, &cmd_line)?;
+        Ok(format!(
+            "Processus AnyDesk lancé (PID {pid}) vers l'identifiant '{safe_id}'. La fenêtre AnyDesk prend en charge la négociation et l'authentification."
+        ))
+    }
 }
 
 /// Lance une connexion RustDesk vers un identifiant ou alias distant.
@@ -426,14 +549,21 @@ mod tests {
     #[test]
     fn test_build_anydesk_command_line_encoding() {
         let exe = Path::new(r"C:\Program Files (x86)\AnyDesk\AnyDesk.exe");
-        let cmd = build_anydesk_command_line(exe, Some("456 789 012"));
+        let cmd = build_anydesk_command_line(exe, Some("456 789 012"), false);
         let decoded = String::from_utf16_lossy(&cmd[..cmd.len() - 1]);
         assert_eq!(
             decoded,
             r#""C:\Program Files (x86)\AnyDesk\AnyDesk.exe" "456 789 012""#
         );
 
-        let cmd_no_id = build_anydesk_command_line(exe, None);
+        let cmd_with_pwd = build_anydesk_command_line(exe, Some("456 789 012"), true);
+        let decoded_pwd = String::from_utf16_lossy(&cmd_with_pwd[..cmd_with_pwd.len() - 1]);
+        assert_eq!(
+            decoded_pwd,
+            r#""C:\Program Files (x86)\AnyDesk\AnyDesk.exe" "456 789 012" --with-password"#
+        );
+
+        let cmd_no_id = build_anydesk_command_line(exe, None, false);
         let decoded_no_id = String::from_utf16_lossy(&cmd_no_id[..cmd_no_id.len() - 1]);
         assert_eq!(
             decoded_no_id,

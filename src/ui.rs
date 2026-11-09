@@ -811,6 +811,7 @@ impl AppWindowState {
             }
             if !self.search_edit.is_invalid() {
                 let _ = InvalidateRect(Some(self.search_edit), None, true);
+                let _ = UpdateWindow(self.search_edit);
             }
             let _ = InvalidateRect(Some(self.hwnd), None, true);
             let _ = UpdateWindow(self.hwnd);
@@ -3160,16 +3161,19 @@ impl AppWindowState {
                 }
             }
             Protocol::AnyDesk => {
+                let saved_pwd = if conn.has_saved_password {
+                    self.storage.load_decrypted_password(conn.id).ok().flatten()
+                } else {
+                    None
+                };
+                let pwd_str = saved_pwd.as_ref().map(|s| s.as_str());
                 match crate::external_apps::launch_anydesk_connection(
                     &self.settings.anydesk_path,
                     &conn.host,
+                    pwd_str,
                 ) {
-                    Ok(pid) => {
-                        let msg = format!(
-                            "Session AnyDesk vers « {} » (ID: {}) lancée (PID: {}).",
-                            conn.name, conn.host, pid
-                        );
-                        self.status_override = Some(msg);
+                    Ok(info_msg) => {
+                        self.status_override = Some(info_msg);
                         self.invalidate_canvas();
                     }
                     Err(err) => {
@@ -4652,9 +4656,18 @@ struct DialogLabel {
     bold: bool,
 }
 
+struct ConnDialogLabel {
+    text: String,
+    rect: RECT,
+    muted: bool,
+    bold: bool,
+    rdp_only: bool,
+}
+
 struct DialogEditBox {
     hwnd: HWND,
     box_rect: RECT,
+    rdp_only: bool,
 }
 
 struct ConnectionDialogState {
@@ -4668,9 +4681,16 @@ struct ConnectionDialogState {
     brush_input: HBRUSH,
     header_title: String,
     header_subtitle: String,
+    current_protocol: Protocol,
     host_label_text: String,
     host_label_rect: RECT,
-    labels: Vec<DialogLabel>,
+    host_box_rect_normal: RECT,
+    host_box_rect_full: RECT,
+    password_label_text: String,
+    password_label_rect: RECT,
+    notice_text: Option<String>,
+    notice_rect: RECT,
+    labels: Vec<ConnDialogLabel>,
     edit_boxes: Vec<DialogEditBox>,
     divider_y1: i32,
     divider_y2: i32,
@@ -4736,6 +4756,54 @@ fn build_folder_choices(
         &mut visited,
     );
     out
+}
+
+/// Adapte immédiatement la disposition des contrôles et libellés du formulaire selon le protocole sélectionné.
+fn update_dialog_protocol_layout(state: &mut ConnectionDialogState, hwnd: HWND, proto: Protocol) {
+    state.current_protocol = proto;
+    let is_rdp = proto == Protocol::Rdp;
+    unsafe {
+        let _ = ShowWindow(state.ed_port, if is_rdp { SW_SHOW } else { SW_HIDE });
+        let _ = ShowWindow(state.ed_user, if is_rdp { SW_SHOW } else { SW_HIDE });
+        let _ = ShowWindow(state.ed_domain, if is_rdp { SW_SHOW } else { SW_HIDE });
+        let _ = ShowWindow(state.chk_dyn_res, if is_rdp { SW_SHOW } else { SW_HIDE });
+        let _ = ShowWindow(state.chk_clipboard, if is_rdp { SW_SHOW } else { SW_HIDE });
+
+        let host_rc = if is_rdp {
+            state.host_box_rect_normal
+        } else {
+            state.host_box_rect_full
+        };
+        let _ = MoveWindow(
+            state.ed_host,
+            host_rc.left,
+            host_rc.top,
+            host_rc.right - host_rc.left,
+            host_rc.bottom - host_rc.top,
+            true,
+        );
+
+        match proto {
+            Protocol::Rdp => {
+                state.host_label_text = "Hôte RDP (IP / DNS) * :".to_string();
+                state.password_label_text = "Mot de passe :".to_string();
+                state.notice_text = None;
+            }
+            Protocol::AnyDesk => {
+                state.host_label_text = "ID ou Alias AnyDesk * :".to_string();
+                state.password_label_text = "Accès sans surveillance :".to_string();
+                state.notice_text = Some("Note AnyDesk : mot de passe transmis de façon sécurisée sur le flux standard (pipe stdin).".to_string());
+            }
+            Protocol::RustDesk => {
+                state.host_label_text = "ID RustDesk * :".to_string();
+                state.password_label_text = "Mot de passe permanent :".to_string();
+                state.notice_text = Some("Note RustDesk : l'authentification distante reste gérée directement par le client RustDesk.".to_string());
+            }
+        }
+
+        let _ = InvalidateRect(Some(hwnd), None, true);
+        let _ = UpdateWindow(hwnd);
+    }
 }
 
 unsafe extern "system" fn conn_dlg_wnd_proc(
@@ -4863,8 +4931,21 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                 let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                 draw_text_line(hdc, &state.host_label_text, state.host_label_rect);
 
+                // Libellé dynamique de mot de passe (RDP / AnyDesk / RustDesk)
+                draw_text_line(hdc, &state.password_label_text, state.password_label_rect);
+
+                // Notice informative spécifique (RustDesk / AnyDesk)
+                if let Some(ref notice) = state.notice_text {
+                    let _ = SelectObject(hdc, state.font_small.into());
+                    let _ = SetTextColor(hdc, COLORREF(col_accent()));
+                    draw_text_line(hdc, notice, state.notice_rect);
+                }
+
                 // Tous les autres libellés dessinés directement en mode TRANSPARENT
                 for lbl in &state.labels {
+                    if lbl.rdp_only && state.current_protocol != Protocol::Rdp {
+                        continue;
+                    }
                     let f = if lbl.bold {
                         state.font_bold
                     } else if lbl.muted {
@@ -4887,6 +4968,9 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                 // Conteneurs sombres arrondis autour de chaque champ WC_EDITW
                 let focus_hwnd = GetFocus();
                 for eb in &state.edit_boxes {
+                    if eb.rdp_only && state.current_protocol != Protocol::Rdp {
+                        continue;
+                    }
                     let enabled = IsWindowEnabled(eb.hwnd).as_bool();
                     let focused = focus_hwnd == eb.hwnd;
                     let fill = if enabled {
@@ -4895,7 +4979,16 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                         col_bg_deep()
                     };
                     let border = if focused { col_accent() } else { col_border() };
-                    draw_rounded_box(hdc, eb.box_rect, fill, border);
+                    let rect = if eb.hwnd == state.ed_host {
+                        if state.current_protocol == Protocol::Rdp {
+                            state.host_box_rect_normal
+                        } else {
+                            state.host_box_rect_full
+                        }
+                    } else {
+                        eb.box_rect
+                    };
+                    draw_rounded_box(hdc, rect, fill, border);
                 }
 
                 // Encadré discret d'information sécurité DPAPI
@@ -4952,21 +5045,12 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                             Some(LPARAM(0)),
                         )
                         .0;
-                        let is_rdp = sel <= 0;
-                        let _ = EnableWindow(state.ed_port, is_rdp);
-                        let _ = EnableWindow(state.ed_domain, is_rdp);
-                        let _ = EnableWindow(state.chk_dyn_res, is_rdp);
-                        let _ = EnableWindow(state.chk_clipboard, is_rdp);
-                        state.host_label_text = if is_rdp {
-                            "Hôte RDP (IP / DNS) * :".to_string()
-                        } else if sel == 1 {
-                            "ID / Alias AnyDesk * :".to_string()
-                        } else {
-                            "ID / Adresse RustDesk * :".to_string()
+                        let proto = match sel {
+                            1 => Protocol::AnyDesk,
+                            2 => Protocol::RustDesk,
+                            _ => Protocol::Rdp,
                         };
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                        let _ = InvalidateRect(Some(state.chk_dyn_res), None, false);
-                        let _ = InvalidateRect(Some(state.chk_clipboard), None, false);
+                        update_dialog_protocol_layout(state, hwnd, proto);
                     } else if id == IDC_DLG_SAVE_PASS {
                         let checked = SendMessageW(
                             state.chk_save_pass,
@@ -5188,6 +5272,44 @@ fn run_connection_form_dialog(
         let field_right = client_w - pad_x;
         let field_h = dpi.scale(32);
 
+        let y_host = dpi.scale(210);
+        let port_box_w = dpi.scale(78);
+        let port_lbl_w = dpi.scale(48);
+        let rc_port = RECT {
+            left: field_right - port_box_w,
+            top: y_host,
+            right: field_right,
+            bottom: y_host + field_h,
+        };
+        let rc_host = RECT {
+            left: field_left,
+            top: y_host,
+            right: rc_port.left - port_lbl_w - dpi.scale(10),
+            bottom: y_host + field_h,
+        };
+        let host_box_rect_normal = rc_host;
+        let host_box_rect_full = RECT {
+            left: field_left,
+            top: y_host,
+            right: field_right,
+            bottom: y_host + field_h,
+        };
+        let y_pass = dpi.scale(336);
+        let password_label_rect = RECT {
+            left: pad_x,
+            top: y_pass,
+            right: field_left - dpi.scale(8),
+            bottom: y_pass + field_h,
+        };
+        let y_chk3 = dpi.scale(432);
+        let notice_rect = RECT {
+            left: field_left,
+            top: y_chk3,
+            right: field_right,
+            bottom: y_chk3 + dpi.scale(44),
+        };
+        let initial_proto = existing.map(|e| e.protocol).unwrap_or(Protocol::Rdp);
+
         // Préparer l'état avant de créer les contrôles enfants pour que WM_CTLCOLOR* ait toujours un pointeur valide
         let mut dlg_state = Box::new(ConnectionDialogState {
             owner,
@@ -5206,13 +5328,37 @@ fn run_connection_form_dialog(
             header_subtitle:
                 "Configurez l'hôte distant, le dossier de rangement et les paramètres de session."
                     .to_string(),
-            host_label_text: "Hôte RDP (IP / DNS) * :".to_string(),
+            current_protocol: initial_proto,
+            host_label_text: match initial_proto {
+                Protocol::Rdp => "Hôte RDP (IP / DNS) * :".to_string(),
+                Protocol::AnyDesk => "ID ou Alias AnyDesk * :".to_string(),
+                Protocol::RustDesk => "ID RustDesk * :".to_string(),
+            },
             host_label_rect: RECT {
                 left: pad_x,
-                top: dpi.scale(210),
+                top: y_host,
                 right: field_left - dpi.scale(8),
-                bottom: dpi.scale(210) + field_h,
+                bottom: y_host + field_h,
             },
+            host_box_rect_normal,
+            host_box_rect_full,
+            password_label_text: match initial_proto {
+                Protocol::Rdp => "Mot de passe :".to_string(),
+                Protocol::AnyDesk => "Accès sans surveillance :".to_string(),
+                Protocol::RustDesk => "Mot de passe permanent :".to_string(),
+            },
+            password_label_rect,
+            notice_text: match initial_proto {
+                Protocol::Rdp => None,
+                Protocol::AnyDesk => Some(
+                    "Note AnyDesk : mot de passe transmis sur stdin (--with-password).".to_string(),
+                ),
+                Protocol::RustDesk => Some(
+                    "Note RustDesk : l'authentification reste gérée par le client RustDesk."
+                        .to_string(),
+                ),
+            },
+            notice_rect,
             labels: Vec::new(),
             edit_boxes: Vec::new(),
             divider_y1: dpi.scale(70),
@@ -5243,19 +5389,21 @@ fn run_connection_form_dialog(
 
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&mut *dlg_state) as *mut _ as isize);
 
-        let add_label = |labels: &mut Vec<DialogLabel>, text: &str, top: i32, h: i32| {
-            labels.push(DialogLabel {
-                text: text.to_string(),
-                rect: RECT {
-                    left: pad_x,
-                    top,
-                    right: field_left - dpi.scale(8),
-                    bottom: top + h,
-                },
-                muted: false,
-                bold: false,
-            });
-        };
+        let add_label =
+            |labels: &mut Vec<ConnDialogLabel>, text: &str, top: i32, h: i32, rdp_only: bool| {
+                labels.push(ConnDialogLabel {
+                    text: text.to_string(),
+                    rect: RECT {
+                        left: pad_x,
+                        top,
+                        right: field_left - dpi.scale(8),
+                        bottom: top + h,
+                    },
+                    muted: false,
+                    bold: false,
+                    rdp_only,
+                });
+            };
 
         // 1. Nom de la connexion
         let y_name = dpi.scale(84);
@@ -5264,6 +5412,7 @@ fn run_connection_form_dialog(
             "Nom de la connexion * :",
             y_name,
             field_h,
+            false,
         );
         let rc_name = RECT {
             left: field_left,
@@ -5283,11 +5432,18 @@ fn run_connection_form_dialog(
         dlg_state.edit_boxes.push(DialogEditBox {
             hwnd: ed_name,
             box_rect: rc_name,
+            rdp_only: false,
         });
 
         // 2. Protocole
         let y_proto = dpi.scale(126);
-        add_label(&mut dlg_state.labels, "Protocole :", y_proto, field_h);
+        add_label(
+            &mut dlg_state.labels,
+            "Protocole :",
+            y_proto,
+            field_h,
+            false,
+        );
         let rc_proto = RECT {
             left: field_left,
             top: y_proto,
@@ -5318,7 +5474,13 @@ fn run_connection_form_dialog(
 
         // 3. Dossier parent
         let y_folder = dpi.scale(168);
-        add_label(&mut dlg_state.labels, "Dossier parent :", y_folder, field_h);
+        add_label(
+            &mut dlg_state.labels,
+            "Dossier parent :",
+            y_folder,
+            field_h,
+            false,
+        );
         let rc_folder = RECT {
             left: field_left,
             top: y_folder,
@@ -5363,22 +5525,7 @@ fn run_connection_form_dialog(
         dlg_state.folder_options = folder_options;
 
         // 4. Hôte + Port
-        let y_host = dpi.scale(210);
-        let port_box_w = dpi.scale(78);
-        let port_lbl_w = dpi.scale(48);
-        let rc_port = RECT {
-            left: field_right - port_box_w,
-            top: y_host,
-            right: field_right,
-            bottom: y_host + field_h,
-        };
-        let rc_host = RECT {
-            left: field_left,
-            top: y_host,
-            right: rc_port.left - port_lbl_w - dpi.scale(10),
-            bottom: y_host + field_h,
-        };
-        dlg_state.labels.push(DialogLabel {
+        dlg_state.labels.push(ConnDialogLabel {
             text: "Port :".to_string(),
             rect: RECT {
                 left: rc_host.right + dpi.scale(12),
@@ -5388,6 +5535,7 @@ fn run_connection_form_dialog(
             },
             muted: false,
             bold: false,
+            rdp_only: true,
         });
 
         let ed_host = create_dark_edit(
@@ -5413,10 +5561,12 @@ fn run_connection_form_dialog(
         dlg_state.edit_boxes.push(DialogEditBox {
             hwnd: ed_host,
             box_rect: rc_host,
+            rdp_only: false,
         });
         dlg_state.edit_boxes.push(DialogEditBox {
             hwnd: ed_port,
             box_rect: rc_port,
+            rdp_only: true,
         });
 
         // 5. Utilisateur
@@ -5426,6 +5576,7 @@ fn run_connection_form_dialog(
             "Nom d'utilisateur :",
             y_user,
             field_h,
+            true,
         );
         let rc_user = RECT {
             left: field_left,
@@ -5445,6 +5596,7 @@ fn run_connection_form_dialog(
         dlg_state.edit_boxes.push(DialogEditBox {
             hwnd: ed_user,
             box_rect: rc_user,
+            rdp_only: true,
         });
 
         // 6. Domaine
@@ -5454,6 +5606,7 @@ fn run_connection_form_dialog(
             "Domaine (facultatif) :",
             y_dom,
             field_h,
+            true,
         );
         let rc_dom = RECT {
             left: field_left,
@@ -5473,11 +5626,10 @@ fn run_connection_form_dialog(
         dlg_state.edit_boxes.push(DialogEditBox {
             hwnd: ed_domain,
             box_rect: rc_dom,
+            rdp_only: true,
         });
 
-        // 7. Mot de passe
-        let y_pass = dpi.scale(336);
-        add_label(&mut dlg_state.labels, "Mot de passe :", y_pass, field_h);
+        // 7. Mot de passe (libellé géré dynamiquement par WM_PAINT)
         let rc_pass = RECT {
             left: field_left,
             top: y_pass,
@@ -5496,6 +5648,7 @@ fn run_connection_form_dialog(
         dlg_state.edit_boxes.push(DialogEditBox {
             hwnd: ed_pass,
             box_rect: rc_pass,
+            rdp_only: false,
         });
 
         // 8. Cases à cocher larges (434 px à 96 DPI -> aucune troncature)
@@ -5505,7 +5658,7 @@ fn run_connection_form_dialog(
         let y_chk3 = dpi.scale(432);
         let y_chk4 = dpi.scale(460);
 
-        dlg_state.labels.push(DialogLabel {
+        dlg_state.labels.push(ConnDialogLabel {
             text: "Options de session :".to_string(),
             rect: RECT {
                 left: pad_x,
@@ -5515,6 +5668,7 @@ fn run_connection_form_dialog(
             },
             muted: false,
             bold: false,
+            rdp_only: false,
         });
 
         let chk_save_pass = create_dark_checkbox(
@@ -5572,7 +5726,13 @@ fn run_connection_form_dialog(
 
         // 9. Description
         let y_desc = dpi.scale(494);
-        add_label(&mut dlg_state.labels, "Description :", y_desc, field_h);
+        add_label(
+            &mut dlg_state.labels,
+            "Description :",
+            y_desc,
+            field_h,
+            false,
+        );
         let rc_desc = RECT {
             left: field_left,
             top: y_desc,
@@ -5591,6 +5751,7 @@ fn run_connection_form_dialog(
         dlg_state.edit_boxes.push(DialogEditBox {
             hwnd: ed_desc,
             box_rect: rc_desc,
+            rdp_only: false,
         });
 
         // 10. Boutons d'action Enregistrer / Annuler
@@ -5651,11 +5812,6 @@ fn run_connection_form_dialog(
                 Protocol::RustDesk => 2,
             };
             let _ = SendMessageW(cb_proto, CB_SETCURSEL, Some(WPARAM(p_idx)), Some(LPARAM(0)));
-            dlg_state.host_label_text = match ex.protocol {
-                Protocol::Rdp => "Hôte RDP (IP / DNS) * :".to_string(),
-                Protocol::AnyDesk => "ID / Alias AnyDesk * :".to_string(),
-                Protocol::RustDesk => "ID / Adresse RustDesk * :".to_string(),
-            };
             set_window_text(ed_host, &ex.host);
             set_window_text(ed_port, &ex.port.to_string());
             set_window_text(ed_user, &ex.username);
@@ -5697,12 +5853,7 @@ fn run_connection_form_dialog(
                 Some(WPARAM(usize::from(ex.redirect_clipboard))),
                 Some(LPARAM(0)),
             );
-
-            let is_rdp = ex.protocol == Protocol::Rdp;
-            let _ = EnableWindow(ed_port, is_rdp);
-            let _ = EnableWindow(ed_domain, is_rdp);
-            let _ = EnableWindow(chk_dyn_res, is_rdp);
-            let _ = EnableWindow(chk_clipboard, is_rdp);
+            update_dialog_protocol_layout(&mut dlg_state, hwnd, ex.protocol);
         } else {
             let _ = SendMessageW(cb_proto, CB_SETCURSEL, Some(WPARAM(0)), Some(LPARAM(0)));
             let _ = SendMessageW(chk_save_pass, BM_SETCHECK, Some(WPARAM(0)), Some(LPARAM(0)));
@@ -5719,6 +5870,7 @@ fn run_connection_form_dialog(
                 Some(WPARAM(usize::from(default_clipboard))),
                 Some(LPARAM(0)),
             );
+            update_dialog_protocol_layout(&mut dlg_state, hwnd, Protocol::Rdp);
         }
 
         let tab_order = [
@@ -7965,6 +8117,22 @@ unsafe extern "system" fn main_wnd_proc(
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
+            WM_CTLCOLORSTATIC => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const AppWindowState;
+                if !ptr.is_null() {
+                    let hdc = HDC(wparam.0 as *mut _);
+                    let ctrl_hwnd = HWND(lparam.0 as *mut _);
+                    if ctrl_hwnd == (*ptr).search_edit {
+                        let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
+                        let _ = SetBkColor(hdc, COLORREF(col_bg_input()));
+                        return LRESULT((*ptr).palette.brush_bg_input.0 as isize);
+                    }
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_sidebar()));
+                    return LRESULT((*ptr).palette.brush_bg_sidebar.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
             WM_GETMINMAXINFO => {
                 let mmi = lparam.0 as *mut MINMAXINFO;
                 if !mmi.is_null() {
@@ -8361,9 +8529,10 @@ mod tests {
     use crate::rdp::{RDP_EVT_CONNECTED, RDP_EVT_CONNECTING, pack_rdp_event_wparam};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
     use windows::Win32::UI::WindowsAndMessaging::{
-        BM_CLICK, FindWindowExW, GetDlgItem, IsIconic, IsZoomed, SC_MAXIMIZE, SC_MINIMIZE,
-        SC_RESTORE, TIMERPROC, WM_LBUTTONDOWN, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+        BM_CLICK, FindWindowExW, GetDlgItem, IsIconic, IsWindowVisible, IsZoomed, SC_MAXIMIZE,
+        SC_MINIMIZE, SC_RESTORE, TIMERPROC, WM_LBUTTONDOWN, WM_NCHITTEST, WM_NCLBUTTONDOWN,
     };
 
     static TEST_DB_COUNTER: AtomicUsize = AtomicUsize::new(1);
@@ -8747,6 +8916,81 @@ mod tests {
                 let btn_cancel = GetDlgItem(Some(dlg), IDC_DLG_CANCEL as i32).unwrap_or_default();
                 assert!(!btn_cancel.0.is_null(), "Bouton Annuler introuvable");
                 let _ = SendMessageW(btn_cancel, BM_CLICK, Some(WPARAM(0)), Some(LPARAM(0)));
+            } else if step == 3 {
+                // Tester le formulaire adaptatif AnyDesk
+                let cb_proto = GetDlgItem(Some(dlg), IDC_DLG_PROTO as i32).unwrap_or_default();
+                assert!(!cb_proto.0.is_null());
+                // Sélectionner AnyDesk (indice 1) et notifier CBN_SELCHANGE
+                let _ = SendMessageW(cb_proto, CB_SETCURSEL, Some(WPARAM(1)), Some(LPARAM(0)));
+                let _ = SendMessageW(
+                    dlg,
+                    WM_COMMAND,
+                    Some(WPARAM(1 << 16 | IDC_DLG_PROTO)),
+                    Some(LPARAM(cb_proto.0 as isize)),
+                );
+                // Vérifier que les champs spécifiques RDP sont bien masqués
+                assert!(
+                    !IsWindowVisible(ed_port).as_bool(),
+                    "Port doit être masqué sous AnyDesk"
+                );
+                assert!(
+                    !IsWindowVisible(ed_user).as_bool(),
+                    "Utilisateur doit être masqué sous AnyDesk"
+                );
+                assert!(
+                    !IsWindowVisible(ed_domain).as_bool(),
+                    "Domaine doit être masqué sous AnyDesk"
+                );
+
+                // Remplir la fiche AnyDesk
+                set_window_text(ed_name, "Support AnyDesk Client");
+                set_window_text(ed_host, "456 789 012");
+                let _ = SendMessageW(chk_save, BM_SETCHECK, Some(WPARAM(1)), Some(LPARAM(0)));
+                let _ = SendMessageW(
+                    dlg,
+                    WM_COMMAND,
+                    Some(WPARAM(IDC_DLG_SAVE_PASS)),
+                    Some(LPARAM(chk_save.0 as isize)),
+                );
+                set_window_text(ed_pass, "UnattendedPwdAnyDesk42!");
+
+                let btn_ok = GetDlgItem(Some(dlg), IDC_DLG_OK as i32).unwrap_or_default();
+                let _ = SendMessageW(btn_ok, BM_CLICK, Some(WPARAM(0)), Some(LPARAM(0)));
+            } else if step == 4 {
+                // Tester la bascule dynamique RustDesk <-> RDP
+                let cb_proto = GetDlgItem(Some(dlg), IDC_DLG_PROTO as i32).unwrap_or_default();
+                // Sélectionner RustDesk (indice 2)
+                let _ = SendMessageW(cb_proto, CB_SETCURSEL, Some(WPARAM(2)), Some(LPARAM(0)));
+                let _ = SendMessageW(
+                    dlg,
+                    WM_COMMAND,
+                    Some(WPARAM(1 << 16 | IDC_DLG_PROTO)),
+                    Some(LPARAM(cb_proto.0 as isize)),
+                );
+                assert!(
+                    !IsWindowVisible(ed_port).as_bool(),
+                    "Port masqué sous RustDesk"
+                );
+
+                // Rebasculer sur RDP (indice 0)
+                let _ = SendMessageW(cb_proto, CB_SETCURSEL, Some(WPARAM(0)), Some(LPARAM(0)));
+                let _ = SendMessageW(
+                    dlg,
+                    WM_COMMAND,
+                    Some(WPARAM(1 << 16 | IDC_DLG_PROTO)),
+                    Some(LPARAM(cb_proto.0 as isize)),
+                );
+                assert!(
+                    IsWindowVisible(ed_port).as_bool(),
+                    "Port réaffiché sous RDP"
+                );
+                assert!(
+                    IsWindowVisible(ed_user).as_bool(),
+                    "Utilisateur réaffiché sous RDP"
+                );
+
+                let btn_cancel = GetDlgItem(Some(dlg), IDC_DLG_CANCEL as i32).unwrap_or_default();
+                let _ = SendMessageW(btn_cancel, BM_CLICK, Some(WPARAM(0)), Some(LPARAM(0)));
             }
         }
     }
@@ -8816,6 +9060,32 @@ mod tests {
             assert!(IsWindowEnabled(hwnd).as_bool());
             let conns_after_cancel = reopened.list_connections().expect("Lecture après Annuler");
             assert_eq!(conns_after_cancel.len(), 1);
+
+            // 3. Ouvrir et enregistrer une fiche AnyDesk via le formulaire adaptatif
+            CONN_TEST_STEP.store(3, Ordering::SeqCst);
+            let _ = SetTimer(Some(hwnd), 9303, 25, timer_fn);
+            (*ptr).open_connection_dialog(None, Some(folder.id));
+            let _ = KillTimer(Some(hwnd), 9303);
+
+            let conns_with_anydesk = reopened.list_connections().expect("Lecture après AnyDesk");
+            assert_eq!(conns_with_anydesk.len(), 2);
+            let anydesk_conn = conns_with_anydesk
+                .iter()
+                .find(|c| c.protocol == Protocol::AnyDesk)
+                .expect("Fiche AnyDesk trouvée");
+            assert_eq!(anydesk_conn.name, "Support AnyDesk Client");
+            assert_eq!(anydesk_conn.host, "456 789 012");
+            let anydesk_pwd = reopened
+                .load_decrypted_password(anydesk_conn.id)
+                .expect("Déchiffrement DPAPI")
+                .expect("Mot de passe AnyDesk");
+            assert_eq!(anydesk_pwd.as_str(), "UnattendedPwdAnyDesk42!");
+
+            // 4. Tester la bascule dynamique RustDesk <-> RDP dans le formulaire
+            CONN_TEST_STEP.store(4, Ordering::SeqCst);
+            let _ = SetTimer(Some(hwnd), 9304, 25, timer_fn);
+            (*ptr).open_connection_dialog(None, Some(folder.id));
+            let _ = KillTimer(Some(hwnd), 9304);
 
             let _ = SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
         }
@@ -9325,6 +9595,75 @@ mod tests {
 
             // 4. Nettoyer et détruire la fenêtre
             (*ptr).sessions.close_all();
+            let _ = DestroyWindow(hwnd);
+        }
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_ui_search_edit_theming_and_ctlcolorstatic() {
+        let db_path = create_temp_test_db_path("search_theme");
+        let _ = std::fs::remove_file(&db_path);
+
+        unsafe {
+            let hwnd = create_isolated_test_main_window(&db_path);
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+
+            let search_edit = (*ptr).search_edit;
+            assert!(IsWindow(Some(search_edit)).as_bool());
+
+            let hdc = GetDC(Some(hwnd));
+            assert!(!hdc.0.is_null());
+
+            // 1. En Dark Theme (par défaut), WM_CTLCOLORSTATIC sur search_edit doit retourner brush_bg_input
+            let res_dark = SendMessageW(
+                hwnd,
+                WM_CTLCOLORSTATIC,
+                Some(WPARAM(hdc.0 as usize)),
+                Some(LPARAM(search_edit.0 as isize)),
+            );
+            assert_eq!(
+                res_dark.0,
+                (*ptr).palette.brush_bg_input.0 as isize,
+                "WM_CTLCOLORSTATIC sur search_edit doit renvoyer brush_bg_input en Dark theme"
+            );
+
+            // 2. Basculer en Light Theme
+            (*ptr).settings.theme_mode = crate::settings::ThemeMode::Light;
+            (*ptr).apply_theme();
+            assert_eq!(
+                (*ptr).settings.resolved_theme(),
+                crate::settings::ResolvedTheme::Light
+            );
+
+            let res_light = SendMessageW(
+                hwnd,
+                WM_CTLCOLORSTATIC,
+                Some(WPARAM(hdc.0 as usize)),
+                Some(LPARAM(search_edit.0 as isize)),
+            );
+            assert_eq!(
+                res_light.0,
+                (*ptr).palette.brush_bg_input.0 as isize,
+                "WM_CTLCOLORSTATIC sur search_edit doit renvoyer brush_bg_input en Light theme"
+            );
+
+            // 3. WM_CTLCOLORSTATIC sur un autre contrôle doit renvoyer brush_bg_sidebar
+            let res_other = SendMessageW(
+                hwnd,
+                WM_CTLCOLORSTATIC,
+                Some(WPARAM(hdc.0 as usize)),
+                Some(LPARAM(hwnd.0 as isize)),
+            );
+            assert_eq!(
+                res_other.0,
+                (*ptr).palette.brush_bg_sidebar.0 as isize,
+                "WM_CTLCOLORSTATIC sur un autre contrôle doit renvoyer brush_bg_sidebar"
+            );
+
+            // Nettoyage
+            let _ = ReleaseDC(Some(hwnd), hdc);
             let _ = DestroyWindow(hwnd);
         }
         let _ = std::fs::remove_file(&db_path);

@@ -20,9 +20,9 @@
 use crate::models::{ConnectionItem, Protocol};
 use crate::rdp::{
     RDP_EVT_AUTH_WARNING_DISMISSED, RDP_EVT_AUTH_WARNING_DISPLAYED, RDP_EVT_AUTO_RECONNECTING,
-    RDP_EVT_CONNECTED, RDP_EVT_CONNECTING, RDP_EVT_DISCONNECTED, RDP_EVT_FATAL_ERROR,
-    RDP_EVT_LOGIN_COMPLETE, RDP_EVT_LOGON_ERROR, RDP_EVT_WARNING, RdpActiveXHost,
-    RdpConnectionConfig,
+    RDP_EVT_CONNECTED, RDP_EVT_CONNECTING, RDP_EVT_DISCONNECTED, RDP_EVT_ENTER_FULLSCREEN,
+    RDP_EVT_FATAL_ERROR, RDP_EVT_LEAVE_FULLSCREEN, RDP_EVT_LOGIN_COMPLETE, RDP_EVT_LOGON_ERROR,
+    RDP_EVT_WARNING, RdpActiveXHost, RdpConnectionConfig,
 };
 use crate::security::SecretString;
 use crate::settings::RdpKeyboardHookMode;
@@ -483,6 +483,27 @@ impl SessionManager {
                         status_message: Some(full_err.clone()),
                         error_alert: Some(("Session RDP interrompue".to_string(), full_err)),
                     }
+                }
+            }
+            RDP_EVT_ENTER_FULLSCREEN => {
+                let msg = format!("Session RDP '{title}' basculée en plein écran.");
+                tab.status_detail = msg.clone();
+                RdpEventOutcome {
+                    closed_session_id: None,
+                    status_message: Some(msg),
+                    error_alert: None,
+                }
+            }
+            RDP_EVT_LEAVE_FULLSCREEN => {
+                let msg = format!("Session RDP '{title}' de retour en mode fenêtré.");
+                tab.status_detail = msg.clone();
+                if self.active_session_id == Some(session_id) {
+                    tab.host.focus_control();
+                }
+                RdpEventOutcome {
+                    closed_session_id: None,
+                    status_message: Some(msg),
+                    error_alert: None,
                 }
             }
             _ => RdpEventOutcome::default(),

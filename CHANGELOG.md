@@ -2,6 +2,40 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
+## [Jalon 3B] — Correctifs pré-release V1.0.0 (Plein écran RDP, SendKeys, formulaires adaptatifs, transmission de secret AnyDesk et thème)
+
+### Corrigé
+- **Plein écran RDP natif ActiveX (`IMsRdpClient9::put_FullScreen`)** :
+  - Configuration de `ContainerHandledFullScreen = 0` dans les propriétés non-scriptables pour déléguer la gestion plein écran au conteneur natif Microsoft (`TscShellContainerClass`).
+  - Activation de la barre de connexion (`DisplayConnectionBar = true`, `PinConnectionBar = false`) et initialisation systématique de `IMsRdpClientNonScriptable3::put_ConnectionBarText` (offset de vtable 280) avant l'appel à `put_FullScreen`, conformément aux spécifications Microsoft.
+  - Câblage des événements ActiveX `OnEnterFullScreenMode` (DISPID 5 / `RDP_EVT_ENTER_FULLSCREEN`) et `OnLeaveFullScreenMode` (DISPID 6 / `RDP_EVT_LEAVE_FULLSCREEN`) pour synchroniser fidèlement l'état UI du bouton plein écran.
+  - Sortie fiable du mode plein écran par le raccourci natif Windows `Ctrl+Alt+Pause` ou par le bouton de réduction/restauration de la barre de connexion supérieure.
+- **Envoi des combinaisons spéciales RDP (`IMsRdpClientNonScriptable::SendKeys`)** :
+  - Résolution de l'absence d'effet de `SendKeys` (offset de vtable 112) : conversion des codes de touches virtuelles (`VK_*`) en codes de balayage matériel PS/2 (`MapVirtualKeyW(MAPVK_VK_TO_VSC_EX)`) et construction conforme des entiers 32 bits `lParam` (bits 16-23 : scan code, bit 24 : touche étendue, bit 29 : contexte Alt, bit 30 : état précédent, bit 31 : transition de relâchement).
+  - Clarification technique et documentation : sous Windows NT, la combinaison `Ctrl + Alt + Suppr` est une séquence SAS protégée par le noyau (`Winlogon`). Sur une session RDP, la séquence officielle prévue par Microsoft est `Ctrl + Alt + Fin`. Les deux séquences sont désormais correctement transmises via `SendKeys` avec leurs scan codes matériels respectifs.
+- **Formulaire de connexion adaptatif selon le protocole** :
+  - Basculement dynamique instantané lors de la sélection du protocole (`RDP`, `AnyDesk`, `RustDesk`) dans le dialogue de création/édition de connexion.
+  - Masquage automatique des contrôles non pertinents (Port, Utilisateur, Domaine, Résolution dynamique, Presse-papiers) pour AnyDesk et RustDesk.
+  - Élargissement dynamique du champ Hôte / ID / Alias sur toute la largeur disponible pour améliorer la lisibilité des adresses AnyDesk et RustDesk.
+  - Adaptation contextuelle du libellé du mot de passe (« Mot de passe d'accès sans surveillance » pour AnyDesk, « Mot de passe permanent » pour RustDesk) et affichage d'une note informative contextuelle.
+  - Conservation sans altération de toutes les valeurs saisies lors de basculements successifs entre protocoles.
+- **Transmission sécurisée du mot de passe AnyDesk sur stdin (`--with-password`)** :
+  - Implémentation du lancement AnyDesk via un tube de communication anonyme Win32 (`CreatePipe`) relié au `hStdInput` du processus (`STARTF_USESTDHANDLES`).
+  - Lancement sans passerelle shell (`cmd.exe`/PowerShell) via `CreateProcessW` avec argument officiel `--with-password`.
+  - Écriture immédiate du mot de passe déchiffré via DPAPI suivie d'un retour à la ligne, fermeture immédiate du descripteur d'écriture (`CloseHandle`) pour envoyer `EOF`, et effacement mémoire immédiat du tampon sensible (`write_volatile`).
+  - Aucun mot de passe dans la ligne de commande ni dans les journaux d'événements Windows.
+- **Audit et sécurisation de l'authentification RustDesk** :
+  - Audit de la CLI RustDesk confirmant l'absence de mécanisme d'injection stdin pour les sessions distantes (le paramètre `--password` configure le mot de passe local de la machine et ne permet pas d'authentifier une session distante).
+  - Préservation du mot de passe en coffre DPAPI pour référence de l'utilisateur avec affichage d'une note explicite dans le formulaire indiquant que l'authentification reste assurée par l'invite du client RustDesk.
+- **Artefact graphique de la barre de recherche lors du basculement dynamique de thème** :
+  - Traitement du message `WM_CTLCOLORSTATIC` dans la procédure de fenêtre principale `main_wnd_proc` pour retourner le pinceau de fond d'entrée `palette.brush_bg_input` lorsque le contrôle concerné est `search_edit` (déclenché lors du rendu de la bannière indicatrice `EM_SETCUEBANNER`).
+  - Appel explicite à `UpdateWindow(self.search_edit)` dans `apply_theme()` garantissant le rafraîchissement immédiat de la zone de saisie.
+
+### Ajouté
+- Test unitaire `test_rdp_scan_code_and_lparam_construction` validant le calcul des scan codes PS/2 et l'encodage des `lParam` 32 bits pour `SendKeys`.
+- Test d'intégration Win32 `test_ui_search_edit_theming_and_ctlcolorstatic` validant le comportement des pinceaux sur `search_edit` en thème Sombre et Clair.
+- Tests d'intégration complétés dans `test_ui_connection_dialog_create_validate_and_cancel_real_win32` validant le masquage et réaffichage dynamique des champs selon le protocole.
+
 ## [Jalon 3] — Intégrations AnyDesk et RustDesk, RDP avancé et actions de session
 
 ### Ajouté
