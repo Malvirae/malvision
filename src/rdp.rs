@@ -5,23 +5,24 @@
 //! `IMsRdpClientNonScriptable3`, `IMsRdpExtendedSettings` et `IMsTscAxEvents`.
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU32, Ordering};
 use windows::Win32::Foundation::{
-    E_NOTIMPL, HWND, LPARAM, S_OK, VARIANT_BOOL, VARIANT_TRUE, WPARAM,
+    E_NOINTERFACE, E_NOTIMPL, E_POINTER, HWND, LPARAM, S_OK, VARIANT_BOOL, VARIANT_TRUE, WPARAM,
 };
 use windows::Win32::System::Com::{
     DISPATCH_FLAGS, DISPPARAMS, EXCEPINFO, IConnectionPoint, IConnectionPointContainer, IDispatch,
-    IDispatch_Impl, ITypeInfo,
+    ITypeInfo,
 };
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Ole::{IOleInPlaceActiveObject, IOleObject, OLEIVERB_UIACTIVATE};
 use windows::Win32::System::Variant::{
-    VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_I4,
+    VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_BYREF, VT_I2, VT_I4, VT_UI4,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, GetClientRect, MoveWindow, PostMessageW, WINDOW_EX_STYLE,
     WM_APP, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
-use windows_core::{BSTR, GUID, HRESULT, IUnknown, Interface, PCWSTR, implement, s, w};
+use windows_core::{BSTR, GUID, HRESULT, IUnknown, Interface, PCWSTR, s, w};
 
 /// Message Win32 personnalisé envoyé à la fenêtre principale lors d'un événement COM `IMsTscAxEvents`.
 pub const WM_RDP_EVENT: u32 = WM_APP + 100;
@@ -38,7 +39,7 @@ pub const RDP_EVT_AUTH_WARNING_DISPLAYED: usize = 8;
 pub const RDP_EVT_AUTH_WARNING_DISMISSED: usize = 9;
 pub const RDP_EVT_AUTO_RECONNECTING: usize = 10;
 
-/// DIID de l'interface source d'événements `IMsTscAxEvents`.
+/// DIID de l'interface source d'événements `IMsTscAxEvents` (`{336d5562-efa8-482e-8cb3-c5c0fc7a7db6}`).
 pub const DIID_IMS_TSC_AX_EVENTS: GUID = GUID::from_u128(0x336d5562_efa8_482e_8cb3_c5c0fc7a7db6);
 
 /// IID de `IMsRdpClient9` (`{28904001-04b6-436c-a55b-0af1a0883dc9}`).
@@ -159,176 +160,304 @@ unsafe fn vtable_entry(unk: &IUnknown, byte_offset: usize) -> *const c_void {
     }
 }
 
-/// Sink COM `IDispatch` recevant les événements de `IMsTscAxEvents` et les relayant à la fenêtre UI.
-#[implement(IDispatch)]
-struct RdpEventSink {
+/// Vtable COM brute pour `IDispatch` / `IMsTscAxEvents`.
+///
+/// `IConnectionPoint::Advise` de `MsTscAx.dll` appelle `QueryInterface` avec `DIID_IMsTscAxEvents`
+/// (`{336d5562-efa8-482e-8cb3-c5c0fc7a7db6}`). La macro standard `#[implement(IDispatch)]` de
+/// `windows-rs` rejette ce `DIID` avec `E_NOINTERFACE` car elle n'accepte que `IID_IDispatch` et
+/// `IID_IUnknown`. Notre implémentation COM dédiée répond positivement aux trois GUIDs :
+/// `IUnknown::IID`, `IDispatch::IID` et `DIID_IMS_TSC_AX_EVENTS`.
+#[repr(C)]
+struct RawDispatchVtbl {
+    query_interface:
+        unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
+    add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
+    release: unsafe extern "system" fn(*mut c_void) -> u32,
+    get_type_info_count: unsafe extern "system" fn(*mut c_void, *mut u32) -> HRESULT,
+    get_type_info: unsafe extern "system" fn(*mut c_void, u32, u32, *mut *mut ITypeInfo) -> HRESULT,
+    get_ids_of_names: unsafe extern "system" fn(
+        *mut c_void,
+        *const GUID,
+        *const PCWSTR,
+        u32,
+        u32,
+        *mut i32,
+    ) -> HRESULT,
+    invoke: unsafe extern "system" fn(
+        *mut c_void,
+        i32,
+        *const GUID,
+        u32,
+        DISPATCH_FLAGS,
+        *const DISPPARAMS,
+        *mut VARIANT,
+        *mut EXCEPINFO,
+        *mut u32,
+    ) -> HRESULT,
+}
+
+#[repr(C)]
+struct RdpEventSinkComObject {
+    vtbl: *const RawDispatchVtbl,
+    ref_count: AtomicU32,
     notify_hwnd: HWND,
 }
 
-impl IDispatch_Impl for RdpEventSink_Impl {
-    fn GetTypeInfoCount(&self) -> windows_core::Result<u32> {
-        Ok(0)
+static RDP_EVENT_SINK_VTBL: RawDispatchVtbl = RawDispatchVtbl {
+    query_interface: sink_query_interface,
+    add_ref: sink_add_ref,
+    release: sink_release,
+    get_type_info_count: sink_get_type_info_count,
+    get_type_info: sink_get_type_info,
+    get_ids_of_names: sink_get_ids_of_names,
+    invoke: sink_invoke,
+};
+
+impl RdpEventSinkComObject {
+    fn new_com_unknown(notify_hwnd: HWND) -> IUnknown {
+        let boxed = Box::new(Self {
+            vtbl: &RDP_EVENT_SINK_VTBL,
+            ref_count: AtomicU32::new(1),
+            notify_hwnd,
+        });
+        unsafe { IUnknown::from_raw(Box::into_raw(boxed).cast()) }
     }
+}
 
-    fn GetTypeInfo(&self, _itinfo: u32, _lcid: u32) -> windows_core::Result<ITypeInfo> {
-        Err(E_NOTIMPL.into())
+unsafe extern "system" fn sink_query_interface(
+    this: *mut c_void,
+    riid: *const GUID,
+    ppv: *mut *mut c_void,
+) -> HRESULT {
+    unsafe {
+        if ppv.is_null() {
+            return E_POINTER;
+        }
+        *ppv = std::ptr::null_mut();
+        if riid.is_null() {
+            return E_NOINTERFACE;
+        }
+        let iid = *riid;
+        if iid == IUnknown::IID || iid == IDispatch::IID || iid == DIID_IMS_TSC_AX_EVENTS {
+            *ppv = this;
+            sink_add_ref(this);
+            S_OK
+        } else {
+            E_NOINTERFACE
+        }
     }
+}
 
-    fn GetIDsOfNames(
-        &self,
-        _riid: *const GUID,
-        _rgsznames: *const PCWSTR,
-        _cnames: u32,
-        _lcid: u32,
-        _rgdispid: *mut i32,
-    ) -> windows_core::Result<()> {
-        Err(E_NOTIMPL.into())
+unsafe extern "system" fn sink_add_ref(this: *mut c_void) -> u32 {
+    unsafe {
+        let obj = &*(this as *const RdpEventSinkComObject);
+        obj.ref_count.fetch_add(1, Ordering::Relaxed) + 1
     }
+}
 
-    fn Invoke(
-        &self,
-        dispidmember: i32,
-        _riid: *const GUID,
-        _lcid: u32,
-        _wflags: DISPATCH_FLAGS,
-        pdispparams: *const DISPPARAMS,
-        _pvarresult: *mut VARIANT,
-        _pexcepinfo: *mut EXCEPINFO,
-        _puargerr: *mut u32,
-    ) -> windows_core::Result<()> {
-        unsafe {
-            let first_i32_arg = || -> isize {
-                if pdispparams.is_null() {
-                    return 0;
-                }
-                let dp = &*pdispparams;
-                if dp.cArgs == 0 || dp.rgvarg.is_null() {
-                    return 0;
-                }
-                // Dans IDispatch::Invoke, les arguments sont passés en ordre inverse;
-                // le 1er paramètre de la méthode est à l'indice `cArgs - 1`.
-                let arg = &*dp.rgvarg.add((dp.cArgs - 1) as usize);
-                let vt = arg.Anonymous.Anonymous.vt;
-                if vt == VT_I4 {
-                    arg.Anonymous.Anonymous.Anonymous.lVal as isize
-                } else {
-                    0
-                }
-            };
+unsafe extern "system" fn sink_release(this: *mut c_void) -> u32 {
+    unsafe {
+        let obj = &*(this as *const RdpEventSinkComObject);
+        let prev = obj.ref_count.fetch_sub(1, Ordering::Release);
+        if prev == 1 {
+            std::sync::atomic::fence(Ordering::Acquire);
+            drop(Box::from_raw(this as *mut RdpEventSinkComObject));
+            0
+        } else {
+            prev - 1
+        }
+    }
+}
 
-            match dispidmember {
-                1 => {
-                    // OnConnecting
-                    let _ = PostMessageW(
-                        Some(self.notify_hwnd),
-                        WM_RDP_EVENT,
-                        WPARAM(RDP_EVT_CONNECTING),
-                        LPARAM(0),
-                    );
-                }
-                2 => {
-                    // OnConnected
-                    let _ = PostMessageW(
-                        Some(self.notify_hwnd),
-                        WM_RDP_EVENT,
-                        WPARAM(RDP_EVT_CONNECTED),
-                        LPARAM(0),
-                    );
-                }
-                3 => {
-                    // OnLoginComplete
-                    let _ = PostMessageW(
-                        Some(self.notify_hwnd),
-                        WM_RDP_EVENT,
-                        WPARAM(RDP_EVT_LOGIN_COMPLETE),
-                        LPARAM(0),
-                    );
-                }
-                4 => {
-                    // OnDisconnected(discReason)
-                    let reason = first_i32_arg();
-                    let _ = PostMessageW(
-                        Some(self.notify_hwnd),
-                        WM_RDP_EVENT,
-                        WPARAM(RDP_EVT_DISCONNECTED),
-                        LPARAM(reason),
-                    );
-                }
-                10 => {
-                    // OnFatalError(errorCode)
-                    let code = first_i32_arg();
-                    let _ = PostMessageW(
-                        Some(self.notify_hwnd),
-                        WM_RDP_EVENT,
-                        WPARAM(RDP_EVT_FATAL_ERROR),
-                        LPARAM(code),
-                    );
-                }
-                11 => {
-                    // OnWarning(warningCode)
-                    let code = first_i32_arg();
-                    let _ = PostMessageW(
-                        Some(self.notify_hwnd),
-                        WM_RDP_EVENT,
-                        WPARAM(RDP_EVT_WARNING),
-                        LPARAM(code),
-                    );
-                }
-                15 => {
-                    // OnConfirmClose(pfAllowClose: *mut VARIANT_BOOL)
-                    if !pdispparams.is_null() {
-                        let dp = &*pdispparams;
-                        if dp.cArgs >= 1 && !dp.rgvarg.is_null() {
-                            let arg = &*dp.rgvarg;
-                            let pbool = arg.Anonymous.Anonymous.Anonymous.pboolVal;
-                            if !pbool.is_null() {
-                                *pbool = VARIANT_TRUE;
-                            }
+unsafe extern "system" fn sink_get_type_info_count(
+    _this: *mut c_void,
+    pctinfo: *mut u32,
+) -> HRESULT {
+    unsafe {
+        if !pctinfo.is_null() {
+            *pctinfo = 0;
+        }
+        S_OK
+    }
+}
+
+unsafe extern "system" fn sink_get_type_info(
+    _this: *mut c_void,
+    _itinfo: u32,
+    _lcid: u32,
+    pptinfo: *mut *mut ITypeInfo,
+) -> HRESULT {
+    unsafe {
+        if !pptinfo.is_null() {
+            *pptinfo = std::ptr::null_mut();
+        }
+        E_NOTIMPL
+    }
+}
+
+unsafe extern "system" fn sink_get_ids_of_names(
+    _this: *mut c_void,
+    _riid: *const GUID,
+    _rgsznames: *const PCWSTR,
+    _cnames: u32,
+    _lcid: u32,
+    _rgdispid: *mut i32,
+) -> HRESULT {
+    E_NOTIMPL
+}
+
+unsafe extern "system" fn sink_invoke(
+    this: *mut c_void,
+    dispidmember: i32,
+    _riid: *const GUID,
+    _lcid: u32,
+    _wflags: DISPATCH_FLAGS,
+    pdispparams: *const DISPPARAMS,
+    _pvarresult: *mut VARIANT,
+    _pexcepinfo: *mut EXCEPINFO,
+    _puargerr: *mut u32,
+) -> HRESULT {
+    unsafe {
+        let obj = &*(this as *const RdpEventSinkComObject);
+        let notify_hwnd = obj.notify_hwnd;
+
+        let first_int_arg = || -> isize {
+            if pdispparams.is_null() {
+                return 0;
+            }
+            let dp = &*pdispparams;
+            if dp.cArgs == 0 || dp.rgvarg.is_null() {
+                return 0;
+            }
+            // Dans IDispatch::Invoke, les arguments sont passés en ordre inverse;
+            // le 1er paramètre de la méthode est à l'indice `cArgs - 1`.
+            let arg = &*dp.rgvarg.add((dp.cArgs - 1) as usize);
+            let vt = arg.Anonymous.Anonymous.vt;
+            if vt == VT_I4 || vt == VT_UI4 {
+                arg.Anonymous.Anonymous.Anonymous.lVal as isize
+            } else if vt == VT_I2 {
+                arg.Anonymous.Anonymous.Anonymous.iVal as isize
+            } else if (vt.0 & VT_BYREF.0) != 0 && (vt.0 & !VT_BYREF.0) == VT_I4.0 {
+                let pl = arg.Anonymous.Anonymous.Anonymous.plVal;
+                if !pl.is_null() { *pl as isize } else { 0 }
+            } else {
+                0
+            }
+        };
+
+        match dispidmember {
+            1 => {
+                // OnConnecting (DISPID 1)
+                let _ = PostMessageW(
+                    Some(notify_hwnd),
+                    WM_RDP_EVENT,
+                    WPARAM(RDP_EVT_CONNECTING),
+                    LPARAM(0),
+                );
+            }
+            2 => {
+                // OnConnected (DISPID 2)
+                let _ = PostMessageW(
+                    Some(notify_hwnd),
+                    WM_RDP_EVENT,
+                    WPARAM(RDP_EVT_CONNECTED),
+                    LPARAM(0),
+                );
+            }
+            3 => {
+                // OnLoginComplete (DISPID 3)
+                let _ = PostMessageW(
+                    Some(notify_hwnd),
+                    WM_RDP_EVENT,
+                    WPARAM(RDP_EVT_LOGIN_COMPLETE),
+                    LPARAM(0),
+                );
+            }
+            4 => {
+                // OnDisconnected(discReason: LONG) (DISPID 4)
+                let reason = first_int_arg();
+                let _ = PostMessageW(
+                    Some(notify_hwnd),
+                    WM_RDP_EVENT,
+                    WPARAM(RDP_EVT_DISCONNECTED),
+                    LPARAM(reason),
+                );
+            }
+            10 => {
+                // OnFatalError(errorCode: LONG) (DISPID 10)
+                let code = first_int_arg();
+                let _ = PostMessageW(
+                    Some(notify_hwnd),
+                    WM_RDP_EVENT,
+                    WPARAM(RDP_EVT_FATAL_ERROR),
+                    LPARAM(code),
+                );
+            }
+            11 => {
+                // OnWarning(warningCode: LONG) (DISPID 11)
+                let code = first_int_arg();
+                let _ = PostMessageW(
+                    Some(notify_hwnd),
+                    WM_RDP_EVENT,
+                    WPARAM(RDP_EVT_WARNING),
+                    LPARAM(code),
+                );
+            }
+            15 => {
+                // OnConfirmClose(pfAllowClose: *mut VARIANT_BOOL) (DISPID 15)
+                if !pdispparams.is_null() {
+                    let dp = &*pdispparams;
+                    if dp.cArgs >= 1 && !dp.rgvarg.is_null() {
+                        let arg = &*dp.rgvarg;
+                        let pbool = arg.Anonymous.Anonymous.Anonymous.pboolVal;
+                        if !pbool.is_null() {
+                            *pbool = VARIANT_TRUE;
                         }
                     }
                 }
-                18 => {
-                    // OnAuthenticationWarningDisplayed
-                    let _ = PostMessageW(
-                        Some(self.notify_hwnd),
-                        WM_RDP_EVENT,
-                        WPARAM(RDP_EVT_AUTH_WARNING_DISPLAYED),
-                        LPARAM(0),
-                    );
-                }
-                19 => {
-                    // OnAuthenticationWarningDismissed
-                    let _ = PostMessageW(
-                        Some(self.notify_hwnd),
-                        WM_RDP_EVENT,
-                        WPARAM(RDP_EVT_AUTH_WARNING_DISMISSED),
-                        LPARAM(0),
-                    );
-                }
-                22 => {
-                    // OnLogonError(lError)
-                    let code = first_i32_arg();
-                    let _ = PostMessageW(
-                        Some(self.notify_hwnd),
-                        WM_RDP_EVENT,
-                        WPARAM(RDP_EVT_LOGON_ERROR),
-                        LPARAM(code),
-                    );
-                }
-                17 | 34 => {
-                    // OnAutoReconnecting / OnAutoReconnecting2
-                    let reason = first_i32_arg();
-                    let _ = PostMessageW(
-                        Some(self.notify_hwnd),
-                        WM_RDP_EVENT,
-                        WPARAM(RDP_EVT_AUTO_RECONNECTING),
-                        LPARAM(reason),
-                    );
-                }
-                _ => {}
             }
+            18 => {
+                // OnAuthenticationWarningDisplayed (DISPID 18)
+                let _ = PostMessageW(
+                    Some(notify_hwnd),
+                    WM_RDP_EVENT,
+                    WPARAM(RDP_EVT_AUTH_WARNING_DISPLAYED),
+                    LPARAM(0),
+                );
+            }
+            19 => {
+                // OnAuthenticationWarningDismissed (DISPID 19)
+                let _ = PostMessageW(
+                    Some(notify_hwnd),
+                    WM_RDP_EVENT,
+                    WPARAM(RDP_EVT_AUTH_WARNING_DISMISSED),
+                    LPARAM(0),
+                );
+            }
+            22 => {
+                // OnLogonError(lError: LONG) (DISPID 22)
+                let code = first_int_arg();
+                let _ = PostMessageW(
+                    Some(notify_hwnd),
+                    WM_RDP_EVENT,
+                    WPARAM(RDP_EVT_LOGON_ERROR),
+                    LPARAM(code),
+                );
+            }
+            17 | 34 => {
+                // OnAutoReconnecting / OnAutoReconnecting2 (DISPID 17 / 34)
+                let reason = first_int_arg();
+                let _ = PostMessageW(
+                    Some(notify_hwnd),
+                    WM_RDP_EVENT,
+                    WPARAM(RDP_EVT_AUTO_RECONNECTING),
+                    LPARAM(reason),
+                );
+            }
+            _ => {}
         }
-        Ok(())
+
+        S_OK
     }
 }
 
@@ -339,6 +468,7 @@ pub struct RdpActiveXHost {
     rdp_client: IUnknown,
     connection_point: Option<IConnectionPoint>,
     advise_cookie: u32,
+    _event_sink: Option<IUnknown>,
     control_id: String,
 }
 
@@ -420,29 +550,25 @@ impl RdpActiveXHost {
             })?;
 
             // Connecter le sink d'événements IMsTscAxEvents via IConnectionPointContainer
-            let mut connection_point = None;
-            let mut advise_cookie = 0u32;
+            let cpc = rdp_client
+                .cast::<IConnectionPointContainer>()
+                .map_err(|e| format!("IConnectionPointContainer indisponible sur MsTscAx : {e}"))?;
+            let cp = cpc
+                .FindConnectionPoint(&DIID_IMS_TSC_AX_EVENTS)
+                .map_err(|e| format!("FindConnectionPoint(IMsTscAxEvents) a échoué : {e}"))?;
 
-            if let Ok(cpc) = rdp_client.cast::<IConnectionPointContainer>()
-                && let Ok(cp) = cpc.FindConnectionPoint(&DIID_IMS_TSC_AX_EVENTS)
-            {
-                let sink: IDispatch = RdpEventSink {
-                    notify_hwnd: parent_hwnd,
-                }
-                .into();
-                let sink_unk: IUnknown = sink.cast().map_err(|e| format!("Cast sink : {e}"))?;
-                if let Ok(cookie) = cp.Advise(&sink_unk) {
-                    advise_cookie = cookie;
-                    connection_point = Some(cp);
-                }
-            }
+            let sink_unk = RdpEventSinkComObject::new_com_unknown(parent_hwnd);
+            let advise_cookie = cp
+                .Advise(&sink_unk)
+                .map_err(|e| format!("IConnectionPoint::Advise(IMsTscAxEvents) a échoué : {e}"))?;
 
             let host = Self {
                 parent_hwnd,
                 ax_hwnd: created_hwnd,
                 rdp_client,
-                connection_point,
+                connection_point: Some(cp),
                 advise_cookie,
+                _event_sink: Some(sink_unk),
                 control_id: active_control_id,
             };
 
@@ -454,6 +580,11 @@ impl RdpActiveXHost {
     /// Retourne l'identifiant (CLSID ou ProgID) du contrôle ActiveX instancié.
     pub fn control_id(&self) -> &str {
         &self.control_id
+    }
+
+    /// Retourne le cookie d'abonnement `IConnectionPoint::Advise` (strictement non nul si abonné).
+    pub fn advise_cookie(&self) -> u32 {
+        self.advise_cookie
     }
 
     /// Retourne la chaîne de version du contrôle RDP (`IMsTscAx::get_Version`, oVft = 224).
@@ -537,7 +668,6 @@ impl RdpActiveXHost {
                 let _ = self.put_bool(&non_scriptable, 184, true);
             }
 
-            // Activer DisableCredentialsDelegation = false / redirection standard si IMsRdpExtendedSettings disponible
             Ok(())
         }
     }
@@ -557,7 +687,7 @@ impl RdpActiveXHost {
         }
     }
 
-    /// Indique si une session est connectée ou en cours de connexion.
+    /// Indique si une session est connectée (`1`) ou en cours de connexion (`2`).
     pub fn is_active(&self) -> bool {
         self.connection_state() != 0
     }
@@ -883,7 +1013,9 @@ impl Drop for RdpActiveXHost {
                 && self.advise_cookie != 0
             {
                 let _ = cp.Unadvise(self.advise_cookie);
+                self.advise_cookie = 0;
             }
+            self._event_sink = None;
             if self.is_active() {
                 let _ = self.disconnect();
             }
@@ -974,7 +1106,36 @@ mod tests {
     }
 
     #[test]
-    fn test_activex_rdp_host_instantiation() {
+    fn test_sink_responds_to_diid_ims_tsc_ax_events() {
+        unsafe {
+            let sink = RdpEventSinkComObject::new_com_unknown(HWND::default());
+            let mut out_ptr: *mut c_void = std::ptr::null_mut();
+
+            // Vérifier que QueryInterface accepte DIID_IMS_TSC_AX_EVENTS
+            let hr = (Interface::vtable(&sink).QueryInterface)(
+                Interface::as_raw(&sink),
+                &DIID_IMS_TSC_AX_EVENTS,
+                &mut out_ptr,
+            );
+            assert_eq!(hr, S_OK);
+            assert!(!out_ptr.is_null());
+            let _ = IUnknown::from_raw(out_ptr);
+
+            // Vérifier que QueryInterface accepte IDispatch::IID
+            let mut disp_ptr: *mut c_void = std::ptr::null_mut();
+            let hr_disp = (Interface::vtable(&sink).QueryInterface)(
+                Interface::as_raw(&sink),
+                &IDispatch::IID,
+                &mut disp_ptr,
+            );
+            assert_eq!(hr_disp, S_OK);
+            assert!(!disp_ptr.is_null());
+            let _ = IUnknown::from_raw(disp_ptr);
+        }
+    }
+
+    #[test]
+    fn test_activex_rdp_host_instantiation_and_advise() {
         use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
         use windows::Win32::UI::WindowsAndMessaging::{CW_USEDEFAULT, WS_OVERLAPPEDWINDOW};
 
@@ -1001,6 +1162,12 @@ mod tests {
                 .expect("Instanciation du contrôle ActiveX MsTscAx.dll");
 
             assert!(!host.hwnd().is_invalid());
+            // Le cookie d'abonnement IConnectionPoint::Advise(IMsTscAxEvents) DOIT être non nul
+            assert_ne!(
+                host.advise_cookie(),
+                0,
+                "Le sink d'événements IMsTscAxEvents doit être abonné avec succès"
+            );
             assert_eq!(host.connection_state(), 0);
             assert!(!host.is_active());
             assert!(!host.version_string().is_empty());

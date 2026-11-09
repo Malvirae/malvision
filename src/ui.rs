@@ -1,4 +1,4 @@
-//! Fenêtre principale native Win32 de Malvision (Jalon 1 — Prototype RDP intégré).
+//! Fenêtre principale native Win32 de Malvision (Jalon 1B — Prototype RDP intégré).
 
 use crate::rdp::{
     RDP_EVT_AUTH_WARNING_DISMISSED, RDP_EVT_AUTH_WARNING_DISPLAYED, RDP_EVT_AUTO_RECONNECTING,
@@ -6,7 +6,7 @@ use crate::rdp::{
     RDP_EVT_LOGIN_COMPLETE, RDP_EVT_LOGON_ERROR, RDP_EVT_WARNING, RdpActiveXHost,
     RdpConnectionConfig, WM_RDP_EVENT, parse_host_and_port, split_domain_username,
 };
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, CreateFontW, DeleteObject, FONT_CHARSET, FONT_CLIP_PRECISION,
     FONT_OUTPUT_PRECISION, FONT_QUALITY, HBRUSH, HFONT, InvalidateRect, UpdateWindow,
@@ -17,16 +17,20 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW,
     DefWindowProcW, DispatchMessageW, ES_AUTOHSCROLL, ES_PASSWORD, GWLP_USERDATA, GetClientRect,
     GetMessageW, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW,
-    IsChild, IsDialogMessageW, LoadCursorW, MB_ICONERROR, MB_ICONWARNING, MB_OK, MSG, MessageBoxW,
-    MoveWindow, PostQuitMessage, RegisterClassExW, SW_SHOW, SendMessageW, SetWindowLongPtrW,
-    SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
-    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_KEYDOWN, WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_BORDER,
-    WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    IsChild, IsDialogMessageW, IsIconic, KillTimer, LoadCursorW, MB_ICONERROR, MB_ICONWARNING,
+    MB_OK, MINMAXINFO, MSG, MessageBoxW, MoveWindow, PostQuitMessage, RegisterClassExW,
+    SIZE_MINIMIZED, SW_SHOW, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
+    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_SETFONT, WM_SIZE, WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW,
+    WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_OVERLAPPED, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_TABSTOP, WS_THICKFRAME, WS_VISIBLE,
 };
 use windows_core::{PCWSTR, w};
 
 const TOOLBAR_HEIGHT: i32 = 46;
 const STATUSBAR_HEIGHT: i32 = 28;
+const MIN_WINDOW_WIDTH: i32 = 720;
+const MIN_WINDOW_HEIGHT: i32 = 480;
 
 const IDC_EDIT_HOST: usize = 1001;
 const IDC_EDIT_USER: usize = 1002;
@@ -34,6 +38,30 @@ const IDC_EDIT_PASS: usize = 1003;
 const IDC_BTN_CONNECT: usize = 1004;
 const IDC_BTN_DISCONNECT: usize = 1005;
 const IDC_STATIC_STATUS: usize = 1006;
+
+/// Timer de supervision de l'état réel de `IMsRdpClient::get_Connected` (en complément des événements COM).
+const IDT_RDP_STATE_POLL: usize = 2001;
+const RDP_STATE_POLL_INTERVAL_MS: u32 = 350;
+
+/// Style Win32 standard de la fenêtre principale, réappliqué si un contrôle ActiveX enfant le modifie.
+pub const MAIN_WINDOW_BASE_STYLE: WINDOW_STYLE = WINDOW_STYLE(
+    WS_OVERLAPPED.0
+        | WS_CAPTION.0
+        | WS_SYSMENU.0
+        | WS_THICKFRAME.0
+        | WS_MINIMIZEBOX.0
+        | WS_MAXIMIZEBOX.0
+        | WS_CLIPCHILDREN.0,
+);
+
+/// État interne de suivi de la session côté UI, toujours validé avec `IMsRdpClient::get_Connected`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiRdpState {
+    Disconnected,
+    Connecting,
+    Connected,
+    LoggedIn,
+}
 
 struct AppWindowState {
     hwnd: HWND,
@@ -46,6 +74,7 @@ struct AppWindowState {
     status_label: HWND,
     rdp_host: Option<RdpActiveXHost>,
     last_target: String,
+    ui_state: UiRdpState,
 }
 
 impl AppWindowState {
@@ -212,10 +241,11 @@ impl AppWindowState {
                 Ok(host) => {
                     let ver = host.version_string();
                     let cid = host.control_id();
+                    let cookie = host.advise_cookie();
                     set_window_text(
                         status_label,
                         &format!(
-                            "Prêt — Contrôle ActiveX RDP Microsoft (MsTscAx.dll v{ver}, {cid}) hébergé. Saisissez un hôte et cliquez sur Connecter."
+                            "Prêt — Contrôle ActiveX RDP Microsoft (MsTscAx.dll v{ver}, {cid}, sink=#{cookie}) hébergé."
                         ),
                     );
                     Some(host)
@@ -227,6 +257,14 @@ impl AppWindowState {
                     None
                 }
             };
+
+            // Démarrer un timer léger de supervision pour synchroniser l'état avec IMsRdpClient::get_Connected()
+            let _ = SetTimer(
+                Some(hwnd),
+                IDT_RDP_STATE_POLL,
+                RDP_STATE_POLL_INTERVAL_MS,
+                None,
+            );
 
             let _ = SetFocus(Some(edit_host));
 
@@ -241,15 +279,19 @@ impl AppWindowState {
                 status_label,
                 rdp_host,
                 last_target: String::new(),
+                ui_state: UiRdpState::Disconnected,
             }
         }
     }
 
-    fn on_size(&self, width: i32, height: i32) {
-        if width <= 0 || height <= 0 {
+    fn on_size(&self, size_type: usize, width: i32, height: i32) {
+        // Ne jamais redimensionner le contrôle ActiveX lorsque la fenêtre est minimisée (0x0)
+        if size_type == SIZE_MINIMIZED as usize || width <= 0 || height <= 0 {
             return;
         }
         unsafe {
+            ensure_main_window_frame_styles(self.hwnd);
+
             let rdp_y = TOOLBAR_HEIGHT;
             let rdp_h = (height - TOOLBAR_HEIGHT - STATUSBAR_HEIGHT).max(100);
 
@@ -285,6 +327,59 @@ impl AppWindowState {
             let _ = EnableWindow(self.edit_pass, !active);
             let _ = EnableWindow(self.btn_connect, !active);
             let _ = EnableWindow(self.btn_disconnect, active);
+        }
+    }
+
+    fn target_display(&self) -> String {
+        if self.last_target.is_empty() {
+            "l'hôte distant".to_string()
+        } else {
+            self.last_target.clone()
+        }
+    }
+
+    /// Vérifie périodiquement l'état réel de `IMsRdpClient::get_Connected` (`0`=déconnecté, `1`=connecté, `2`=connexion en cours)
+    /// pour garantir que la barre de statut reflète toujours l'état véritable du contrôle ActiveX.
+    fn sync_real_rdp_state(&mut self) {
+        unsafe {
+            ensure_main_window_frame_styles(self.hwnd);
+        }
+
+        let Some(ref host) = self.rdp_host else {
+            return;
+        };
+
+        let real_state = host.connection_state();
+        let target = self.target_display();
+
+        match real_state {
+            1 => {
+                // Le contrôle confirme que la session RDP est réellement établie (Connected == 1)
+                if self.ui_state == UiRdpState::Connecting
+                    || self.ui_state == UiRdpState::Disconnected
+                {
+                    self.ui_state = UiRdpState::Connected;
+                    self.update_controls_for_state(true);
+                    self.set_status(&format!("Connecté à {target} — Session RDP active."));
+                }
+            }
+            2 => {
+                // Connexion en cours (Connected == 2)
+                if self.ui_state == UiRdpState::Disconnected {
+                    self.ui_state = UiRdpState::Connecting;
+                    self.update_controls_for_state(true);
+                    self.set_status(&format!(
+                        "Connexion en cours vers {target} (NLA / négociation TLS)..."
+                    ));
+                }
+            }
+            0 if self.ui_state != UiRdpState::Disconnected => {
+                // Déconnecté (Connected == 0) alors que l'UI pensait être connectée ou en cours
+                self.ui_state = UiRdpState::Disconnected;
+                self.update_controls_for_state(false);
+                self.set_status(&format!("Déconnecté de {target} — Prêt."));
+            }
+            _ => {}
         }
     }
 
@@ -351,12 +446,14 @@ impl AppWindowState {
         match connect_result {
             Ok(()) => {
                 self.last_target = target_label.clone();
+                self.ui_state = UiRdpState::Connecting;
                 self.update_controls_for_state(true);
                 self.set_status(&format!(
                     "Connexion en cours vers {target_label} (NLA / négociation TLS)..."
                 ));
             }
             Err(err) => {
+                self.ui_state = UiRdpState::Disconnected;
                 self.update_controls_for_state(false);
                 let msg = format!("Échec du lancement de la connexion vers {target_label} : {err}");
                 self.set_status(&msg);
@@ -372,39 +469,49 @@ impl AppWindowState {
                 self.set_status(&msg);
                 show_error_dialog(self.hwnd, "Erreur de déconnexion RDP", &msg);
             } else {
-                self.set_status("Déconnexion RDP demandée...");
+                self.set_status("Déconnexion RDP en cours...");
             }
         }
     }
 
     fn handle_rdp_event(&mut self, event_code: usize, param: isize) {
-        let target = if self.last_target.is_empty() {
-            "l'hôte distant".to_string()
-        } else {
-            self.last_target.clone()
-        };
+        let target = self.target_display();
+        let real_conn_state = self
+            .rdp_host
+            .as_ref()
+            .map_or(0, RdpActiveXHost::connection_state);
 
         match event_code {
             RDP_EVT_CONNECTING => {
-                self.update_controls_for_state(true);
-                self.set_status(&format!("Connexion RDP en cours vers {target}..."));
-            }
-            RDP_EVT_CONNECTED => {
+                self.ui_state = UiRdpState::Connecting;
                 self.update_controls_for_state(true);
                 self.set_status(&format!(
-                    "Connecté à {target} — Authentification de la session en cours..."
+                    "Connexion RDP en cours vers {target} (NLA / négociation TLS)..."
                 ));
-                if let Some(ref host) = self.rdp_host {
-                    host.focus_control();
+            }
+            RDP_EVT_CONNECTED => {
+                // Toujours vérifier la confirmation réelle du contrôle (get_Connected() == 1)
+                if real_conn_state == 1 {
+                    self.ui_state = UiRdpState::Connected;
+                    self.update_controls_for_state(true);
+                    self.set_status(&format!(
+                        "Connecté à {target} — Ouverture de session en cours..."
+                    ));
+                    if let Some(ref host) = self.rdp_host {
+                        host.focus_control();
+                    }
                 }
             }
             RDP_EVT_LOGIN_COMPLETE => {
-                self.update_controls_for_state(true);
-                self.set_status(&format!(
-                    "Session RDP active sur {target} (clavier et souris actifs dans la fenêtre)."
-                ));
-                if let Some(ref host) = self.rdp_host {
-                    host.focus_control();
+                if real_conn_state == 1 {
+                    self.ui_state = UiRdpState::LoggedIn;
+                    self.update_controls_for_state(true);
+                    self.set_status(&format!(
+                        "Connecté à {target} — Session RDP authentifiée et prête."
+                    ));
+                    if let Some(ref host) = self.rdp_host {
+                        host.focus_control();
+                    }
                 }
             }
             RDP_EVT_AUTH_WARNING_DISPLAYED => {
@@ -414,20 +521,21 @@ impl AppWindowState {
             }
             RDP_EVT_AUTH_WARNING_DISMISSED => {
                 self.set_status(&format!(
-                    "Dialogue de sécurité Windows fermé pour {target}, poursuite de la négociation..."
+                    "Dialogue de sécurité Windows validé pour {target}, poursuite de la connexion..."
                 ));
             }
             RDP_EVT_AUTO_RECONNECTING => {
+                self.ui_state = UiRdpState::Connecting;
                 self.set_status(&format!(
                     "Reconnexion automatique RDP en cours vers {target} (code={param})..."
                 ));
             }
             RDP_EVT_LOGON_ERROR => {
                 let code = param as i32;
-                // -2 (0xFFFFFFFE) signifie "poursuite de la connexion / ouverture de session" dans MsTscAx
+                // -2 (0xFFFFFFFE) signifie LOGON_FAILED_OTHER / continuation normale d'ouverture de session Windows
                 if code != -2 {
                     self.set_status(&format!(
-                        "Avertissement d'ouverture de session Windows sur {target} (code={code})."
+                        "Notification d'ouverture de session Windows sur {target} (code={code})."
                     ));
                 }
             }
@@ -439,6 +547,7 @@ impl AppWindowState {
             }
             RDP_EVT_FATAL_ERROR => {
                 let code = param as i32;
+                self.ui_state = UiRdpState::Disconnected;
                 self.update_controls_for_state(false);
                 let msg =
                     format!("Erreur fatale du contrôle RDP sur {target} (code d'erreur={code}).");
@@ -447,6 +556,7 @@ impl AppWindowState {
             }
             RDP_EVT_DISCONNECTED => {
                 let disc_reason = param as i32;
+                self.ui_state = UiRdpState::Disconnected;
                 self.update_controls_for_state(false);
 
                 let (ext_reason, desc) = if let Some(ref host) = self.rdp_host {
@@ -455,11 +565,10 @@ impl AppWindowState {
                     (0, String::new())
                 };
 
-                // Les raisons 1, 2, 3 avec ext_reason == 0 ou déconnexion volontaire de l'utilisateur
-                // ne sont pas des erreurs réseau/authentification.
-                let is_normal_close = matches!(disc_reason, 1 | 2) && ext_reason == 0;
+                // Les raisons 1..=3 avec ext_reason == 0 ou 12 (logoff utilisateur) sont des fermetures normales
+                let is_normal_close = matches!(disc_reason, 1..=3) && matches!(ext_reason, 0 | 12);
                 if is_normal_close {
-                    self.set_status(&format!("Session RDP terminée sur {target} ({desc})"));
+                    self.set_status(&format!("Déconnecté de {target} ({desc})"));
                 } else {
                     let full_err = format!(
                         "Déconnexion de {target} [code={disc_reason}, étendu={ext_reason}] : {desc}"
@@ -475,12 +584,30 @@ impl AppWindowState {
 
 impl Drop for AppWindowState {
     fn drop(&mut self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), IDT_RDP_STATE_POLL);
+        }
         // Libérer le contrôle ActiveX avant la police GDI
         self.rdp_host = None;
         unsafe {
             if !self.font.is_invalid() {
                 let _ = DeleteObject(self.font.into());
             }
+        }
+    }
+}
+
+/// Garantit que `MsTscAx.dll` n'a pas altéré les styles de bordure / maximisation / minimisation
+/// de la fenêtre principale (`WS_OVERLAPPEDWINDOW`).
+unsafe fn ensure_main_window_frame_styles(hwnd: HWND) {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GWL_STYLE, GetWindowLongPtrW, SetWindowLongPtrW,
+        };
+        let current = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+        let required = MAIN_WINDOW_BASE_STYLE.0;
+        if (current & required) != required {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, (current | required) as isize);
         }
     }
 }
@@ -560,12 +687,35 @@ unsafe extern "system" fn main_wnd_proc(
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
                 LRESULT(0)
             }
+            WM_GETMINMAXINFO => {
+                let mmi = lparam.0 as *mut MINMAXINFO;
+                if !mmi.is_null() {
+                    (*mmi).ptMinTrackSize = POINT {
+                        x: MIN_WINDOW_WIDTH,
+                        y: MIN_WINDOW_HEIGHT,
+                    };
+                }
+                LRESULT(0)
+            }
+            WM_SYSCOMMAND => {
+                ensure_main_window_frame_styles(hwnd);
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
             WM_SIZE => {
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
                 if !ptr.is_null() {
                     let width = (lparam.0 & 0xFFFF) as i16 as i32;
                     let height = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-                    (*ptr).on_size(width, height);
+                    (*ptr).on_size(wparam.0, width, height);
+                }
+                LRESULT(0)
+            }
+            WM_TIMER => {
+                if wparam.0 == IDT_RDP_STATE_POLL {
+                    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+                    if !ptr.is_null() && !IsIconic(hwnd).as_bool() {
+                        (*ptr).sync_real_rdp_state();
+                    }
                 }
                 LRESULT(0)
             }
@@ -616,6 +766,20 @@ unsafe extern "system" fn main_wnd_proc(
     }
 }
 
+/// Indique si le message Win32 est un message clavier susceptible d'être un accélérateur OLE
+/// (`WM_KEYDOWN`, `WM_KEYUP`, `WM_SYSKEYDOWN`, `WM_SYSKEYUP`, `WM_CHAR`).
+///
+/// Ne jamais passer les messages souris (`WM_NCLBUTTONDOWN`, `WM_NCHITTEST`, `WM_SYSCOMMAND`, etc.)
+/// à `IOleInPlaceActiveObject::TranslateAccelerator` ou `IsDialogMessageW` : sinon le contrôle ActiveX
+/// ou le gestionnaire de boîte de dialogue consomme ou bloque les clics sur les boutons Minimiser / Restaurer
+/// de la barre de titre lorsque la fenêtre est maximisée.
+#[inline]
+pub fn is_keyboard_message(message: u32) -> bool {
+    const WM_KEYFIRST: u32 = 0x0100;
+    const WM_KEYLAST: u32 = 0x0109;
+    (WM_KEYFIRST..=WM_KEYLAST).contains(&message)
+}
+
 /// Lance la fenêtre principale de Malvision et exécute la boucle d'événements Win32 / ActiveX.
 pub fn run_app() -> Result<(), String> {
     unsafe {
@@ -634,9 +798,7 @@ pub fn run_app() -> Result<(), String> {
             ..Default::default()
         };
 
-        if RegisterClassExW(&wc) == 0 {
-            return Err("Échec de RegisterClassExW pour la fenêtre principale.".to_string());
-        }
+        let _ = RegisterClassExW(&wc);
 
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -659,27 +821,27 @@ pub fn run_app() -> Result<(), String> {
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).into() {
-            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
             let mut handled = false;
 
-            if !ptr.is_null() {
-                let state = &mut *ptr;
-                let focus_hwnd = GetFocus();
+            // Ne filtrer que les messages clavier destinés aux contrôles enfants;
+            // laisser tous les messages souris / non-client (barre de titre, boutons min/max/restore,
+            // redimensionnement, WM_SYSCOMMAND) aller directement à DispatchMessageW.
+            if is_keyboard_message(msg.message) {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+                if !ptr.is_null() {
+                    let state = &mut *ptr;
+                    let focus_hwnd = GetFocus();
 
-                // Si le focus est dans la vue ActiveX RDP, lui déléguer les touches en priorité
-                // sans laisser IsDialogMessageW intercepter Tab, Entrée ou Échap.
-                if let Some(ref rdp_host) = state.rdp_host {
-                    let ax_hwnd = rdp_host.hwnd();
-                    let focus_in_rdp =
-                        focus_hwnd == ax_hwnd || IsChild(ax_hwnd, focus_hwnd).as_bool();
+                    if let Some(ref rdp_host) = state.rdp_host {
+                        let ax_hwnd = rdp_host.hwnd();
+                        let focus_in_rdp =
+                            focus_hwnd == ax_hwnd || IsChild(ax_hwnd, focus_hwnd).as_bool();
 
-                    if focus_in_rdp {
-                        if rdp_host.translate_accelerator(&msg) {
-                            handled = true;
-                        }
-                    } else {
-                        // Dans les champs de saisie de la barre d'outils : Entrée lance la connexion
-                        if msg.message == WM_KEYDOWN
+                        if focus_in_rdp {
+                            if rdp_host.translate_accelerator(&msg) {
+                                handled = true;
+                            }
+                        } else if msg.message == WM_KEYDOWN
                             && msg.wParam.0 == VK_RETURN.0 as usize
                             && (focus_hwnd == state.edit_host
                                 || focus_hwnd == state.edit_user
@@ -687,12 +849,16 @@ pub fn run_app() -> Result<(), String> {
                         {
                             state.handle_connect();
                             handled = true;
-                        } else if IsDialogMessageW(hwnd, &msg).as_bool() {
+                        } else if IsChild(hwnd, focus_hwnd).as_bool()
+                            && IsDialogMessageW(hwnd, &msg).as_bool()
+                        {
                             handled = true;
                         }
+                    } else if IsChild(hwnd, focus_hwnd).as_bool()
+                        && IsDialogMessageW(hwnd, &msg).as_bool()
+                    {
+                        handled = true;
                     }
-                } else if IsDialogMessageW(hwnd, &msg).as_bool() {
-                    handled = true;
                 }
             }
 
@@ -703,5 +869,152 @@ pub fn run_app() -> Result<(), String> {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_STYLE, GetWindowLongPtrW, IsIconic, IsZoomed, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE,
+        WM_LBUTTONDOWN, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+    };
+
+    #[test]
+    fn test_is_keyboard_message_excludes_mouse_and_non_client() {
+        assert!(is_keyboard_message(WM_KEYDOWN));
+        assert!(!is_keyboard_message(WM_NCLBUTTONDOWN));
+        assert!(!is_keyboard_message(WM_NCHITTEST));
+        assert!(!is_keyboard_message(WM_SYSCOMMAND));
+        assert!(!is_keyboard_message(WM_LBUTTONDOWN));
+    }
+
+    #[test]
+    fn test_window_maximize_restore_minimize_cycle() {
+        use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
+
+        unsafe {
+            let _ = OleInitialize(None);
+            let hinstance = GetModuleHandleW(None).unwrap();
+            let class_name = w!("MalvisionTestWindowLifecycleClass");
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                style: CS_HREDRAW | CS_VREDRAW,
+                lpfnWndProc: Some(main_wnd_proc),
+                hInstance: hinstance.into(),
+                lpszClassName: class_name,
+                ..Default::default()
+            };
+            let _ = RegisterClassExW(&wc);
+
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                class_name,
+                w!("TestMalvisionWindow"),
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                1024,
+                768,
+                None,
+                None,
+                Some(hinstance.into()),
+                None,
+            )
+            .expect("Création fenêtre principale de test");
+
+            let _ = ShowWindow(hwnd, SW_SHOW);
+
+            // Vérifier les styles initiaux (WS_OVERLAPPEDWINDOW complet)
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+            assert_eq!(style & MAIN_WINDOW_BASE_STYLE.0, MAIN_WINDOW_BASE_STYLE.0);
+            assert!(!IsZoomed(hwnd).as_bool());
+            assert!(!IsIconic(hwnd).as_bool());
+
+            // 1. Maximiser via WM_SYSCOMMAND (SC_MAXIMIZE)
+            let _ = SendMessageW(
+                hwnd,
+                WM_SYSCOMMAND,
+                Some(WPARAM(SC_MAXIMIZE as usize)),
+                Some(LPARAM(0)),
+            );
+            assert!(
+                IsZoomed(hwnd).as_bool(),
+                "La fenêtre doit être maximisée après SC_MAXIMIZE"
+            );
+
+            // 2. Restaurer depuis l'état maximisé via WM_SYSCOMMAND (SC_RESTORE)
+            let _ = SendMessageW(
+                hwnd,
+                WM_SYSCOMMAND,
+                Some(WPARAM(SC_RESTORE as usize)),
+                Some(LPARAM(0)),
+            );
+            assert!(
+                !IsZoomed(hwnd).as_bool(),
+                "La fenêtre doit être restaurée après SC_RESTORE"
+            );
+            assert!(!IsIconic(hwnd).as_bool());
+
+            // 3. Maximiser à nouveau puis Minimiser directement depuis l'état maximisé (SC_MINIMIZE)
+            let _ = SendMessageW(
+                hwnd,
+                WM_SYSCOMMAND,
+                Some(WPARAM(SC_MAXIMIZE as usize)),
+                Some(LPARAM(0)),
+            );
+            assert!(IsZoomed(hwnd).as_bool());
+
+            let _ = SendMessageW(
+                hwnd,
+                WM_SYSCOMMAND,
+                Some(WPARAM(SC_MINIMIZE as usize)),
+                Some(LPARAM(0)),
+            );
+            assert!(
+                IsIconic(hwnd).as_bool(),
+                "La fenêtre maximisée doit pouvoir être minimisée avec SC_MINIMIZE"
+            );
+
+            // 4. Restaurer depuis l'état minimisé
+            let _ = SendMessageW(
+                hwnd,
+                WM_SYSCOMMAND,
+                Some(WPARAM(SC_RESTORE as usize)),
+                Some(LPARAM(0)),
+            );
+            assert!(!IsIconic(hwnd).as_bool());
+
+            // 5. Simuler les événements RDP (Connecting -> Connected -> LoginComplete -> Disconnected)
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+            (*ptr).last_target = "192.168.1.100:3389".to_string();
+
+            let _ = SendMessageW(
+                hwnd,
+                WM_RDP_EVENT,
+                Some(WPARAM(RDP_EVT_CONNECTING)),
+                Some(LPARAM(0)),
+            );
+            assert_eq!((*ptr).ui_state, UiRdpState::Connecting);
+            assert!(get_window_text((*ptr).status_label).contains("Connexion RDP en cours"));
+
+            // Sans connexion réelle (get_Connected() == 0), RDP_EVT_CONNECTED ne doit PAS afficher Connecté à tort
+            let _ = SendMessageW(
+                hwnd,
+                WM_RDP_EVENT,
+                Some(WPARAM(RDP_EVT_CONNECTED)),
+                Some(LPARAM(0)),
+            );
+            assert_eq!(
+                (*ptr).ui_state,
+                UiRdpState::Connecting,
+                "Ne jamais afficher un état connecté sans confirmation réelle de get_Connected() == 1"
+            );
+
+            // Fermeture propre
+            let _ = SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+            OleUninitialize();
+        }
     }
 }
