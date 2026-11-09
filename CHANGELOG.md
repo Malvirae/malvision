@@ -2,6 +2,45 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
+## [Jalon 2C] — Finitions UX, Thèmes Sombre/Clair/Système, Paramètres persistants, System Tray et gestion des sessions RDP
+
+### Ajouté
+- **Sélection automatique du port RDP (`EM_SETSEL(0, -1)`)** :
+  - Sous-classement du champ d'édition Port dans le formulaire de connexion.
+  - À la réception du focus clavier (`Tab`, `Shift+Tab`) ou du clic souris, l'intégralité du port par défaut (`3389`) est automatiquement sélectionnée.
+  - Saisie directe de n'importe quel port personnalisé (ex. `42666`) sans devoir effacer manuellement, sans désélection intempestive en cours de frappe, avec validation `1..=65535`.
+- **Fermeture automatique des onglets RDP réellement déconnectés** :
+  - Déconnexion volontaire, fermeture de session Windows distante ou rupture réseau confirmée entraînent la fermeture automatique de l'onglet et la libération complète des ressources ActiveX associées.
+  - Sélection automatique d'un autre onglet restant ou retour propre à l'onglet d'accueil lorsqu'il n'y a plus de session active.
+  - Maintien intentionnel de l'onglet ouvert lors des phases de reconnexion automatique (`AutoReconnecting` / `get_Connected() == 2`).
+  - Désactivation atomique des récepteurs d'événements COM (`deactivate_events`) pour éliminer tout risque de double libération ou de réentrance lors de la destruction des onglets.
+- **Bouton et boîte de dialogue des Paramètres** :
+  - Bouton **Paramètres** avec icône vectorielle d'engrenage au bas du volet latéral gauche.
+  - Fenêtre modale des Paramètres (`MalvisionSettingsDlgClass`) organisée en 4 sections :
+    - **Apparence** : Choix du thème (`Sombre`, `Clair`, `Système (suit Windows 11)`) avec aperçu immédiat sans redémarrage.
+    - **Comportement & System Tray** : *Fermer vers le tray*, *Démarrer minimisé* (activable uniquement si le tray est actif), *Confirmer la fermeture avec sessions actives*, *Restaurer les sessions RDP au démarrage*.
+    - **Démarrage avec Windows** : Option créant/supprimant instantanément le raccourci utilisateur `.lnk` dans le dossier Startup, avec synchronisation et réparation automatique de cible.
+    - **Accueil** : Affichage et nombre maximal de connexions récentes (1 à 50, défaut 10).
+    - **Options RDP par défaut** : Presse-papiers et résolution dynamique (SmartSizing).
+- **Intégration Windows System Tray (`Shell_NotifyIconW`)** :
+  - Icône Malvision générée dynamiquement en mémoire (aucune dépendance à un fichier `.ico` externe).
+  - Double-clic restaurant la fenêtre et lui redonnant le focus.
+  - Menu contextuel standard (*Ouvrir Malvision*, *Quitter Malvision*).
+  - Masquage transparent vers le tray lors du clic sur la croix `[X]` lorsque l'option est activée (les sessions restent actives).
+  - Prise en charge du message `TaskbarCreated` pour restaurer automatiquement l'icône lors d'un redémarrage de `explorer.exe`.
+  - Demande de confirmation avant fermeture si des sessions RDP sont en cours.
+- **Thème clair haute lisibilité Windows 11 Fluent** :
+  - Palette complète dédiée pour le thème clair (`#FFFFFF`, `#F3F5F9`, bordures douces `#D1D5DB`, contrastes optimisés).
+  - Adaptation instantanée de tous les composants graphiques : panneau principal, arborescence TreeView, barre d'onglets, tableau de bord, contrôles personnalisés (boutons, boîtes combinées, cases à cocher) et dialogues modaux.
+- **Migration et persistance SQLite versionnée (schéma v2)** :
+  - Migration non destructive `PRAGMA user_version = 2` initialisant et persistant les réglages dans la table `settings`.
+- **Tests unitaires et d'intégration UI Win32 dédiés** :
+  - `test_ui_port_field_auto_selects_all_on_focus_and_direct_typing` : validation de la sélection `EM_SETSEL` au focus clavier et souris et saisie directe de `42666`.
+  - `test_ui_settings_dialog_theme_switching_and_persistence_real_win32` : validation du basculement de thème et de la persistance SQLite.
+  - `test_ui_system_tray_close_to_tray_restore_confirm_active_sessions_and_explicit_exit` : validation du cycle de vie du System Tray, masquage vers le tray, restauration, confirmation de fermeture avec session active et fermeture explicite.
+  - `test_auto_close_disconnected_tab_preserves_other_sessions_and_returns_to_home` : validation de la fermeture d'onglet déconnecté et préservation des autres sessions.
+  - `test_startup_shortcut_lnk_create_read_repair_and_remove` : validation de la manipulation du raccourci `.lnk` via `IShellLinkW`.
+
 ## [Jalon 2B] — Correctifs bloquants des dialogues modaux et finition UI sombre Windows 11
 
 ### Corrigé

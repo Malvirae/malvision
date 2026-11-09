@@ -5,7 +5,7 @@
 //! `IMsRdpClientNonScriptable3`, `IMsRdpExtendedSettings` et `IMsTscAxEvents`.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use windows::Win32::Foundation::{
     E_NOINTERFACE, E_NOTIMPL, E_POINTER, HWND, LPARAM, S_OK, VARIANT_BOOL, VARIANT_TRUE, WPARAM,
 };
@@ -217,6 +217,7 @@ struct RawDispatchVtbl {
 struct RdpEventSinkComObject {
     vtbl: *const RawDispatchVtbl,
     ref_count: AtomicU32,
+    active: AtomicBool,
     notify_hwnd: HWND,
     session_id: u32,
 }
@@ -236,6 +237,7 @@ impl RdpEventSinkComObject {
         let boxed = Box::new(Self {
             vtbl: &RDP_EVENT_SINK_VTBL,
             ref_count: AtomicU32::new(1),
+            active: AtomicBool::new(true),
             notify_hwnd,
             session_id,
         });
@@ -338,6 +340,9 @@ unsafe extern "system" fn sink_invoke(
 ) -> HRESULT {
     unsafe {
         let obj = &*(this as *const RdpEventSinkComObject);
+        if !obj.active.load(Ordering::Acquire) {
+            return S_OK;
+        }
         let notify_hwnd = obj.notify_hwnd;
         let session_id = obj.session_id;
 
@@ -1042,11 +1047,18 @@ impl RdpActiveXHost {
             if hr == S_OK { Ok(()) } else { Err(hr) }
         }
     }
-}
 
-impl Drop for RdpActiveXHost {
-    fn drop(&mut self) {
+    /// Désactive immédiatement le sink d'événements COM (`IMsTscAxEvents`) et se désabonne
+    /// (`IConnectionPoint::Unadvise`) avant toute opération de déconnexion ou de destruction,
+    /// évitant ainsi toute réentrance ou double destruction depuis un callback COM tardif.
+    pub fn deactivate_events(&mut self) {
         unsafe {
+            if let Some(sink_unk) = &self._event_sink {
+                let raw = sink_unk.as_raw() as *const RdpEventSinkComObject;
+                if !raw.is_null() {
+                    (*raw).active.store(false, Ordering::Release);
+                }
+            }
             if let Some(cp) = self.connection_point.take()
                 && self.advise_cookie != 0
             {
@@ -1054,11 +1066,21 @@ impl Drop for RdpActiveXHost {
                 self.advise_cookie = 0;
             }
             self._event_sink = None;
-            if self.is_active() {
-                let _ = self.disconnect();
-            }
+        }
+    }
+}
+
+impl Drop for RdpActiveXHost {
+    fn drop(&mut self) {
+        self.deactivate_events();
+        if self.is_active() {
+            let _ = self.disconnect();
+        }
+        unsafe {
             if !self.ax_hwnd.is_invalid() {
-                let _ = DestroyWindow(self.ax_hwnd);
+                let hwnd = self.ax_hwnd;
+                self.ax_hwnd = HWND::default();
+                let _ = DestroyWindow(hwnd);
             }
         }
     }

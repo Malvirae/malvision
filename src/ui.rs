@@ -6,19 +6,23 @@ use crate::models::{ConnectionDraft, ConnectionItem, Folder, Protocol};
 use crate::rdp::{WM_RDP_EVENT, unpack_rdp_event_wparam};
 use crate::security::SecretString;
 use crate::sessions::{SessionManager, SessionStatus};
-use crate::settings::{AppSettings, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
+use crate::settings::{
+    AppSettings, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, ResolvedTheme, ThemeMode,
+    apply_startup_shortcut, sync_settings_with_real_startup_shortcut,
+};
 use crate::storage::Storage;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
-    CreateSolidBrush, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
-    DeleteDC, DeleteObject, DrawTextW, EndPaint, FONT_CHARSET, FONT_CLIP_PRECISION,
-    FONT_OUTPUT_PRECISION, FONT_QUALITY, FillRect, GetStockObject, HBRUSH, HDC, HFONT,
-    InvalidateRect, LineTo, MoveToEx, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, RoundRect, ScreenToClient,
-    SelectObject, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, ClientToScreen, CreateBitmap,
+    CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen,
+    CreateSolidBrush, DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX,
+    DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, EndPaint, FONT_CHARSET,
+    FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY, FillRect, GetStockObject, HBRUSH,
+    HDC, HFONT, InvalidateRect, LineTo, MoveToEx, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, RoundRect,
+    ScreenToClient, SelectObject, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
@@ -38,60 +42,155 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_ESCAPE, VK_F2, VK_RETURN, VK_SHIFT, VK_SPACE,
     VK_TAB,
 };
+use windows::Win32::UI::Shell::{
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, AppendMenuW, BM_GETCHECK, BM_SETCHECK, BS_OWNERDRAW, CB_ADDSTRING,
     CB_GETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_SETCURSEL, CBS_DROPDOWNLIST, CBS_HASSTRINGS,
     CBS_OWNERDRAWFIXED, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CallWindowProcW,
-    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
-    EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, ES_AUTOHSCROLL, ES_PASSWORD, GWL_STYLE, GWLP_USERDATA,
-    GWLP_WNDPROC, GetClientRect, GetCursorPos, GetDlgCtrlID, GetMessageW, GetParent,
-    GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW,
-    IDC_HAND, IDC_SIZEWE, IDYES, IsChild, IsIconic, IsWindow, KillTimer, LoadCursorW, MB_ICONERROR,
-    MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO, MF_SEPARATOR, MF_STRING,
-    MINMAXINFO, MSG, MessageBoxW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
-    SW_SHOW, SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
+    CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
+    DestroyWindow, DispatchMessageW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, ES_AUTOHSCROLL,
+    ES_PASSWORD, GWL_STYLE, GWLP_USERDATA, GWLP_WNDPROC, GetClientRect, GetCursorPos, GetDlgCtrlID,
+    GetMessageW, GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    HICON, HMENU, ICON_BIG, ICON_SMALL, ICONINFO, IDC_ARROW, IDC_HAND, IDC_SIZEWE, IDYES, IsChild,
+    IsIconic, IsWindow, KillTimer, LoadCursorW, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION,
+    MB_ICONWARNING, MB_OK, MB_YESNO, MF_SEPARATOR, MF_STRING, MINMAXINFO, MSG, MessageBoxW,
+    MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SW_HIDE,
+    SW_RESTORE, SW_SHOW, SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
     SetWindowTextW, ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_TOPALIGN, TrackPopupMenu,
-    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE,
-    WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
+    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU,
+    WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
     WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_NOTIFY, WM_PAINT, WM_SETCURSOR,
-    WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_CAPTION,
-    WS_CHILD, WS_CLIPCHILDREN, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_OVERLAPPEDWINDOW,
-    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_NOTIFY,
+    WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SETFONT, WM_SETICON, WM_SIZE,
+    WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU,
+    WS_TABSTOP, WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL,
 };
 use windows_core::{PCWSTR, w};
 
 // =============================================================================
-// CONSTANTES VISUELLES & COULEURS (THÈME SOMBRE WINDOWS 11 ANTHRACITE)
+// CONSTANTES VISUELLES & COULEURS DYNAMIQUES (THÈMES SOMBRE / CLAIR / SYSTÈME)
 // =============================================================================
 
-const COL_BG_DEEP: u32 = 0x001B1816; // #16181B Anthracite profond
-const COL_BG_SIDEBAR: u32 = 0x00231F1C; // #1C1F23 Panneau gauche & en-têtes/pieds de dialogues
-const COL_BG_SURFACE: u32 = 0x002D2723; // #23272D Cartes / onglets inactifs / boutons secondaires
-const COL_BG_HOVER: u32 = 0x003A322C; // #2C323A Survol / sélection
-const COL_BG_INPUT: u32 = 0x0026211E; // #1E2126 Champs de saisie & ComboBox
-const COL_BG_INPUT_DISABLED: u32 = 0x00191614; // #141619 Champ désactivé
-const COL_ACCENT: u32 = 0x00D47800; // #0078D4 Bleu Windows 11
-const COL_ACCENT_HOVER: u32 = 0x00E88A1A; // #1A8AE8 Bleu survol
-const COL_ACCENT_PRESSED: u32 = 0x009E5A00; // #005A9E Bleu pressé
-const COL_BORDER: u32 = 0x00453D36; // #363D45 Bordure subtile
-const COL_BORDER_SUBTLE: u32 = 0x00302A25; // #252A30 Bordure désactivée
-const COL_TEXT_PRIMARY: u32 = 0x00F6F3F0; // #F0F3F6 Blanc doux
-const COL_TEXT_MUTED: u32 = 0x00A69B8E; // #8E9BA6 Gris secondaire
-const COL_STATUS_OK: u32 = 0x0050B02E; // #2EB050 Vert connecté
-const COL_STATUS_WARN: u32 = 0x00209CE8; // #E89C20 Orange connexion en cours
-const COL_STATUS_ERR: u32 = 0x004545E0; // #E04545 Rouge erreur
-const COL_GOLD_STAR: u32 = 0x0030B8F2; // #F2B830 Étoile favori dorée
-const COL_FOLDER_AMBER: u32 = 0x003EA0E0; // #E0A03E Icône dossier ambre
+static ACTIVE_THEME_IS_DARK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+#[inline]
+pub fn is_active_theme_dark() -> bool {
+    ACTIVE_THEME_IS_DARK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_active_theme_dark(is_dark: bool) {
+    ACTIVE_THEME_IS_DARK.store(is_dark, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[inline]
+fn active_theme_colors() -> crate::settings::ThemeColors {
+    if is_active_theme_dark() {
+        crate::settings::ThemeColors::DARK
+    } else {
+        crate::settings::ThemeColors::LIGHT
+    }
+}
+
+#[inline]
+fn col_bg_deep() -> u32 {
+    active_theme_colors().bg_deep
+}
+#[inline]
+fn col_bg_sidebar() -> u32 {
+    active_theme_colors().bg_sidebar
+}
+#[inline]
+fn col_bg_surface() -> u32 {
+    active_theme_colors().bg_surface
+}
+#[inline]
+fn col_bg_hover() -> u32 {
+    active_theme_colors().bg_hover
+}
+#[inline]
+fn col_bg_input() -> u32 {
+    active_theme_colors().bg_input
+}
+#[inline]
+fn col_bg_input_disabled() -> u32 {
+    if is_active_theme_dark() {
+        0x00191614
+    } else {
+        0x00ECE8E4
+    }
+}
+#[inline]
+fn col_accent() -> u32 {
+    active_theme_colors().accent
+}
+#[inline]
+fn col_accent_hover() -> u32 {
+    active_theme_colors().accent_hover
+}
+#[inline]
+fn col_accent_pressed() -> u32 {
+    if is_active_theme_dark() {
+        0x009E5A00
+    } else {
+        0x008A4F00
+    }
+}
+#[inline]
+fn col_border() -> u32 {
+    active_theme_colors().border
+}
+#[inline]
+fn col_border_subtle() -> u32 {
+    if is_active_theme_dark() {
+        0x00302A25
+    } else {
+        0x00E2D9D0
+    }
+}
+#[inline]
+fn col_text_primary() -> u32 {
+    active_theme_colors().text_primary
+}
+#[inline]
+fn col_text_muted() -> u32 {
+    active_theme_colors().text_muted
+}
+#[inline]
+fn col_status_ok() -> u32 {
+    active_theme_colors().status_ok
+}
+#[inline]
+fn col_status_warn() -> u32 {
+    active_theme_colors().status_warn
+}
+#[inline]
+fn col_status_err() -> u32 {
+    active_theme_colors().status_err
+}
+
+const COL_TEXT_ON_ACCENT: u32 = 0x00F6F3F0; // Blanc pur sur boutons primaires et badges colorés
+const COL_GOLD_STAR: u32 = 0x00249CE8; // Doré lisible sur fond sombre et clair
+const COL_FOLDER_AMBER: u32 = 0x003294DC; // Ambre dossier lisible sur fond sombre et clair
 const COL_PROTO_ANYDESK: u32 = 0x003943D8; // #D84339 Badge AnyDesk
 const COL_PROTO_RUSTDESK: u32 = 0x008A9616; // #16968A Badge RustDesk
 
 const SIDEBAR_HEADER_HEIGHT: i32 = 126;
+const SIDEBAR_FOOTER_HEIGHT: i32 = 46;
 const SPLITTER_WIDTH: i32 = 5;
 const TABBAR_HEIGHT: i32 = 38;
 const STATUSBAR_HEIGHT: i32 = 28;
 const MIN_WINDOW_WIDTH: i32 = 900;
 const MIN_WINDOW_HEIGHT: i32 = 560;
+
+// Messages d'édition Win32 pour sélection automatique (champ Port RDP)
+#[allow(dead_code)]
+pub const EM_GETSEL: u32 = 0x00B0;
+pub const EM_SETSEL: u32 = 0x00B1;
 
 // Identifiants des contrôles enfants de la fenêtre principale
 const IDC_SEARCH_EDIT: usize = 1101;
@@ -107,6 +206,17 @@ const DEFERRED_CONNECT_SELECTED: usize = 1;
 const DEFERRED_NEW_CONNECTION: usize = 2;
 const DEFERRED_NEW_FOLDER: usize = 3;
 const DEFERRED_EDIT_CONNECTION: usize = 4;
+const DEFERRED_OPEN_SETTINGS: usize = 5;
+
+// Message de notification de la zone de notification Windows (System Tray)
+pub const WM_TRAYICON: u32 = WM_APP + 102;
+const TRAY_ICON_ID: u32 = 1;
+const CMD_TRAY_OPEN: u32 = 3101;
+const CMD_TRAY_EXIT: u32 = 3102;
+
+// Override atomique pour les tests d'intégration de confirmation de fermeture (0 = normal, 1 = Oui, -1 = Non)
+static TEST_EXIT_CONFIRM_OVERRIDE: std::sync::atomic::AtomicI8 =
+    std::sync::atomic::AtomicI8::new(0);
 
 // Commandes du menu contextuel de l'arborescence
 const CMD_CTX_CONNECT: u32 = 3001;
@@ -202,6 +312,7 @@ impl TreeNodeKind {
 enum InteractiveZone {
     BtnNewConnection,
     BtnNewFolder,
+    BtnSettings,
     TabSelect(u32),
     TabClose(u32),
     TabNewConnection,
@@ -262,19 +373,45 @@ impl GdiPalette {
                 font_ui: make_font(-13, 400),
                 font_ui_bold: make_font(-13, 600),
                 font_small: make_font(-12, 400),
-                brush_bg_deep: CreateSolidBrush(COLORREF(COL_BG_DEEP)),
-                brush_bg_sidebar: CreateSolidBrush(COLORREF(COL_BG_SIDEBAR)),
-                brush_bg_surface: CreateSolidBrush(COLORREF(COL_BG_SURFACE)),
-                brush_bg_hover: CreateSolidBrush(COLORREF(COL_BG_HOVER)),
-                brush_bg_input: CreateSolidBrush(COLORREF(COL_BG_INPUT)),
-                brush_accent: CreateSolidBrush(COLORREF(COL_ACCENT)),
-                brush_accent_hover: CreateSolidBrush(COLORREF(COL_ACCENT_HOVER)),
+                brush_bg_deep: CreateSolidBrush(COLORREF(col_bg_deep())),
+                brush_bg_sidebar: CreateSolidBrush(COLORREF(col_bg_sidebar())),
+                brush_bg_surface: CreateSolidBrush(COLORREF(col_bg_surface())),
+                brush_bg_hover: CreateSolidBrush(COLORREF(col_bg_hover())),
+                brush_bg_input: CreateSolidBrush(COLORREF(col_bg_input())),
+                brush_accent: CreateSolidBrush(COLORREF(col_accent())),
+                brush_accent_hover: CreateSolidBrush(COLORREF(col_accent_hover())),
             }
         }
     }
 
     unsafe fn create_for_window(hwnd: HWND) -> Self {
         unsafe { Self::create_for_dpi(DpiMetrics::for_window(hwnd)) }
+    }
+
+    /// Recrée les pinceaux GDI lors d'un changement de thème à chaud (Sombre <-> Clair).
+    pub unsafe fn rebuild_brushes(&mut self) {
+        unsafe {
+            for b in [
+                self.brush_bg_deep,
+                self.brush_bg_sidebar,
+                self.brush_bg_surface,
+                self.brush_bg_hover,
+                self.brush_bg_input,
+                self.brush_accent,
+                self.brush_accent_hover,
+            ] {
+                if !b.is_invalid() {
+                    let _ = DeleteObject(b.into());
+                }
+            }
+            self.brush_bg_deep = CreateSolidBrush(COLORREF(col_bg_deep()));
+            self.brush_bg_sidebar = CreateSolidBrush(COLORREF(col_bg_sidebar()));
+            self.brush_bg_surface = CreateSolidBrush(COLORREF(col_bg_surface()));
+            self.brush_bg_hover = CreateSolidBrush(COLORREF(col_bg_hover()));
+            self.brush_bg_input = CreateSolidBrush(COLORREF(col_bg_input()));
+            self.brush_accent = CreateSolidBrush(COLORREF(col_accent()));
+            self.brush_accent_hover = CreateSolidBrush(COLORREF(col_accent_hover()));
+        }
     }
 }
 
@@ -309,6 +446,104 @@ impl Drop for GdiPalette {
     }
 }
 
+/// Génère en mémoire une icône 32×32 ARGB identifiable pour Malvision (badge bleu Fluent avec monogramme « M »),
+/// intégrée directement au binaire sans dépendre d'aucun fichier `.ico` externe.
+unsafe fn create_malvision_app_icon() -> HICON {
+    unsafe {
+        let size = 32i32;
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: size,
+                biHeight: -size, // Top-down DIB
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut bits_ptr: *mut c_void = std::ptr::null_mut();
+        let Ok(hbm_color) = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0)
+        else {
+            return HICON::default();
+        };
+
+        if !bits_ptr.is_null() {
+            let pixels =
+                std::slice::from_raw_parts_mut(bits_ptr as *mut u32, (size * size) as usize);
+            for y in 0..size {
+                for x in 0..size {
+                    // Forme carrée à coins arrondis (rayon 6 px)
+                    let dx = if x < 6 {
+                        6 - x
+                    } else if x > 25 {
+                        x - 25
+                    } else {
+                        0
+                    };
+                    let dy = if y < 6 {
+                        6 - y
+                    } else if y > 25 {
+                        y - 25
+                    } else {
+                        0
+                    };
+
+                    if dx * dx + dy * dy > 36 {
+                        pixels[(y * size + x) as usize] = 0x0000_0000;
+                        continue;
+                    }
+
+                    // Bordure lumineuse subtile + dégradé bleu Windows 11 (#0078D4 -> #005A9E)
+                    let is_border =
+                        dx * dx + dy * dy >= 25 || x == 0 || x == 31 || y == 0 || y == 31;
+                    let bg_argb = if is_border {
+                        0xFF38_98F0
+                    } else if y < 16 {
+                        0xFF00_78D4
+                    } else {
+                        0xFF00_62B0
+                    };
+
+                    // Monogramme 'M' blanc net au centre (x in 7..=24, y in 8..=23)
+                    let in_left_leg = (7..=10).contains(&x) && (8..=23).contains(&y);
+                    let in_right_leg = (21..=24).contains(&x) && (8..=23).contains(&y);
+                    let in_left_diag =
+                        (8..=18).contains(&y) && (x - 9 - (y - 8) / 2).abs() <= 1 && x <= 16;
+                    let in_right_diag =
+                        (8..=18).contains(&y) && ((22 - (y - 8) / 2) - x).abs() <= 1 && x >= 15;
+
+                    pixels[(y * size + x) as usize] =
+                        if in_left_leg || in_right_leg || in_left_diag || in_right_diag {
+                            0xFFFF_FFFF
+                        } else {
+                            bg_argb
+                        };
+                }
+            }
+        }
+
+        let hbm_mask = CreateBitmap(size, size, 1, 1, None);
+        let icon_info = ICONINFO {
+            fIcon: true.into(),
+            xHotspot: 0,
+            yHotspot: 0,
+            hbmMask: hbm_mask,
+            hbmColor: hbm_color,
+        };
+        let hicon = CreateIconIndirect(&icon_info).unwrap_or_default();
+        if !hbm_mask.is_invalid() {
+            let _ = DeleteObject(hbm_mask.into());
+        }
+        if !hbm_color.is_invalid() {
+            let _ = DeleteObject(hbm_color.into());
+        }
+        hicon
+    }
+}
+
 pub struct AppWindowState {
     hwnd: HWND,
     palette: GdiPalette,
@@ -330,24 +565,18 @@ pub struct AppWindowState {
     cached_connections: HashMap<i64, ConnectionItem>,
     fav_count: usize,
     conn_count: usize,
+    app_icon: HICON,
+    tray_icon_added: bool,
+    is_hidden_in_tray: bool,
+    exit_requested: bool,
+    wm_taskbar_created: u32,
 }
 
 impl AppWindowState {
     unsafe fn initialize(hwnd: HWND, custom_storage: Option<Storage>) -> Self {
         unsafe {
-            // Activer la barre de titre sombre native de Windows 11 (Immersive Dark Mode)
-            let dark_mode: i32 = 1;
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_USE_IMMERSIVE_DARK_MODE,
-                &dark_mode as *const i32 as *const c_void,
-                std::mem::size_of::<i32>() as u32,
-            );
-
-            let palette = GdiPalette::create_for_window(hwnd);
-
             let mut status_override = None;
-            let storage = if let Some(s) = custom_storage {
+            let mut storage = if let Some(s) = custom_storage {
                 s
             } else if cfg!(test) {
                 Storage::open_in_memory().expect("Base SQLite en mémoire pour test UI")
@@ -369,12 +598,46 @@ impl AppWindowState {
                 }
             };
 
-            let settings = AppSettings::load(&storage);
+            let mut settings = AppSettings::load(&storage);
+            if !cfg!(test) {
+                sync_settings_with_real_startup_shortcut(&mut settings, &mut storage);
+            }
+
+            let is_dark = settings.theme_mode.resolve() == ResolvedTheme::Dark;
+            set_active_theme_dark(is_dark);
+
+            // Aligner la barre de titre native Windows 11 avec le thème actif (Sombre / Clair)
+            let dark_mode: i32 = i32::from(is_dark);
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &dark_mode as *const i32 as *const c_void,
+                std::mem::size_of::<i32>() as u32,
+            );
+
+            let palette = GdiPalette::create_for_window(hwnd);
+            let app_icon = create_malvision_app_icon();
+            if !app_icon.is_invalid() {
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    Some(WPARAM(ICON_SMALL as usize)),
+                    Some(LPARAM(app_icon.0 as isize)),
+                );
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    Some(WPARAM(ICON_BIG as usize)),
+                    Some(LPARAM(app_icon.0 as isize)),
+                );
+            }
+
+            let wm_taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
             let sidebar_w = settings.sidebar_width;
 
             let hinstance = GetModuleHandleW(None).unwrap_or_default();
 
-            // Champ de recherche sans bordure Win32 (encapsulé dans un conteneur arrondi sombre dessiné en GDI)
+            // Champ de recherche sans bordure Win32 (encapsulé dans un conteneur arrondi dessiné en GDI)
             let search_edit = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 WC_EDITW,
@@ -410,7 +673,9 @@ impl AppWindowState {
             let mut rc = RECT::default();
             let _ = GetClientRect(hwnd, &mut rc);
             let client_h = (rc.bottom - rc.top).max(560);
-            let tree_h = (client_h - SIDEBAR_HEADER_HEIGHT - STATUSBAR_HEIGHT).max(150);
+            let tree_h =
+                (client_h - SIDEBAR_HEADER_HEIGHT - SIDEBAR_FOOTER_HEIGHT - STATUSBAR_HEIGHT)
+                    .max(120);
 
             const TVS_NOHSCROLL: u32 = 0x8000;
             let tree_style = WINDOW_STYLE(
@@ -450,13 +715,13 @@ impl AppWindowState {
                     treeview,
                     TVM_SETBKCOLOR,
                     Some(WPARAM(0)),
-                    Some(LPARAM(COL_BG_SIDEBAR as isize)),
+                    Some(LPARAM(col_bg_sidebar() as isize)),
                 );
                 let _ = SendMessageW(
                     treeview,
                     TVM_SETTEXTCOLOR,
                     Some(WPARAM(0)),
-                    Some(LPARAM(COL_TEXT_PRIMARY as isize)),
+                    Some(LPARAM(col_text_primary() as isize)),
                 );
                 // Hauteur de ligne 28 px pour un rendu moderne et lisible
                 let _ = SendMessageW(treeview, TV_FIRST + 27, Some(WPARAM(28)), Some(LPARAM(0)));
@@ -490,10 +755,274 @@ impl AppWindowState {
                 cached_connections: HashMap::new(),
                 fav_count: 0,
                 conn_count: 0,
+                app_icon,
+                tray_icon_added: false,
+                is_hidden_in_tray: false,
+                exit_requested: false,
+                wm_taskbar_created,
             };
+
+            if !cfg!(test) {
+                state.init_tray_icon();
+            }
 
             state.rebuild_treeview();
             state
+        }
+    }
+
+    /// Applique immédiatement le thème configuré (`Dark`, `Light` ou `System`) à toute la fenêtre
+    /// principale, au `TreeView`, au champ de recherche et aux pinceaux GDI sans redémarrage.
+    pub fn apply_theme(&mut self) {
+        unsafe {
+            let is_dark = self.settings.resolved_theme() == ResolvedTheme::Dark;
+            set_active_theme_dark(is_dark);
+            self.palette.rebuild_brushes();
+
+            let dark_mode: i32 = i32::from(is_dark);
+            let _ = DwmSetWindowAttribute(
+                self.hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &dark_mode as *const i32 as *const c_void,
+                std::mem::size_of::<i32>() as u32,
+            );
+
+            if !self.treeview.is_invalid() {
+                let _ = SendMessageW(
+                    self.treeview,
+                    TVM_SETBKCOLOR,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(col_bg_sidebar() as isize)),
+                );
+                let _ = SendMessageW(
+                    self.treeview,
+                    TVM_SETTEXTCOLOR,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(col_text_primary() as isize)),
+                );
+                let _ = InvalidateRect(Some(self.treeview), None, true);
+            }
+            if !self.search_edit.is_invalid() {
+                let _ = InvalidateRect(Some(self.search_edit), None, true);
+            }
+            let _ = InvalidateRect(Some(self.hwnd), None, true);
+            let _ = UpdateWindow(self.hwnd);
+        }
+    }
+
+    // =========================================================================
+    // SYSTEM TRAY WINDOWS (`Shell_NotifyIconW`) & CYCLE DE VIE DE FERMETURE
+    // =========================================================================
+
+    pub fn init_tray_icon(&mut self) {
+        unsafe {
+            if self.hwnd.is_invalid() || self.app_icon.is_invalid() {
+                return;
+            }
+            let mut nid = NOTIFYICONDATAW {
+                cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: self.hwnd,
+                uID: TRAY_ICON_ID,
+                uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+                uCallbackMessage: WM_TRAYICON,
+                hIcon: self.app_icon,
+                ..Default::default()
+            };
+            let tip = "Malvision — Connexions Distantes";
+            for (dst, src) in nid.szTip.iter_mut().take(127).zip(tip.encode_utf16()) {
+                *dst = src;
+            }
+            if Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
+                self.tray_icon_added = true;
+            }
+        }
+    }
+
+    pub fn remove_tray_icon(&mut self) {
+        unsafe {
+            if !self.tray_icon_added || self.hwnd.is_invalid() {
+                return;
+            }
+            let nid = NOTIFYICONDATAW {
+                cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: self.hwnd,
+                uID: TRAY_ICON_ID,
+                ..Default::default()
+            };
+            let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+            self.tray_icon_added = false;
+        }
+    }
+
+    pub fn hide_to_tray(&mut self) {
+        if !self.tray_icon_added {
+            self.init_tray_icon();
+        }
+        self.is_hidden_in_tray = true;
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+        }
+    }
+
+    pub fn restore_from_tray(&mut self) {
+        self.is_hidden_in_tray = false;
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_SHOW);
+            if IsIconic(self.hwnd).as_bool() {
+                let _ = ShowWindow(self.hwnd, SW_RESTORE);
+            }
+            let _ = SetForegroundWindow(self.hwnd);
+        }
+        self.layout_children();
+    }
+
+    unsafe fn show_tray_context_menu(&mut self) {
+        unsafe {
+            let mut cursor = POINT::default();
+            let _ = GetCursorPos(&mut cursor);
+
+            let Ok(hmenu) = CreatePopupMenu() else {
+                return;
+            };
+            let _ = AppendMenuW(
+                hmenu,
+                MF_STRING,
+                CMD_TRAY_OPEN as usize,
+                w!("Ouvrir Malvision"),
+            );
+            let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(
+                hmenu,
+                MF_STRING,
+                CMD_TRAY_EXIT as usize,
+                w!("Quitter Malvision"),
+            );
+
+            let _ = SetForegroundWindow(self.hwnd);
+            let cmd = TrackPopupMenu(
+                hmenu,
+                TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
+                cursor.x,
+                cursor.y,
+                Some(0),
+                self.hwnd,
+                None,
+            );
+            let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+            let _ = DestroyMenu(hmenu);
+
+            match cmd.0 as u32 {
+                CMD_TRAY_OPEN => self.restore_from_tray(),
+                CMD_TRAY_EXIT => {
+                    let _ = self.request_explicit_exit();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn confirm_exit_if_needed(&self) -> bool {
+        if !self.settings.confirm_exit_active_sessions || self.sessions.is_empty() {
+            return true;
+        }
+        match TEST_EXIT_CONFIRM_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
+            1 => return true,
+            -1 => return false,
+            _ => {}
+        }
+        let count = self.sessions.tabs().len();
+        confirm_dialog(
+            self.hwnd,
+            "Confirmer la fermeture de Malvision",
+            &format!(
+                "{count} session(s) RDP active(s) sont actuellement ouvertes.\n\nVoulez-vous vraiment quitter Malvision et fermer toutes les connexions ?"
+            ),
+        )
+    }
+
+    fn perform_clean_exit(&mut self) {
+        if self.settings.restore_rdp_sessions {
+            let open_ids = self.sessions.open_connection_ids();
+            self.settings
+                .save_restorable_rdp_sessions(&mut self.storage, &open_ids);
+        } else if !self.settings.restorable_rdp_connection_ids.is_empty() {
+            self.settings
+                .save_restorable_rdp_sessions(&mut self.storage, &[]);
+        }
+        self.remove_tray_icon();
+        self.sessions.close_all();
+        unsafe {
+            let _ = DestroyWindow(self.hwnd);
+        }
+    }
+
+    /// Demande de sortie explicite (menu « Quitter Malvision » du System Tray) :
+    /// contourne `close_to_tray` mais respecte `confirm_exit_active_sessions`.
+    pub fn request_explicit_exit(&mut self) -> bool {
+        self.exit_requested = true;
+        if !self.confirm_exit_if_needed() {
+            self.exit_requested = false;
+            return false;
+        }
+        self.perform_clean_exit();
+        true
+    }
+
+    /// Gère `WM_CLOSE` (clic sur la croix `[X]` ou `Alt+F4`).
+    /// Retourne `true` si la fenêtre a été détruite, `false` si elle a été masquée dans le Tray ou annulée.
+    pub fn on_close_requested(&mut self) -> bool {
+        if !self.exit_requested && self.settings.close_to_tray {
+            self.hide_to_tray();
+            return false;
+        }
+        if !self.confirm_exit_if_needed() {
+            self.exit_requested = false;
+            return false;
+        }
+        self.perform_clean_exit();
+        true
+    }
+
+    /// Restaure au démarrage les sessions RDP précédemment actives si l'option est activée,
+    /// en vérifiant préalablement que chaque fiche existe et que son secret DPAPI est valide
+    /// afin de ne jamais déclencher de connexion incontrôlée en cas d'erreur de secret.
+    pub fn restore_sessions_on_startup(&mut self) {
+        if !self.settings.restore_rdp_sessions
+            || self.settings.restorable_rdp_connection_ids.is_empty()
+        {
+            return;
+        }
+
+        let ids_to_restore = self.settings.restorable_rdp_connection_ids.clone();
+        // Effacer immédiatement la liste persistée pour éviter toute boucle en cas d'arrêt anormal
+        self.settings
+            .save_restorable_rdp_sessions(&mut self.storage, &[]);
+
+        let mut skipped_due_to_secret = 0usize;
+        for cid in ids_to_restore {
+            let Ok(Some(conn)) = self.storage.get_connection(cid) else {
+                continue;
+            };
+            if conn.protocol != Protocol::Rdp {
+                continue;
+            }
+            if conn.save_password {
+                match self.storage.load_decrypted_password(conn.id) {
+                    Ok(Some(_)) => {}
+                    _ => {
+                        skipped_due_to_secret += 1;
+                        continue;
+                    }
+                }
+            }
+            self.launch_connection_by_id(conn.id);
+        }
+
+        if skipped_due_to_secret > 0 {
+            self.status_override = Some(format!(
+                "{skipped_due_to_secret} session(s) non restaurée(s) automatiquement (mot de passe DPAPI indisponible)."
+            ));
+            self.invalidate_canvas();
         }
     }
 
@@ -534,7 +1063,8 @@ impl AppWindowState {
 
         unsafe {
             let _ = MoveWindow(self.search_edit, 36, 89, (sidebar_w - 52).max(80), 18, true);
-            let tree_h = (height - SIDEBAR_HEADER_HEIGHT - STATUSBAR_HEIGHT).max(100);
+            let tree_h =
+                (height - SIDEBAR_HEADER_HEIGHT - SIDEBAR_FOOTER_HEIGHT - STATUSBAR_HEIGHT).max(80);
             let _ = MoveWindow(
                 self.treeview,
                 0,
@@ -887,10 +1417,10 @@ impl AppWindowState {
 
             match kind {
                 Some(TreeNodeKind::FavoritesRoot) => {
-                    draw_icon_chevron(hdc, indent + 4, mid_y, expanded, COL_TEXT_MUTED);
+                    draw_icon_chevron(hdc, indent + 4, mid_y, expanded, col_text_muted());
                     draw_icon_star(hdc, indent + 16, mid_y - 7, COL_GOLD_STAR);
                     let _ = SelectObject(hdc, self.palette.font_ui_bold.into());
-                    let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                     let title = format!("Favoris ({})", self.fav_count);
                     draw_text_line(
                         hdc,
@@ -904,10 +1434,10 @@ impl AppWindowState {
                     );
                 }
                 Some(TreeNodeKind::ConnectionsRoot) => {
-                    draw_icon_chevron(hdc, indent + 4, mid_y, expanded, COL_TEXT_MUTED);
-                    draw_icon_layers(hdc, indent + 16, mid_y - 7, COL_ACCENT);
+                    draw_icon_chevron(hdc, indent + 4, mid_y, expanded, col_text_muted());
+                    draw_icon_layers(hdc, indent + 16, mid_y - 7, col_accent());
                     let _ = SelectObject(hdc, self.palette.font_ui_bold.into());
-                    let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                     let title = if self.search_query.trim().is_empty() {
                         format!("Connexions ({})", self.conn_count)
                     } else {
@@ -925,7 +1455,7 @@ impl AppWindowState {
                     );
                 }
                 Some(TreeNodeKind::Folder(fid)) => {
-                    draw_icon_chevron(hdc, indent + 4, mid_y, expanded, COL_TEXT_MUTED);
+                    draw_icon_chevron(hdc, indent + 4, mid_y, expanded, col_text_muted());
                     draw_icon_folder(hdc, indent + 16, mid_y - 6, expanded, COL_FOLDER_AMBER);
                     let _ = SelectObject(
                         hdc,
@@ -935,7 +1465,7 @@ impl AppWindowState {
                             self.palette.font_ui.into()
                         },
                     );
-                    let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                     let name = self
                         .cached_folders
                         .get(&fid)
@@ -955,7 +1485,7 @@ impl AppWindowState {
                 Some(TreeNodeKind::Connection(cid)) => {
                     if let Some(conn) = self.cached_connections.get(&cid) {
                         let (badge_col, badge_txt) = match conn.protocol {
-                            Protocol::Rdp => (COL_ACCENT, "RDP"),
+                            Protocol::Rdp => (col_accent(), "RDP"),
                             Protocol::AnyDesk => (COL_PROTO_ANYDESK, "ANY"),
                             Protocol::RustDesk => (COL_PROTO_RUSTDESK, "RST"),
                         };
@@ -982,7 +1512,7 @@ impl AppWindowState {
                                 self.palette.font_ui.into()
                             },
                         );
-                        let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+                        let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                         draw_text_line(
                             hdc,
                             &conn.name,
@@ -1099,7 +1629,7 @@ impl AppWindowState {
 
             // Titre "MALVISION" + sous-titre discret
             let _ = SelectObject(hdc, self.palette.font_title.into());
-            let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+            let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
             draw_text_line(
                 hdc,
                 "Malvision",
@@ -1120,7 +1650,7 @@ impl AppWindowState {
                     right: 158,
                     bottom: 32,
                 },
-                COL_ACCENT,
+                col_accent(),
                 "Win11",
                 self.palette.font_small,
             );
@@ -1149,14 +1679,14 @@ impl AppWindowState {
                 hdc,
                 rc_btn_conn,
                 if is_conn_hover {
-                    COL_ACCENT_HOVER
+                    col_accent_hover()
                 } else {
-                    COL_ACCENT
+                    col_accent()
                 },
-                COL_ACCENT_HOVER,
+                col_accent_hover(),
                 "+ Connexion",
                 self.palette.font_ui_bold,
-                COL_TEXT_PRIMARY,
+                COL_TEXT_ON_ACCENT,
             );
             self.hit_zones.push(HitZone {
                 rect: rc_btn_conn,
@@ -1168,14 +1698,14 @@ impl AppWindowState {
                 hdc,
                 rc_btn_fold,
                 if is_fold_hover {
-                    COL_BG_HOVER
+                    col_bg_hover()
                 } else {
-                    COL_BG_SURFACE
+                    col_bg_surface()
                 },
-                COL_BORDER,
+                col_border(),
                 "+ Dossier",
                 self.palette.font_ui,
-                COL_TEXT_PRIMARY,
+                col_text_primary(),
             );
             self.hit_zones.push(HitZone {
                 rect: rc_btn_fold,
@@ -1193,11 +1723,11 @@ impl AppWindowState {
             draw_rounded_box(
                 hdc,
                 search_box_rc,
-                COL_BG_INPUT,
+                col_bg_input(),
                 if is_search_focused {
-                    COL_ACCENT
+                    col_accent()
                 } else {
-                    COL_BORDER
+                    col_border()
                 },
             );
             draw_icon_search(
@@ -1205,12 +1735,72 @@ impl AppWindowState {
                 search_box_rc.left + 8,
                 search_box_rc.top + 7,
                 if is_search_focused {
-                    COL_ACCENT_HOVER
+                    col_accent_hover()
                 } else {
-                    COL_TEXT_MUTED
+                    col_text_muted()
                 },
             );
-            draw_horizontal_line(hdc, 0, sidebar_w, SIDEBAR_HEADER_HEIGHT - 1, COL_BORDER);
+            draw_horizontal_line(hdc, 0, sidebar_w, SIDEBAR_HEADER_HEIGHT - 1, col_border());
+
+            // 2b. Pied du panneau gauche : bouton « Paramètres » avec icône engrenage
+            let footer_top = (status_top - SIDEBAR_FOOTER_HEIGHT).max(SIDEBAR_HEADER_HEIGHT);
+            let sidebar_footer_rc = RECT {
+                left: 0,
+                top: footer_top,
+                right: sidebar_w,
+                bottom: status_top,
+            };
+            let _ = FillRect(hdc, &sidebar_footer_rc, self.palette.brush_bg_sidebar);
+            draw_horizontal_line(hdc, 0, sidebar_w, footer_top, col_border());
+
+            let rc_btn_settings = RECT {
+                left: 12,
+                top: footer_top + 7,
+                right: (sidebar_w - 12).max(92),
+                bottom: status_top - 7,
+            };
+            let is_settings_hover = self.hovered_zone == Some(InteractiveZone::BtnSettings);
+            draw_rounded_box(
+                hdc,
+                rc_btn_settings,
+                if is_settings_hover {
+                    col_bg_hover()
+                } else {
+                    col_bg_surface()
+                },
+                if is_settings_hover {
+                    col_accent()
+                } else {
+                    col_border()
+                },
+            );
+            let gear_cy = (rc_btn_settings.top + rc_btn_settings.bottom) / 2;
+            draw_icon_gear(
+                hdc,
+                rc_btn_settings.left + 18,
+                gear_cy,
+                if is_settings_hover {
+                    col_accent_hover()
+                } else {
+                    col_text_muted()
+                },
+            );
+            let _ = SelectObject(hdc, self.palette.font_ui.into());
+            let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+            draw_text_line(
+                hdc,
+                "Paramètres",
+                RECT {
+                    left: rc_btn_settings.left + 34,
+                    top: rc_btn_settings.top,
+                    right: rc_btn_settings.right - 10,
+                    bottom: rc_btn_settings.bottom,
+                },
+            );
+            self.hit_zones.push(HitZone {
+                rect: rc_btn_settings,
+                zone: InteractiveZone::BtnSettings,
+            });
 
             // Séparateur vertical redimensionnable entre le panneau gauche et la zone centrale
             let splitter_rc = RECT {
@@ -1220,7 +1810,7 @@ impl AppWindowState {
                 bottom: status_top,
             };
             let _ = FillRect(hdc, &splitter_rc, self.palette.brush_bg_sidebar);
-            draw_vertical_line(hdc, sidebar_w, 0, status_top, COL_BORDER);
+            draw_vertical_line(hdc, sidebar_w, 0, status_top, col_border());
 
             // 3. Barre d'onglets supérieure de la zone centrale
             let tabbar_rc = RECT {
@@ -1230,7 +1820,7 @@ impl AppWindowState {
                 bottom: TABBAR_HEIGHT,
             };
             let _ = FillRect(hdc, &tabbar_rc, self.palette.brush_bg_sidebar);
-            draw_horizontal_line(hdc, content_left, width, TABBAR_HEIGHT - 1, COL_BORDER);
+            draw_horizontal_line(hdc, content_left, width, TABBAR_HEIGHT - 1, col_border());
 
             self.paint_tab_bar(hdc, tabbar_rc);
 
@@ -1288,22 +1878,28 @@ impl AppWindowState {
                     bottom: TABBAR_HEIGHT - 1,
                 };
                 let _ = FillRect(hdc, &home_tab, self.palette.brush_bg_deep);
-                draw_horizontal_line(hdc, home_tab.left, home_tab.right, home_tab.top, COL_ACCENT);
+                draw_horizontal_line(
+                    hdc,
+                    home_tab.left,
+                    home_tab.right,
+                    home_tab.top,
+                    col_accent(),
+                );
                 draw_horizontal_line(
                     hdc,
                     home_tab.left,
                     home_tab.right,
                     home_tab.top + 1,
-                    COL_ACCENT,
+                    col_accent(),
                 );
                 draw_icon_home(
                     hdc,
                     home_tab.left + 14,
                     (home_tab.top + home_tab.bottom) / 2 - 7,
-                    COL_ACCENT_HOVER,
+                    col_accent_hover(),
                 );
                 let _ = SelectObject(hdc, self.palette.font_ui_bold.into());
-                let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                 draw_text_line(
                     hdc,
                     "Accueil",
@@ -1350,22 +1946,22 @@ impl AppWindowState {
 
                 if is_active {
                     // Ligne d'accent bleue sur l'onglet actif
-                    draw_horizontal_line(hdc, tab_rc.left, tab_rc.right, tab_rc.top, COL_ACCENT);
+                    draw_horizontal_line(hdc, tab_rc.left, tab_rc.right, tab_rc.top, col_accent());
                     draw_horizontal_line(
                         hdc,
                         tab_rc.left,
                         tab_rc.right,
                         tab_rc.top + 1,
-                        COL_ACCENT,
+                        col_accent(),
                     );
                 }
 
                 // Indicateur coloré d'état de connexion
                 let dot_color = match status {
-                    SessionStatus::Connected | SessionStatus::LoggedIn => COL_STATUS_OK,
-                    SessionStatus::Connecting => COL_STATUS_WARN,
-                    SessionStatus::Error => COL_STATUS_ERR,
-                    SessionStatus::Disconnected => COL_TEXT_MUTED,
+                    SessionStatus::Connected | SessionStatus::LoggedIn => col_status_ok(),
+                    SessionStatus::Connecting => col_status_warn(),
+                    SessionStatus::Error => col_status_err(),
+                    SessionStatus::Disconnected => col_text_muted(),
                 };
                 draw_status_dot(
                     hdc,
@@ -1385,9 +1981,9 @@ impl AppWindowState {
                 let _ = SetTextColor(
                     hdc,
                     COLORREF(if is_active {
-                        COL_TEXT_PRIMARY
+                        col_text_primary()
                     } else {
-                        COL_TEXT_MUTED
+                        col_text_muted()
                     }),
                 );
 
@@ -1412,12 +2008,12 @@ impl AppWindowState {
                 };
                 let is_close_hover = self.hovered_zone == Some(InteractiveZone::TabClose(sid));
                 if is_close_hover {
-                    let err_brush = CreateSolidBrush(COLORREF(COL_STATUS_ERR));
+                    let err_brush = CreateSolidBrush(COLORREF(col_status_err()));
                     let _ = FillRect(hdc, &close_rc, err_brush);
                     let _ = DeleteObject(err_brush.into());
                 }
                 let _ = SelectObject(hdc, self.palette.font_ui_bold.into());
-                let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                 draw_text_line(
                     hdc,
                     "×",
@@ -1460,14 +2056,14 @@ impl AppWindowState {
                     hdc,
                     plus_rc,
                     if is_hover {
-                        COL_BG_HOVER
+                        col_bg_hover()
                     } else {
-                        COL_BG_SURFACE
+                        col_bg_surface()
                     },
-                    COL_BORDER,
+                    col_border(),
                     "+",
                     self.palette.font_ui_bold,
-                    COL_TEXT_PRIMARY,
+                    col_text_primary(),
                 );
                 self.hit_zones.push(HitZone {
                     rect: plus_rc,
@@ -1484,7 +2080,7 @@ impl AppWindowState {
 
             // En-tête d'accueil
             let _ = SelectObject(hdc, self.palette.font_title.into());
-            let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+            let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
             draw_text_line(
                 hdc,
                 "Gestionnaire de connexions distantes",
@@ -1498,7 +2094,7 @@ impl AppWindowState {
             y += 30;
 
             let _ = SelectObject(hdc, self.palette.font_ui.into());
-            let _ = SetTextColor(hdc, COLORREF(COL_TEXT_MUTED));
+            let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
             draw_text_line(
                 hdc,
                 "Double-cliquez sur une connexion dans l'arborescence ou cliquez sur une carte ci-dessous pour démarrer une session RDP intégrée.",
@@ -1530,14 +2126,14 @@ impl AppWindowState {
                 hdc,
                 btn_new_conn,
                 if hover_nc {
-                    COL_ACCENT_HOVER
+                    col_accent_hover()
                 } else {
-                    COL_ACCENT
+                    col_accent()
                 },
-                COL_ACCENT_HOVER,
+                col_accent_hover(),
                 "+ Nouvelle connexion",
                 self.palette.font_ui_bold,
-                COL_TEXT_PRIMARY,
+                COL_TEXT_ON_ACCENT,
             );
             self.hit_zones.push(HitZone {
                 rect: btn_new_conn,
@@ -1549,14 +2145,14 @@ impl AppWindowState {
                 hdc,
                 btn_new_fold,
                 if hover_nf {
-                    COL_BG_HOVER
+                    col_bg_hover()
                 } else {
-                    COL_BG_SURFACE
+                    col_bg_surface()
                 },
-                COL_BORDER,
+                col_border(),
                 "+ Nouveau dossier",
                 self.palette.font_ui,
-                COL_TEXT_PRIMARY,
+                col_text_primary(),
             );
             self.hit_zones.push(HitZone {
                 rect: btn_new_fold,
@@ -1572,7 +2168,7 @@ impl AppWindowState {
 
             draw_icon_star(hdc, area.left + pad_x, y + 4, 0x0041B8FF);
             let _ = SelectObject(hdc, self.palette.font_subtitle.into());
-            let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+            let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
             draw_text_line(
                 hdc,
                 "Connexions favorites",
@@ -1587,7 +2183,7 @@ impl AppWindowState {
 
             if favorites.is_empty() {
                 let _ = SelectObject(hdc, self.palette.font_ui.into());
-                let _ = SetTextColor(hdc, COLORREF(COL_TEXT_MUTED));
+                let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
                 draw_text_line(
                     hdc,
                     "Aucune connexion marquée en favori. Cochez « Favori » lors de la création ou via le clic droit.",
@@ -1604,17 +2200,26 @@ impl AppWindowState {
                 y += 18;
             }
 
-            // Section 2 : Connexions récemment utilisées
-            let recents = self.storage.list_recent_connections(6).unwrap_or_default();
-            let recent_refs: Vec<&ConnectionItem> = recents.iter().map(|r| &r.connection).collect();
+            // Section 2 : Connexions récemment utilisées (selon préférences utilisateur)
+            if self.settings.show_recent_connections && y + 90 < area.bottom {
+                let max_rec = self.settings.max_recent_connections.clamp(1, 50);
+                let recents = self
+                    .storage
+                    .list_recent_connections(max_rec)
+                    .unwrap_or_default();
+                let recent_refs: Vec<&ConnectionItem> =
+                    recents.iter().map(|r| &r.connection).collect();
 
-            if y + 90 < area.bottom {
-                draw_icon_clock(hdc, area.left + pad_x, y + 4, COL_ACCENT_HOVER);
+                draw_icon_clock(hdc, area.left + pad_x, y + 4, col_accent_hover());
                 let _ = SelectObject(hdc, self.palette.font_subtitle.into());
-                let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                let recent_title = format!(
+                    "Connexions récemment utilisées (max. {})",
+                    self.settings.max_recent_connections
+                );
                 draw_text_line(
                     hdc,
-                    "Connexions récemment utilisées",
+                    &recent_title,
                     RECT {
                         left: area.left + pad_x + 22,
                         top: y,
@@ -1626,7 +2231,7 @@ impl AppWindowState {
 
                 if recent_refs.is_empty() {
                     let _ = SelectObject(hdc, self.palette.font_ui.into());
-                    let _ = SetTextColor(hdc, COLORREF(COL_TEXT_MUTED));
+                    let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
                     draw_text_line(
                         hdc,
                         "Aucune session récente enregistrée.",
@@ -1687,16 +2292,16 @@ impl AppWindowState {
                     hdc,
                     card_rc,
                     if is_hover {
-                        COL_BG_HOVER
+                        col_bg_hover()
                     } else {
-                        COL_BG_SURFACE
+                        col_bg_surface()
                     },
-                    if is_hover { COL_ACCENT } else { COL_BORDER },
+                    if is_hover { col_accent() } else { col_border() },
                 );
 
                 // Badge protocole
                 let proto_color = match conn.protocol {
-                    Protocol::Rdp => COL_ACCENT,
+                    Protocol::Rdp => col_accent(),
                     Protocol::AnyDesk => 0x003B46D9, // Rouge AnyDesk discret
                     Protocol::RustDesk => 0x00B5721E, // Bleu-vert RustDesk
                 };
@@ -1715,7 +2320,7 @@ impl AppWindowState {
 
                 // Nom de la connexion
                 let _ = SelectObject(hdc, self.palette.font_ui_bold.into());
-                let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                 draw_text_line(
                     hdc,
                     &conn.name,
@@ -1729,7 +2334,7 @@ impl AppWindowState {
 
                 // Sous-texte : hôte:port + utilisateur
                 let _ = SelectObject(hdc, self.palette.font_small.into());
-                let _ = SetTextColor(hdc, COLORREF(COL_TEXT_MUTED));
+                let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
                 let user_info = if conn.username.is_empty() {
                     conn.endpoint_label()
                 } else if conn.domain.is_empty() {
@@ -1766,21 +2371,21 @@ impl AppWindowState {
                     hdc,
                     edit_rc,
                     if is_edit_hover {
-                        COL_BG_DEEP
+                        col_bg_deep()
                     } else {
-                        COL_BG_SURFACE
+                        col_bg_surface()
                     },
                     if is_edit_hover {
-                        COL_ACCENT
+                        col_accent()
                     } else {
-                        COL_BORDER
+                        col_border()
                     },
                     "Modifier",
                     self.palette.font_small,
                     if is_edit_hover {
-                        COL_TEXT_PRIMARY
+                        col_text_primary()
                     } else {
-                        COL_TEXT_MUTED
+                        col_text_muted()
                     },
                 );
 
@@ -1813,16 +2418,16 @@ impl AppWindowState {
                 status_rc.left,
                 status_rc.right,
                 status_rc.top,
-                COL_BORDER,
+                col_border(),
             );
 
             let (dot_color, status_text, proto_text, host_text) =
                 if let Some(tab) = self.sessions.active_tab() {
                     let col = match tab.status {
-                        SessionStatus::Connected | SessionStatus::LoggedIn => COL_STATUS_OK,
-                        SessionStatus::Connecting => COL_STATUS_WARN,
-                        SessionStatus::Error => COL_STATUS_ERR,
-                        SessionStatus::Disconnected => COL_TEXT_MUTED,
+                        SessionStatus::Connected | SessionStatus::LoggedIn => col_status_ok(),
+                        SessionStatus::Connecting => col_status_warn(),
+                        SessionStatus::Error => col_status_err(),
+                        SessionStatus::Disconnected => col_text_muted(),
                     };
                     (
                         col,
@@ -1840,7 +2445,7 @@ impl AppWindowState {
                         )
                     });
                     (
-                        COL_ACCENT,
+                        col_accent(),
                         msg,
                         format!("Protocole : {}", conn.protocol.display_name()),
                         format!("Hôte : {}", conn.endpoint_label()),
@@ -1851,7 +2456,7 @@ impl AppWindowState {
                         .clone()
                         .unwrap_or_else(|| "Prêt — Aucune session active.".to_string());
                     (
-                        COL_TEXT_MUTED,
+                        col_text_muted(),
                         msg,
                         "Protocole : —".to_string(),
                         "Hôte : —".to_string(),
@@ -1866,7 +2471,7 @@ impl AppWindowState {
             let status_right_limit = (status_rc.right - right_host_w - right_proto_w - 20).max(200);
 
             let _ = SelectObject(hdc, self.palette.font_small.into());
-            let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+            let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
             draw_text_line(
                 hdc,
                 &status_text,
@@ -1878,13 +2483,13 @@ impl AppWindowState {
                 },
             );
 
-            let _ = SetTextColor(hdc, COLORREF(COL_TEXT_MUTED));
+            let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
             draw_vertical_line(
                 hdc,
                 status_right_limit + 6,
                 status_rc.top + 5,
                 status_rc.bottom - 5,
-                COL_BORDER,
+                col_border(),
             );
             draw_text_line(
                 hdc,
@@ -1902,7 +2507,7 @@ impl AppWindowState {
                 status_right_limit + right_proto_w + 6,
                 status_rc.top + 5,
                 status_rc.bottom - 5,
-                COL_BORDER,
+                col_border(),
             );
             draw_text_line(
                 hdc,
@@ -1976,7 +2581,7 @@ unsafe fn draw_filled_badge(hdc: HDC, rc: RECT, bg_col: u32, text: &str, font: H
     unsafe {
         draw_rounded_box(hdc, rc, bg_col, bg_col);
         let _ = SelectObject(hdc, font.into());
-        let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+        let _ = SetTextColor(hdc, COLORREF(COL_TEXT_ON_ACCENT));
         let mut wide: Vec<u16> = text.encode_utf16().collect();
         let mut trc = rc;
         let _ = DrawTextW(
@@ -2057,7 +2662,11 @@ unsafe fn draw_icon_folder(hdc: HDC, x: i32, y: i32, expanded: bool, fill_col: u
             right: x + 15,
             bottom: y + 13,
         };
-        let border_col = if expanded { COL_ACCENT_HOVER } else { fill_col };
+        let border_col = if expanded {
+            col_accent_hover()
+        } else {
+            fill_col
+        };
         draw_rounded_box(hdc, body_rc, fill_col, border_col);
     }
 }
@@ -2140,6 +2749,37 @@ unsafe fn draw_icon_clock(hdc: HDC, x: i32, y: i32, color: u32) {
         let _ = LineTo(hdc, x + 10, y + 9);
         let _ = SelectObject(hdc, old_b);
         let _ = SelectObject(hdc, old_p);
+        let _ = DeleteObject(pen.into());
+    }
+}
+
+/// Dessine une icône engrenage vectorielle sobre centrée en `(cx, cy)`.
+unsafe fn draw_icon_gear(hdc: HDC, cx: i32, cy: i32, color: u32) {
+    unsafe {
+        let pen = CreatePen(PS_SOLID, 2, COLORREF(color));
+        let brush = GetStockObject(NULL_BRUSH);
+        let old_p = SelectObject(hdc, pen.into());
+        let old_b = SelectObject(hdc, brush);
+
+        // Dents cardinales et diagonales de l'engrenage
+        let _ = MoveToEx(hdc, cx, cy - 7, None);
+        let _ = LineTo(hdc, cx, cy + 8);
+        let _ = MoveToEx(hdc, cx - 7, cy, None);
+        let _ = LineTo(hdc, cx + 8, cy);
+        let _ = MoveToEx(hdc, cx - 5, cy - 5, None);
+        let _ = LineTo(hdc, cx + 6, cy + 6);
+        let _ = MoveToEx(hdc, cx - 5, cy + 5, None);
+        let _ = LineTo(hdc, cx + 6, cy - 6);
+
+        // Couronne extérieure et moyeu intérieur
+        let ring_brush = CreateSolidBrush(COLORREF(col_bg_surface()));
+        let _ = SelectObject(hdc, ring_brush.into());
+        let _ = RoundRect(hdc, cx - 5, cy - 5, cx + 6, cy + 6, 10, 10);
+        let _ = RoundRect(hdc, cx - 2, cy - 2, cx + 3, cy + 3, 5, 5);
+
+        let _ = SelectObject(hdc, old_b);
+        let _ = SelectObject(hdc, old_p);
+        let _ = DeleteObject(ring_brush.into());
         let _ = DeleteObject(pen.into());
     }
 }
@@ -2275,6 +2915,14 @@ impl AppWindowState {
                         Some(self.hwnd),
                         WM_DEFERRED_ACTION,
                         WPARAM(DEFERRED_NEW_FOLDER),
+                        LPARAM(0),
+                    );
+                },
+                InteractiveZone::BtnSettings => unsafe {
+                    let _ = PostMessageW(
+                        Some(self.hwnd),
+                        WM_DEFERRED_ACTION,
+                        WPARAM(DEFERRED_OPEN_SETTINGS),
                         LPARAM(0),
                     );
                 },
@@ -2845,6 +3493,8 @@ impl AppWindowState {
             existing.as_ref(),
             default_folder_id,
             &folders,
+            self.settings.rdp_default_dynamic_resolution,
+            self.settings.rdp_default_clipboard,
             &self.palette,
         ) {
             let res = if let Some(ref orig) = existing {
@@ -2867,6 +3517,28 @@ impl AppWindowState {
                     show_error_dialog(self.hwnd, "Enregistrement de la connexion", &err);
                 }
             }
+        }
+    }
+
+    pub fn open_settings_dialog(&mut self) {
+        if !cfg!(test) {
+            sync_settings_with_real_startup_shortcut(&mut self.settings, &mut self.storage);
+        }
+
+        if let Some(new_settings) = run_settings_dialog(self.hwnd, &self.settings, &self.palette) {
+            if !cfg!(test)
+                && let Err(err) = apply_startup_shortcut(new_settings.start_with_windows)
+            {
+                show_warning_dialog(self.hwnd, "Démarrage automatique Windows", &err);
+            }
+            self.settings = new_settings;
+            let _ = self.settings.save_all(&mut self.storage);
+            self.apply_theme();
+            self.status_override = Some("Paramètres enregistrés et appliqués.".to_string());
+            self.invalidate_canvas();
+        } else {
+            // Si l'utilisateur a prévisualisé un thème puis cliqué sur Annuler, restaurer le thème initial
+            self.apply_theme();
         }
     }
 }
@@ -2995,6 +3667,7 @@ unsafe fn run_modal_loop(owner: HWND, dlg_hwnd: HWND, tab_controls: &[HWND]) {
 
 static ORIG_BUTTON_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static ORIG_COMBO_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static ORIG_EDIT_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 #[inline]
 unsafe fn call_orig_button_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -3018,6 +3691,79 @@ unsafe fn call_orig_combo_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             CallWindowProcW(proc, hwnd, msg, wparam, lparam)
         } else {
             DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+    }
+}
+
+#[inline]
+unsafe fn call_orig_edit_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    unsafe {
+        let raw = ORIG_EDIT_WNDPROC.load(std::sync::atomic::Ordering::Relaxed);
+        if raw != 0 {
+            let proc: WNDPROC = std::mem::transmute(raw);
+            CallWindowProcW(proc, hwnd, msg, wparam, lparam)
+        } else {
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+    }
+}
+
+/// Sous-classement du champ Port RDP (`WC_EDITW`) :
+/// - Sélectionne automatiquement l'intégralité du texte (`EM_SETSEL(0, -1)`) lorsque le champ
+///   reçoit le focus par navigation clavier (`WM_SETFOCUS`) OU par clic souris (`WM_LBUTTONDOWN`
+///   lorsque le contrôle n'avait pas encore le focus).
+/// - Ne provoque aucune sélection intempestive pendant la saisie clavier ou les clics suivants.
+unsafe extern "system" fn auto_select_edit_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_SETFOCUS => {
+                let res = call_orig_edit_proc(hwnd, msg, wparam, lparam);
+                let _ = SendMessageW(hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+                res
+            }
+            WM_LBUTTONDOWN => {
+                if GetFocus() != hwnd {
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 1);
+                    let _ = SetFocus(Some(hwnd));
+                    let _ = SendMessageW(hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+                    return LRESULT(0);
+                }
+                call_orig_edit_proc(hwnd, msg, wparam, lparam)
+            }
+            WM_LBUTTONUP => {
+                if GetWindowLongPtrW(hwnd, GWLP_USERDATA) == 1 {
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                    let _ = SendMessageW(hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+                    return LRESULT(0);
+                }
+                call_orig_edit_proc(hwnd, msg, wparam, lparam)
+            }
+            WM_KILLFOCUS => {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                call_orig_edit_proc(hwnd, msg, wparam, lparam)
+            }
+            _ => call_orig_edit_proc(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+unsafe fn install_auto_select_on_focus(hwnd: HWND) {
+    unsafe {
+        if hwnd.is_invalid() {
+            return;
+        }
+        let prev = SetWindowLongPtrW(
+            hwnd,
+            GWLP_WNDPROC,
+            auto_select_edit_wnd_proc as *const () as usize as isize,
+        );
+        if prev != 0 {
+            ORIG_EDIT_WNDPROC.store(prev, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -3135,7 +3881,7 @@ unsafe extern "system" fn dark_checkbox_wnd_proc(
 }
 
 /// Sous-classement de `WC_COMBOBOXW` pour remplacer le cadre gris/blanc natif par un rendu
-/// sombre uniforme (fond `COL_BG_INPUT`, bordure `COL_BORDER` ou `COL_ACCENT` au focus/survol,
+/// sombre uniforme (fond `col_bg_input()`, bordure `col_border()` ou `col_accent()` au focus/survol,
 /// texte clair et chevron vectoriel). La police `HFONT` est stockée dans `GWLP_USERDATA`.
 unsafe extern "system" fn dark_combobox_wnd_proc(
     hwnd: HWND,
@@ -3175,7 +3921,7 @@ unsafe extern "system" fn dark_combobox_wnd_proc(
                 let old_bm = SelectObject(hdc, hbm.into());
                 let _ = SetBkMode(hdc, TRANSPARENT);
 
-                let bg_parent = CreateSolidBrush(COLORREF(COL_BG_SIDEBAR));
+                let bg_parent = CreateSolidBrush(COLORREF(col_bg_sidebar()));
                 let _ = FillRect(hdc, &rc, bg_parent);
                 let _ = DeleteObject(bg_parent.into());
 
@@ -3187,13 +3933,13 @@ unsafe extern "system" fn dark_combobox_wnd_proc(
                 let focused = GetFocus() == hwnd;
 
                 let border_col = if focused {
-                    COL_ACCENT
+                    col_accent()
                 } else if hovered {
-                    COL_ACCENT_HOVER
+                    col_accent_hover()
                 } else {
-                    COL_BORDER
+                    col_border()
                 };
-                draw_rounded_box(hdc, rc, COL_BG_INPUT, border_col);
+                draw_rounded_box(hdc, rc, col_bg_input(), border_col);
 
                 // Texte de l'élément sélectionné
                 let sel = SendMessageW(hwnd, CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))).0;
@@ -3221,7 +3967,7 @@ unsafe extern "system" fn dark_combobox_wnd_proc(
                             if !hfont.0.is_null() {
                                 let _ = SelectObject(hdc, hfont.into());
                             }
-                            let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+                            let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                             draw_text_line(
                                 hdc,
                                 &text,
@@ -3243,9 +3989,9 @@ unsafe extern "system" fn dark_combobox_wnd_proc(
                     (rc.top + rc.bottom) / 2,
                     true,
                     if focused || hovered {
-                        COL_TEXT_PRIMARY
+                        col_text_primary()
                     } else {
-                        COL_TEXT_MUTED
+                        col_text_muted()
                     },
                 );
 
@@ -3278,7 +4024,7 @@ unsafe fn draw_owner_button(dis: &DRAWITEMSTRUCT, is_primary: bool, font: HFONT,
         let rc = dis.rcItem;
         let _ = SetBkMode(hdc, TRANSPARENT);
 
-        let bg_parent = CreateSolidBrush(COLORREF(COL_BG_SIDEBAR));
+        let bg_parent = CreateSolidBrush(COLORREF(col_bg_sidebar()));
         let _ = FillRect(hdc, &rc, bg_parent);
         let _ = DeleteObject(bg_parent.into());
 
@@ -3291,34 +4037,34 @@ unsafe fn draw_owner_button(dis: &DRAWITEMSTRUCT, is_primary: bool, font: HFONT,
 
         let (fill_col, border_col, text_col) = if is_primary {
             let fill = if pressed {
-                COL_ACCENT_PRESSED
+                col_accent_pressed()
             } else if hovered {
-                COL_ACCENT_HOVER
+                col_accent_hover()
             } else {
-                COL_ACCENT
+                col_accent()
             };
             let border = if focused || hovered {
-                COL_TEXT_PRIMARY
+                COL_TEXT_ON_ACCENT
             } else {
-                COL_ACCENT_HOVER
+                col_accent_hover()
             };
-            (fill, border, COL_TEXT_PRIMARY)
+            (fill, border, COL_TEXT_ON_ACCENT)
         } else {
             let fill = if pressed {
-                COL_BG_INPUT
+                col_bg_input()
             } else if hovered {
-                COL_BG_HOVER
+                col_bg_hover()
             } else {
-                COL_BG_SURFACE
+                col_bg_surface()
             };
             let border = if focused {
-                COL_ACCENT
+                col_accent()
             } else if hovered {
-                COL_TEXT_MUTED
+                col_text_muted()
             } else {
-                COL_BORDER
+                col_border()
             };
-            (fill, border, COL_TEXT_PRIMARY)
+            (fill, border, col_text_primary())
         };
 
         let label = get_window_text(dis.hwndItem);
@@ -3341,7 +4087,7 @@ unsafe fn draw_owner_checkbox(dis: &DRAWITEMSTRUCT, font: HFONT, dpi: DpiMetrics
         let rc = dis.rcItem;
         let _ = SetBkMode(hdc, TRANSPARENT);
 
-        let bg_parent = CreateSolidBrush(COLORREF(COL_BG_SIDEBAR));
+        let bg_parent = CreateSolidBrush(COLORREF(col_bg_sidebar()));
         let _ = FillRect(hdc, &rc, bg_parent);
         let _ = DeleteObject(bg_parent.into());
 
@@ -3365,25 +4111,25 @@ unsafe fn draw_owner_checkbox(dis: &DRAWITEMSTRUCT, font: HFONT, dpi: DpiMetrics
         };
 
         let fill_col = if !enabled {
-            COL_BG_INPUT_DISABLED
+            col_bg_input_disabled()
         } else if checked {
             if hovered {
-                COL_ACCENT_HOVER
+                col_accent_hover()
             } else {
-                COL_ACCENT
+                col_accent()
             }
         } else if hovered {
-            COL_BG_HOVER
+            col_bg_hover()
         } else {
-            COL_BG_INPUT
+            col_bg_input()
         };
 
         let border_col = if !enabled {
-            COL_BORDER_SUBTLE
+            col_border_subtle()
         } else if focused || hovered || checked {
-            COL_ACCENT_HOVER
+            col_accent_hover()
         } else {
-            COL_BORDER
+            col_border()
         };
 
         draw_rounded_box(hdc, box_rc, fill_col, border_col);
@@ -3393,9 +4139,9 @@ unsafe fn draw_owner_checkbox(dis: &DRAWITEMSTRUCT, font: HFONT, dpi: DpiMetrics
                 PS_SOLID,
                 2,
                 COLORREF(if enabled {
-                    COL_TEXT_PRIMARY
+                    COL_TEXT_ON_ACCENT
                 } else {
-                    COL_TEXT_MUTED
+                    col_text_muted()
                 }),
             );
             let old_p = SelectObject(hdc, pen.into());
@@ -3417,9 +4163,9 @@ unsafe fn draw_owner_checkbox(dis: &DRAWITEMSTRUCT, font: HFONT, dpi: DpiMetrics
         let _ = SetTextColor(
             hdc,
             COLORREF(if enabled {
-                COL_TEXT_PRIMARY
+                col_text_primary()
             } else {
-                COL_TEXT_MUTED
+                col_text_muted()
             }),
         );
         draw_text_line(
@@ -3445,7 +4191,11 @@ unsafe fn draw_owner_combobox_item(dis: &DRAWITEMSTRUCT, font: HFONT) {
         let rc = dis.rcItem;
         let selected = (dis.itemState.0 & ODS_SELECTED.0) != 0;
 
-        let bg_col = if selected { COL_BG_HOVER } else { COL_BG_INPUT };
+        let bg_col = if selected {
+            col_bg_hover()
+        } else {
+            col_bg_input()
+        };
         let bg_brush = CreateSolidBrush(COLORREF(bg_col));
         let _ = FillRect(hdc, &rc, bg_brush);
         let _ = DeleteObject(bg_brush.into());
@@ -3457,7 +4207,7 @@ unsafe fn draw_owner_combobox_item(dis: &DRAWITEMSTRUCT, font: HFONT) {
                 right: rc.left + 3,
                 bottom: rc.bottom - 2,
             };
-            let acc_brush = CreateSolidBrush(COLORREF(COL_ACCENT));
+            let acc_brush = CreateSolidBrush(COLORREF(col_accent()));
             let _ = FillRect(hdc, &accent_rc, acc_brush);
             let _ = DeleteObject(acc_brush.into());
         }
@@ -3482,7 +4232,7 @@ unsafe fn draw_owner_combobox_item(dis: &DRAWITEMSTRUCT, font: HFONT) {
                 let text = String::from_utf16_lossy(&buf[..copied as usize]);
                 let _ = SetBkMode(hdc, TRANSPARENT);
                 let _ = SelectObject(hdc, font.into());
-                let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                 draw_text_line(
                     hdc,
                     &text,
@@ -3808,8 +4558,8 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const ConnectionDialogState;
                 if !ptr.is_null() {
                     let hdc = HDC(wparam.0 as *mut _);
-                    let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
-                    let _ = SetBkColor(hdc, COLORREF(COL_BG_SIDEBAR));
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_sidebar()));
                     return LRESULT((*ptr).brush_bg.0 as isize);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -3823,12 +4573,12 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                     let _ = SetTextColor(
                         hdc,
                         COLORREF(if enabled {
-                            COL_TEXT_PRIMARY
+                            col_text_primary()
                         } else {
-                            COL_TEXT_MUTED
+                            col_text_muted()
                         }),
                     );
-                    let _ = SetBkColor(hdc, COLORREF(COL_BG_INPUT));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_input()));
                     return LRESULT((*ptr).brush_input.0 as isize);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -3887,7 +4637,7 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
 
                 let pad_x = state.dpi.scale(28);
                 let _ = SelectObject(hdc, state.font_subtitle.into());
-                let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                 draw_text_line(
                     hdc,
                     &state.header_title,
@@ -3900,7 +4650,7 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                 );
 
                 let _ = SelectObject(hdc, state.font_small.into());
-                let _ = SetTextColor(hdc, COLORREF(COL_TEXT_MUTED));
+                let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
                 draw_text_line(
                     hdc,
                     &state.header_subtitle,
@@ -3912,12 +4662,12 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                     },
                 );
 
-                draw_horizontal_line(hdc, pad_x, w - pad_x, state.divider_y1, COL_BORDER);
-                draw_horizontal_line(hdc, pad_x, w - pad_x, state.divider_y2, COL_BORDER);
+                draw_horizontal_line(hdc, pad_x, w - pad_x, state.divider_y1, col_border());
+                draw_horizontal_line(hdc, pad_x, w - pad_x, state.divider_y2, col_border());
 
                 // Libellé dynamique d'hôte (RDP / AnyDesk / RustDesk)
                 let _ = SelectObject(hdc, state.font_ui.into());
-                let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                 draw_text_line(hdc, &state.host_label_text, state.host_label_rect);
 
                 // Tous les autres libellés dessinés directement en mode TRANSPARENT
@@ -3933,9 +4683,9 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                     let _ = SetTextColor(
                         hdc,
                         COLORREF(if lbl.muted {
-                            COL_TEXT_MUTED
+                            col_text_muted()
                         } else {
-                            COL_TEXT_PRIMARY
+                            col_text_primary()
                         }),
                     );
                     draw_text_line(hdc, &lbl.text, lbl.rect);
@@ -3946,15 +4696,19 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                 for eb in &state.edit_boxes {
                     let enabled = IsWindowEnabled(eb.hwnd).as_bool();
                     let focused = focus_hwnd == eb.hwnd;
-                    let fill = if enabled { COL_BG_INPUT } else { COL_BG_DEEP };
-                    let border = if focused { COL_ACCENT } else { COL_BORDER };
+                    let fill = if enabled {
+                        col_bg_input()
+                    } else {
+                        col_bg_deep()
+                    };
+                    let border = if focused { col_accent() } else { col_border() };
                     draw_rounded_box(hdc, eb.box_rect, fill, border);
                 }
 
                 // Encadré discret d'information sécurité DPAPI
-                draw_rounded_box(hdc, state.security_banner_rc, COL_BG_DEEP, COL_BORDER);
+                draw_rounded_box(hdc, state.security_banner_rc, col_bg_deep(), col_border());
                 let _ = SelectObject(hdc, state.font_small.into());
-                let _ = SetTextColor(hdc, COLORREF(COL_TEXT_MUTED));
+                let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
                 draw_text_line(
                     hdc,
                     "Sécurité DPAPI : le mot de passe est chiffré par Windows (utilisateur courant) et n'est jamais stocké en clair.",
@@ -4169,6 +4923,8 @@ fn run_connection_form_dialog(
     existing: Option<&ConnectionItem>,
     default_folder_id: Option<i64>,
     folders: &[Folder],
+    default_dyn_res: bool,
+    default_clipboard: bool,
     palette: &GdiPalette,
 ) -> Option<ConnectionDraft> {
     unsafe {
@@ -4225,7 +4981,7 @@ fn run_connection_form_dialog(
         )
         .ok()?;
 
-        let dark_mode: i32 = 1;
+        let dark_mode: i32 = i32::from(is_active_theme_dark());
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -4460,6 +5216,7 @@ fn run_connection_form_dialog(
             dpi,
         );
         set_window_text(ed_port, "3389");
+        install_auto_select_on_focus(ed_port);
         dlg_state.edit_boxes.push(DialogEditBox {
             hwnd: ed_host,
             box_rect: rc_host,
@@ -4757,8 +5514,18 @@ fn run_connection_form_dialog(
             let _ = SendMessageW(cb_proto, CB_SETCURSEL, Some(WPARAM(0)), Some(LPARAM(0)));
             let _ = SendMessageW(chk_save_pass, BM_SETCHECK, Some(WPARAM(0)), Some(LPARAM(0)));
             let _ = EnableWindow(ed_pass, false);
-            let _ = SendMessageW(chk_dyn_res, BM_SETCHECK, Some(WPARAM(1)), Some(LPARAM(0)));
-            let _ = SendMessageW(chk_clipboard, BM_SETCHECK, Some(WPARAM(1)), Some(LPARAM(0)));
+            let _ = SendMessageW(
+                chk_dyn_res,
+                BM_SETCHECK,
+                Some(WPARAM(usize::from(default_dyn_res))),
+                Some(LPARAM(0)),
+            );
+            let _ = SendMessageW(
+                chk_clipboard,
+                BM_SETCHECK,
+                Some(WPARAM(usize::from(default_clipboard))),
+                Some(LPARAM(0)),
+            );
         }
 
         let tab_order = [
@@ -4820,8 +5587,8 @@ unsafe extern "system" fn prompt_dlg_wnd_proc(
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const TextPromptDialogState;
                 if !ptr.is_null() {
                     let hdc = HDC(wparam.0 as *mut _);
-                    let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
-                    let _ = SetBkColor(hdc, COLORREF(COL_BG_SIDEBAR));
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_sidebar()));
                     return LRESULT((*ptr).brush_bg.0 as isize);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -4830,8 +5597,8 @@ unsafe extern "system" fn prompt_dlg_wnd_proc(
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const TextPromptDialogState;
                 if !ptr.is_null() {
                     let hdc = HDC(wparam.0 as *mut _);
-                    let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
-                    let _ = SetBkColor(hdc, COLORREF(COL_BG_INPUT));
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_input()));
                     return LRESULT((*ptr).brush_input.0 as isize);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -4872,7 +5639,7 @@ unsafe extern "system" fn prompt_dlg_wnd_proc(
 
                 let pad_x = state.dpi.scale(24);
                 let _ = SelectObject(hdc, state.font_subtitle.into());
-                let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                 draw_text_line(
                     hdc,
                     &state.header_title,
@@ -4885,18 +5652,18 @@ unsafe extern "system" fn prompt_dlg_wnd_proc(
                 );
 
                 let _ = SelectObject(hdc, state.font_ui.into());
-                let _ = SetTextColor(hdc, COLORREF(COL_TEXT_MUTED));
+                let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
                 draw_text_line(hdc, &state.prompt_label, state.label_rc);
 
                 let focused = GetFocus() == state.ed_input;
                 draw_rounded_box(
                     hdc,
                     state.edit_box_rc,
-                    COL_BG_INPUT,
-                    if focused { COL_ACCENT } else { COL_BORDER },
+                    col_bg_input(),
+                    if focused { col_accent() } else { col_border() },
                 );
 
-                draw_horizontal_line(hdc, pad_x, w - pad_x, state.divider_y, COL_BORDER);
+                draw_horizontal_line(hdc, pad_x, w - pad_x, state.divider_y, col_border());
 
                 let _ = windows::Win32::Graphics::Gdi::BitBlt(
                     hdc_screen,
@@ -5145,8 +5912,8 @@ unsafe extern "system" fn folder_picker_wnd_proc(
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const FolderPickerDialogState;
                 if !ptr.is_null() {
                     let hdc = HDC(wparam.0 as *mut _);
-                    let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
-                    let _ = SetBkColor(hdc, COLORREF(COL_BG_SIDEBAR));
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_sidebar()));
                     return LRESULT((*ptr).brush_bg.0 as isize);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -5155,8 +5922,8 @@ unsafe extern "system" fn folder_picker_wnd_proc(
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const FolderPickerDialogState;
                 if !ptr.is_null() {
                     let hdc = HDC(wparam.0 as *mut _);
-                    let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
-                    let _ = SetBkColor(hdc, COLORREF(COL_BG_INPUT));
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_input()));
                     return LRESULT((*ptr).brush_input.0 as isize);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -5210,7 +5977,7 @@ unsafe extern "system" fn folder_picker_wnd_proc(
 
                 let pad_x = state.dpi.scale(24);
                 let _ = SelectObject(hdc, state.font_subtitle.into());
-                let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
+                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                 draw_text_line(
                     hdc,
                     &state.header_title,
@@ -5223,14 +5990,14 @@ unsafe extern "system" fn folder_picker_wnd_proc(
                 );
 
                 let _ = SelectObject(hdc, state.font_ui.into());
-                let _ = SetTextColor(hdc, COLORREF(COL_TEXT_MUTED));
+                let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
                 draw_text_line(
                     hdc,
                     "Sélectionnez le dossier de destination :",
                     state.label_rc,
                 );
 
-                draw_horizontal_line(hdc, pad_x, w - pad_x, state.divider_y, COL_BORDER);
+                draw_horizontal_line(hdc, pad_x, w - pad_x, state.divider_y, col_border());
 
                 let _ = windows::Win32::Graphics::Gdi::BitBlt(
                     hdc_screen,
@@ -5472,13 +6239,945 @@ fn run_folder_picker_dialog(
 }
 
 // =============================================================================
+// FENÊTRE MODALE DES PARAMÈTRES (APPARENCE, COMPORTEMENT, ACCUEIL, RDP)
+// =============================================================================
+
+pub const IDC_SET_THEME: usize = 4201;
+pub const IDC_SET_CLOSE_TRAY: usize = 4202;
+pub const IDC_SET_START_MIN_TRAY: usize = 4203;
+pub const IDC_SET_CONFIRM_EXIT: usize = 4204;
+pub const IDC_SET_RESTORE_RDP: usize = 4205;
+pub const IDC_SET_START_WIN: usize = 4206;
+pub const IDC_SET_SHOW_RECENT: usize = 4207;
+pub const IDC_SET_MAX_RECENT: usize = 4208;
+pub const IDC_SET_RDP_CLIP: usize = 4209;
+pub const IDC_SET_RDP_DYNRES: usize = 4210;
+
+struct SettingsDialogState {
+    owner: HWND,
+    dpi: DpiMetrics,
+    font_ui: HFONT,
+    font_bold: HFONT,
+    font_subtitle: HFONT,
+    font_small: HFONT,
+    brush_bg: HBRUSH,
+    brush_input: HBRUSH,
+    owned_brushes: bool,
+    labels: Vec<DialogLabel>,
+    dividers_y: Vec<i32>,
+    edit_box_rc: RECT,
+    base_settings: AppSettings,
+    cb_theme: HWND,
+    chk_close_tray: HWND,
+    chk_start_min_tray: HWND,
+    chk_confirm_exit: HWND,
+    chk_restore_rdp: HWND,
+    chk_start_win: HWND,
+    chk_show_recent: HWND,
+    ed_max_recent: HWND,
+    chk_rdp_clip: HWND,
+    chk_rdp_dynres: HWND,
+    result: Option<AppSettings>,
+}
+
+impl Drop for SettingsDialogState {
+    fn drop(&mut self) {
+        if self.owned_brushes {
+            unsafe {
+                if !self.brush_bg.is_invalid() {
+                    let _ = DeleteObject(self.brush_bg.into());
+                }
+                if !self.brush_input.is_invalid() {
+                    let _ = DeleteObject(self.brush_input.into());
+                }
+            }
+        }
+    }
+}
+
+unsafe extern "system" fn settings_dlg_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_ERASEBKGND => LRESULT(1),
+            WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const SettingsDialogState;
+                if !ptr.is_null() {
+                    let hdc = HDC(wparam.0 as *mut _);
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_sidebar()));
+                    return LRESULT((*ptr).brush_bg.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const SettingsDialogState;
+                if !ptr.is_null() {
+                    let hdc = HDC(wparam.0 as *mut _);
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_input()));
+                    return LRESULT((*ptr).brush_input.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_MEASUREITEM => {
+                let mis = lparam.0 as *mut MEASUREITEMSTRUCT;
+                if !mis.is_null() {
+                    let dpi = DpiMetrics::for_window(hwnd);
+                    (*mis).itemHeight = dpi.scale(26) as u32;
+                    return LRESULT(1);
+                }
+                LRESULT(0)
+            }
+            WM_DRAWITEM => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const SettingsDialogState;
+                let dis = lparam.0 as *const DRAWITEMSTRUCT;
+                if !ptr.is_null() && !dis.is_null() {
+                    let state = &*ptr;
+                    let d = &*dis;
+                    if d.CtlType == ODT_COMBOBOX {
+                        draw_owner_combobox_item(d, state.font_ui);
+                        return LRESULT(1);
+                    }
+                    if d.CtlType == ODT_BUTTON {
+                        let id = d.CtlID as usize;
+                        if id == IDC_DLG_OK || id == IDC_DLG_CANCEL {
+                            draw_owner_button(d, id == IDC_DLG_OK, state.font_ui, state.font_bold);
+                        } else {
+                            draw_owner_checkbox(d, state.font_ui, state.dpi);
+                        }
+                        return LRESULT(1);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_PAINT => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const SettingsDialogState;
+                if ptr.is_null() {
+                    return DefWindowProcW(hwnd, msg, wparam, lparam);
+                }
+                let state = &*ptr;
+                let mut ps = PAINTSTRUCT::default();
+                let hdc_screen = BeginPaint(hwnd, &mut ps);
+                let mut rc = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rc);
+                let w = (rc.right - rc.left).max(1);
+                let h = (rc.bottom - rc.top).max(1);
+
+                let hdc = CreateCompatibleDC(Some(hdc_screen));
+                let hbm = CreateCompatibleBitmap(hdc_screen, w, h);
+                let old_bm = SelectObject(hdc, hbm.into());
+                let _ = SetBkMode(hdc, TRANSPARENT);
+
+                let _ = FillRect(hdc, &rc, state.brush_bg);
+
+                let pad_x = state.dpi.scale(28);
+                draw_icon_gear(
+                    hdc,
+                    pad_x + state.dpi.scale(10),
+                    state.dpi.scale(30),
+                    col_accent(),
+                );
+                let _ = SelectObject(hdc, state.font_subtitle.into());
+                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                draw_text_line(
+                    hdc,
+                    "Paramètres de Malvision",
+                    RECT {
+                        left: pad_x + state.dpi.scale(26),
+                        top: state.dpi.scale(16),
+                        right: w - pad_x,
+                        bottom: state.dpi.scale(40),
+                    },
+                );
+
+                let _ = SelectObject(hdc, state.font_small.into());
+                let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
+                draw_text_line(
+                    hdc,
+                    "Personnalisez le thème visuel, la zone de notification Windows, l'écran d'accueil et les valeurs par défaut RDP.",
+                    RECT {
+                        left: pad_x,
+                        top: state.dpi.scale(42),
+                        right: w - pad_x,
+                        bottom: state.dpi.scale(62),
+                    },
+                );
+
+                for &dy in &state.dividers_y {
+                    draw_horizontal_line(hdc, pad_x, w - pad_x, dy, col_border());
+                }
+
+                for lbl in &state.labels {
+                    let f = if lbl.bold {
+                        state.font_bold
+                    } else if lbl.muted {
+                        state.font_small
+                    } else {
+                        state.font_ui
+                    };
+                    let _ = SelectObject(hdc, f.into());
+                    let _ = SetTextColor(
+                        hdc,
+                        COLORREF(if lbl.bold {
+                            col_accent()
+                        } else if lbl.muted {
+                            col_text_muted()
+                        } else {
+                            col_text_primary()
+                        }),
+                    );
+                    draw_text_line(hdc, &lbl.text, lbl.rect);
+                }
+
+                let focused = GetFocus() == state.ed_max_recent;
+                draw_rounded_box(
+                    hdc,
+                    state.edit_box_rc,
+                    col_bg_input(),
+                    if focused { col_accent() } else { col_border() },
+                );
+
+                let _ = windows::Win32::Graphics::Gdi::BitBlt(
+                    hdc_screen,
+                    0,
+                    0,
+                    w,
+                    h,
+                    Some(hdc),
+                    0,
+                    0,
+                    windows::Win32::Graphics::Gdi::SRCCOPY,
+                );
+                let _ = SelectObject(hdc, old_bm);
+                let _ = DeleteObject(hbm.into());
+                let _ = DeleteDC(hdc);
+                let _ = EndPaint(hwnd, &ps);
+                LRESULT(0)
+            }
+            WM_COMMAND => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut SettingsDialogState;
+                if !ptr.is_null() {
+                    let state = &mut *ptr;
+                    let id = wparam.0 & 0xFFFF;
+                    let code = ((wparam.0 >> 16) & 0xFFFF) as u32;
+
+                    if code == EN_SETFOCUS || code == EN_KILLFOCUS {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        return LRESULT(0);
+                    }
+
+                    // Prévisualisation immédiate du thème choisi dans la ComboBox (CBN_SELCHANGE == 1)
+                    if id == IDC_SET_THEME && code == 1 {
+                        let sel = SendMessageW(
+                            state.cb_theme,
+                            CB_GETCURSEL,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(0)),
+                        )
+                        .0;
+                        let mode = match sel {
+                            1 => ThemeMode::Light,
+                            2 => ThemeMode::System,
+                            _ => ThemeMode::Dark,
+                        };
+                        let is_dark = mode.resolve() == ResolvedTheme::Dark;
+                        set_active_theme_dark(is_dark);
+
+                        if state.owned_brushes {
+                            if !state.brush_bg.is_invalid() {
+                                let _ = DeleteObject(state.brush_bg.into());
+                            }
+                            if !state.brush_input.is_invalid() {
+                                let _ = DeleteObject(state.brush_input.into());
+                            }
+                        }
+                        state.brush_bg = CreateSolidBrush(COLORREF(col_bg_sidebar()));
+                        state.brush_input = CreateSolidBrush(COLORREF(col_bg_input()));
+                        state.owned_brushes = true;
+
+                        let dark_mode: i32 = i32::from(is_dark);
+                        let _ = DwmSetWindowAttribute(
+                            hwnd,
+                            DWMWA_USE_IMMERSIVE_DARK_MODE,
+                            &dark_mode as *const i32 as *const c_void,
+                            std::mem::size_of::<i32>() as u32,
+                        );
+                        if IsWindow(Some(state.owner)).as_bool() {
+                            let owner_ptr = GetWindowLongPtrW(state.owner, GWLP_USERDATA)
+                                as *mut AppWindowState;
+                            if !owner_ptr.is_null() {
+                                (*owner_ptr).palette.rebuild_brushes();
+                                let _ = DwmSetWindowAttribute(
+                                    state.owner,
+                                    DWMWA_USE_IMMERSIVE_DARK_MODE,
+                                    &dark_mode as *const i32 as *const c_void,
+                                    std::mem::size_of::<i32>() as u32,
+                                );
+                                if !(*owner_ptr).treeview.is_invalid() {
+                                    let _ = SendMessageW(
+                                        (*owner_ptr).treeview,
+                                        TVM_SETBKCOLOR,
+                                        Some(WPARAM(0)),
+                                        Some(LPARAM(col_bg_sidebar() as isize)),
+                                    );
+                                    let _ = SendMessageW(
+                                        (*owner_ptr).treeview,
+                                        TVM_SETTEXTCOLOR,
+                                        Some(WPARAM(0)),
+                                        Some(LPARAM(col_text_primary() as isize)),
+                                    );
+                                    let _ = InvalidateRect(Some((*owner_ptr).treeview), None, true);
+                                }
+                                let _ = InvalidateRect(Some(state.owner), None, true);
+                                let _ = UpdateWindow(state.owner);
+                            }
+                        }
+
+                        for ctrl in [
+                            state.cb_theme,
+                            state.chk_close_tray,
+                            state.chk_start_min_tray,
+                            state.chk_confirm_exit,
+                            state.chk_restore_rdp,
+                            state.chk_start_win,
+                            state.chk_show_recent,
+                            state.ed_max_recent,
+                            state.chk_rdp_clip,
+                            state.chk_rdp_dynres,
+                        ] {
+                            let _ = InvalidateRect(Some(ctrl), None, true);
+                        }
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                        let _ = UpdateWindow(hwnd);
+                    } else if id == IDC_SET_CLOSE_TRAY {
+                        let tray_enabled = SendMessageW(
+                            state.chk_close_tray,
+                            BM_GETCHECK,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(0)),
+                        )
+                        .0 != 0;
+                        if !tray_enabled {
+                            let _ = SendMessageW(
+                                state.chk_start_min_tray,
+                                BM_SETCHECK,
+                                Some(WPARAM(0)),
+                                Some(LPARAM(0)),
+                            );
+                        }
+                        let _ = EnableWindow(state.chk_start_min_tray, tray_enabled);
+                        let _ = InvalidateRect(Some(state.chk_start_min_tray), None, false);
+                    } else if id == IDC_DLG_OK || id == 1 {
+                        let theme_sel = SendMessageW(
+                            state.cb_theme,
+                            CB_GETCURSEL,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(0)),
+                        )
+                        .0;
+                        let theme_mode = match theme_sel {
+                            1 => ThemeMode::Light,
+                            2 => ThemeMode::System,
+                            _ => ThemeMode::Dark,
+                        };
+
+                        let close_to_tray = SendMessageW(
+                            state.chk_close_tray,
+                            BM_GETCHECK,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(0)),
+                        )
+                        .0 != 0;
+                        let start_minimized_to_tray = close_to_tray
+                            && SendMessageW(
+                                state.chk_start_min_tray,
+                                BM_GETCHECK,
+                                Some(WPARAM(0)),
+                                Some(LPARAM(0)),
+                            )
+                            .0 != 0;
+                        let confirm_exit_active_sessions = SendMessageW(
+                            state.chk_confirm_exit,
+                            BM_GETCHECK,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(0)),
+                        )
+                        .0 != 0;
+                        let restore_rdp_sessions = SendMessageW(
+                            state.chk_restore_rdp,
+                            BM_GETCHECK,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(0)),
+                        )
+                        .0 != 0;
+                        let start_with_windows = SendMessageW(
+                            state.chk_start_win,
+                            BM_GETCHECK,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(0)),
+                        )
+                        .0 != 0;
+                        let show_recent_connections = SendMessageW(
+                            state.chk_show_recent,
+                            BM_GETCHECK,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(0)),
+                        )
+                        .0 != 0;
+
+                        let max_rec_str = get_window_text(state.ed_max_recent);
+                        let max_recent_connections = match max_rec_str.trim().parse::<usize>() {
+                            Ok(v) if (1..=50).contains(&v) => v,
+                            _ => {
+                                show_warning_dialog(
+                                    hwnd,
+                                    "Nombre de connexions récentes invalide",
+                                    "Veuillez saisir un nombre entier compris entre 1 et 50.",
+                                );
+                                return LRESULT(0);
+                            }
+                        };
+
+                        let rdp_default_clipboard = SendMessageW(
+                            state.chk_rdp_clip,
+                            BM_GETCHECK,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(0)),
+                        )
+                        .0 != 0;
+                        let rdp_default_dynamic_resolution = SendMessageW(
+                            state.chk_rdp_dynres,
+                            BM_GETCHECK,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(0)),
+                        )
+                        .0 != 0;
+
+                        let mut updated = state.base_settings.clone();
+                        updated.theme_mode = theme_mode;
+                        updated.close_to_tray = close_to_tray;
+                        updated.start_minimized_to_tray = start_minimized_to_tray;
+                        updated.confirm_exit_active_sessions = confirm_exit_active_sessions;
+                        updated.restore_rdp_sessions = restore_rdp_sessions;
+                        updated.start_with_windows = start_with_windows;
+                        updated.show_recent_connections = show_recent_connections;
+                        updated.max_recent_connections = max_recent_connections;
+                        updated.rdp_default_clipboard = rdp_default_clipboard;
+                        updated.rdp_default_dynamic_resolution = rdp_default_dynamic_resolution;
+
+                        state.result = Some(updated);
+                        let owner = state.owner;
+                        close_modal_dialog(hwnd, owner);
+                    } else if id == IDC_DLG_CANCEL || id == 2 {
+                        let owner = state.owner;
+                        close_modal_dialog(hwnd, owner);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_CLOSE => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut SettingsDialogState;
+                if !ptr.is_null() {
+                    let owner = (*ptr).owner;
+                    close_modal_dialog(hwnd, owner);
+                } else {
+                    let _ = DestroyWindow(hwnd);
+                }
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+fn run_settings_dialog(
+    owner: HWND,
+    current: &AppSettings,
+    palette: &GdiPalette,
+) -> Option<AppSettings> {
+    unsafe {
+        let hinstance = GetModuleHandleW(None).unwrap_or_default();
+        let class_name = w!("MalvisionSettingsDlgClass");
+
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(settings_dlg_wnd_proc),
+            hInstance: hinstance.into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hbrBackground: palette.brush_bg_sidebar,
+            lpszClassName: class_name,
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+
+        let dpi = if owner.is_invalid() {
+            palette.dpi
+        } else {
+            DpiMetrics::for_window(owner)
+        };
+        let client_w = dpi.scale(660);
+        let client_h = dpi.scale(615);
+        let dlg_style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+        let (win_w, win_h) = calc_dialog_window_size(dlg_style, client_w, client_h);
+
+        let mut owner_rc = RECT::default();
+        let _ = GetWindowRect(owner, &mut owner_rc);
+        let x = owner_rc.left + ((owner_rc.right - owner_rc.left) - win_w) / 2;
+        let y = owner_rc.top + ((owner_rc.bottom - owner_rc.top) - win_h) / 2;
+
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            class_name,
+            w!("Paramètres — Malvision"),
+            dlg_style,
+            x.max(20),
+            y.max(20),
+            win_w,
+            win_h,
+            Some(owner),
+            None,
+            Some(hinstance.into()),
+            None,
+        )
+        .ok()?;
+
+        let dark_mode: i32 = i32::from(is_active_theme_dark());
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark_mode as *const i32 as *const c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+
+        let pad_x = dpi.scale(28);
+        let field_right = client_w - pad_x;
+        let chk_h = dpi.scale(24);
+        let field_h = dpi.scale(32);
+
+        let mut dlg_state = Box::new(SettingsDialogState {
+            owner,
+            dpi,
+            font_ui: palette.font_ui,
+            font_bold: palette.font_ui_bold,
+            font_subtitle: palette.font_subtitle,
+            font_small: palette.font_small,
+            brush_bg: palette.brush_bg_sidebar,
+            brush_input: palette.brush_bg_input,
+            owned_brushes: false,
+            labels: Vec::new(),
+            dividers_y: vec![
+                dpi.scale(68),
+                dpi.scale(152),
+                dpi.scale(342),
+                dpi.scale(450),
+                dpi.scale(548),
+            ],
+            edit_box_rc: RECT::default(),
+            base_settings: current.clone(),
+            cb_theme: HWND::default(),
+            chk_close_tray: HWND::default(),
+            chk_start_min_tray: HWND::default(),
+            chk_confirm_exit: HWND::default(),
+            chk_restore_rdp: HWND::default(),
+            chk_start_win: HWND::default(),
+            chk_show_recent: HWND::default(),
+            ed_max_recent: HWND::default(),
+            chk_rdp_clip: HWND::default(),
+            chk_rdp_dynres: HWND::default(),
+            result: None,
+        });
+
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&mut *dlg_state) as *mut _ as isize);
+
+        // --- SECTION 1 : APPARENCE ---
+        dlg_state.labels.push(DialogLabel {
+            text: "Apparence".to_string(),
+            rect: RECT {
+                left: pad_x,
+                top: dpi.scale(78),
+                right: field_right,
+                bottom: dpi.scale(100),
+            },
+            muted: false,
+            bold: true,
+        });
+        let y_theme = dpi.scale(106);
+        dlg_state.labels.push(DialogLabel {
+            text: "Thème de l'interface :".to_string(),
+            rect: RECT {
+                left: pad_x,
+                top: y_theme,
+                right: pad_x + dpi.scale(190),
+                bottom: y_theme + field_h,
+            },
+            muted: false,
+            bold: false,
+        });
+        let rc_theme = RECT {
+            left: pad_x + dpi.scale(200),
+            top: y_theme,
+            right: field_right,
+            bottom: y_theme + field_h,
+        };
+        let cb_theme = create_dark_combobox(
+            hwnd,
+            hinstance.into(),
+            rc_theme,
+            dpi.scale(160),
+            IDC_SET_THEME,
+            palette.font_ui,
+            dpi,
+        );
+        for lbl in [
+            w!("Sombre (Anthracite Windows 11 — par défaut)"),
+            w!("Clair (Fluent Light haute lisibilité)"),
+            w!("Système (Suit automatiquement Windows)"),
+        ] {
+            let _ = SendMessageW(
+                cb_theme,
+                CB_ADDSTRING,
+                Some(WPARAM(0)),
+                Some(LPARAM(lbl.as_ptr() as isize)),
+            );
+        }
+        let theme_idx = match current.theme_mode {
+            ThemeMode::Dark => 0usize,
+            ThemeMode::Light => 1usize,
+            ThemeMode::System => 2usize,
+        };
+        let _ = SendMessageW(
+            cb_theme,
+            CB_SETCURSEL,
+            Some(WPARAM(theme_idx)),
+            Some(LPARAM(0)),
+        );
+
+        // --- SECTION 2 : COMPORTEMENT & SYSTEM TRAY ---
+        dlg_state.labels.push(DialogLabel {
+            text: "Comportement & Zone de notification (System Tray)".to_string(),
+            rect: RECT {
+                left: pad_x,
+                top: dpi.scale(162),
+                right: field_right,
+                bottom: dpi.scale(184),
+            },
+            muted: false,
+            bold: true,
+        });
+
+        let y_c1 = dpi.scale(190);
+        let y_c2 = dpi.scale(218);
+        let y_c3 = dpi.scale(246);
+        let y_c4 = dpi.scale(274);
+        let y_c5 = dpi.scale(302);
+
+        let chk_close_tray = create_dark_checkbox(
+            hwnd,
+            hinstance.into(),
+            w!("Fermer vers la zone de notification lors d'un clic sur la croix [X]"),
+            RECT {
+                left: pad_x,
+                top: y_c1,
+                right: field_right,
+                bottom: y_c1 + chk_h,
+            },
+            IDC_SET_CLOSE_TRAY,
+            palette.font_ui,
+        );
+        let chk_start_min_tray = create_dark_checkbox(
+            hwnd,
+            hinstance.into(),
+            w!("Démarrer minimisé dans la zone de notification (requiert l'option ci-dessus)"),
+            RECT {
+                left: pad_x + dpi.scale(22),
+                top: y_c2,
+                right: field_right,
+                bottom: y_c2 + chk_h,
+            },
+            IDC_SET_START_MIN_TRAY,
+            palette.font_ui,
+        );
+        let chk_confirm_exit = create_dark_checkbox(
+            hwnd,
+            hinstance.into(),
+            w!("Demander confirmation avant de quitter avec des sessions RDP actives"),
+            RECT {
+                left: pad_x,
+                top: y_c3,
+                right: field_right,
+                bottom: y_c3 + chk_h,
+            },
+            IDC_SET_CONFIRM_EXIT,
+            palette.font_ui,
+        );
+        let chk_restore_rdp = create_dark_checkbox(
+            hwnd,
+            hinstance.into(),
+            w!("Restaurer automatiquement les connexions RDP ouvertes au démarrage"),
+            RECT {
+                left: pad_x,
+                top: y_c4,
+                right: field_right,
+                bottom: y_c4 + chk_h,
+            },
+            IDC_SET_RESTORE_RDP,
+            palette.font_ui,
+        );
+        let chk_start_win = create_dark_checkbox(
+            hwnd,
+            hinstance.into(),
+            w!("Démarrer Malvision avec Windows (raccourci .lnk dans le dossier Démarrage)"),
+            RECT {
+                left: pad_x,
+                top: y_c5,
+                right: field_right,
+                bottom: y_c5 + chk_h,
+            },
+            IDC_SET_START_WIN,
+            palette.font_ui,
+        );
+
+        let _ = SendMessageW(
+            chk_close_tray,
+            BM_SETCHECK,
+            Some(WPARAM(usize::from(current.close_to_tray))),
+            Some(LPARAM(0)),
+        );
+        let _ = SendMessageW(
+            chk_start_min_tray,
+            BM_SETCHECK,
+            Some(WPARAM(usize::from(
+                current.close_to_tray && current.start_minimized_to_tray,
+            ))),
+            Some(LPARAM(0)),
+        );
+        let _ = EnableWindow(chk_start_min_tray, current.close_to_tray);
+        let _ = SendMessageW(
+            chk_confirm_exit,
+            BM_SETCHECK,
+            Some(WPARAM(usize::from(current.confirm_exit_active_sessions))),
+            Some(LPARAM(0)),
+        );
+        let _ = SendMessageW(
+            chk_restore_rdp,
+            BM_SETCHECK,
+            Some(WPARAM(usize::from(current.restore_rdp_sessions))),
+            Some(LPARAM(0)),
+        );
+        let _ = SendMessageW(
+            chk_start_win,
+            BM_SETCHECK,
+            Some(WPARAM(usize::from(current.start_with_windows))),
+            Some(LPARAM(0)),
+        );
+
+        // --- SECTION 3 : ACCUEIL ---
+        dlg_state.labels.push(DialogLabel {
+            text: "Accueil".to_string(),
+            rect: RECT {
+                left: pad_x,
+                top: dpi.scale(352),
+                right: field_right,
+                bottom: dpi.scale(374),
+            },
+            muted: false,
+            bold: true,
+        });
+        let y_rec_chk = dpi.scale(380);
+        let chk_show_recent = create_dark_checkbox(
+            hwnd,
+            hinstance.into(),
+            w!("Afficher la section des connexions récemment utilisées sur l'écran d'accueil"),
+            RECT {
+                left: pad_x,
+                top: y_rec_chk,
+                right: field_right,
+                bottom: y_rec_chk + chk_h,
+            },
+            IDC_SET_SHOW_RECENT,
+            palette.font_ui,
+        );
+        let _ = SendMessageW(
+            chk_show_recent,
+            BM_SETCHECK,
+            Some(WPARAM(usize::from(current.show_recent_connections))),
+            Some(LPARAM(0)),
+        );
+
+        let y_max_rec = dpi.scale(410);
+        dlg_state.labels.push(DialogLabel {
+            text: "Nombre maximal de connexions récentes affichées (1 à 50) :".to_string(),
+            rect: RECT {
+                left: pad_x,
+                top: y_max_rec,
+                right: pad_x + dpi.scale(390),
+                bottom: y_max_rec + field_h,
+            },
+            muted: false,
+            bold: false,
+        });
+        let rc_max_rec = RECT {
+            left: pad_x + dpi.scale(400),
+            top: y_max_rec,
+            right: pad_x + dpi.scale(490),
+            bottom: y_max_rec + field_h,
+        };
+        dlg_state.edit_box_rc = rc_max_rec;
+        let ed_max_recent = create_dark_edit(
+            hwnd,
+            hinstance.into(),
+            rc_max_rec,
+            IDC_SET_MAX_RECENT,
+            false,
+            palette.font_ui,
+            dpi,
+        );
+        set_window_text(ed_max_recent, &current.max_recent_connections.to_string());
+        install_auto_select_on_focus(ed_max_recent);
+
+        // --- SECTION 4 : OPTIONS RDP PAR DÉFAUT ---
+        dlg_state.labels.push(DialogLabel {
+            text: "Options RDP par défaut (nouvelles connexions)".to_string(),
+            rect: RECT {
+                left: pad_x,
+                top: dpi.scale(460),
+                right: field_right,
+                bottom: dpi.scale(482),
+            },
+            muted: false,
+            bold: true,
+        });
+        let y_rdp1 = dpi.scale(488);
+        let y_rdp2 = dpi.scale(516);
+        let chk_rdp_clip = create_dark_checkbox(
+            hwnd,
+            hinstance.into(),
+            w!("Partager le presse-papiers par défaut sur les nouvelles fiches RDP"),
+            RECT {
+                left: pad_x,
+                top: y_rdp1,
+                right: field_right,
+                bottom: y_rdp1 + chk_h,
+            },
+            IDC_SET_RDP_CLIP,
+            palette.font_ui,
+        );
+        let chk_rdp_dynres = create_dark_checkbox(
+            hwnd,
+            hinstance.into(),
+            w!("Ajuster automatiquement la résolution (SmartSizing) par défaut"),
+            RECT {
+                left: pad_x,
+                top: y_rdp2,
+                right: field_right,
+                bottom: y_rdp2 + chk_h,
+            },
+            IDC_SET_RDP_DYNRES,
+            palette.font_ui,
+        );
+        let _ = SendMessageW(
+            chk_rdp_clip,
+            BM_SETCHECK,
+            Some(WPARAM(usize::from(current.rdp_default_clipboard))),
+            Some(LPARAM(0)),
+        );
+        let _ = SendMessageW(
+            chk_rdp_dynres,
+            BM_SETCHECK,
+            Some(WPARAM(usize::from(current.rdp_default_dynamic_resolution))),
+            Some(LPARAM(0)),
+        );
+
+        // --- BOUTONS ENREGISTRER / ANNULER ---
+        let btn_w = dpi.scale(130);
+        let btn_h = dpi.scale(36);
+        let btn_y = dpi.scale(564);
+        let btn_gap = dpi.scale(12);
+        let rc_cancel = RECT {
+            left: field_right - btn_w,
+            top: btn_y,
+            right: field_right,
+            bottom: btn_y + btn_h,
+        };
+        let rc_ok = RECT {
+            left: rc_cancel.left - btn_gap - btn_w,
+            top: btn_y,
+            right: rc_cancel.left - btn_gap,
+            bottom: btn_y + btn_h,
+        };
+
+        let btn_ok = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Enregistrer"),
+            rc_ok,
+            IDC_DLG_OK,
+            palette.font_ui_bold,
+        );
+        let btn_cancel = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Annuler"),
+            rc_cancel,
+            IDC_DLG_CANCEL,
+            palette.font_ui,
+        );
+
+        dlg_state.cb_theme = cb_theme;
+        dlg_state.chk_close_tray = chk_close_tray;
+        dlg_state.chk_start_min_tray = chk_start_min_tray;
+        dlg_state.chk_confirm_exit = chk_confirm_exit;
+        dlg_state.chk_restore_rdp = chk_restore_rdp;
+        dlg_state.chk_start_win = chk_start_win;
+        dlg_state.chk_show_recent = chk_show_recent;
+        dlg_state.ed_max_recent = ed_max_recent;
+        dlg_state.chk_rdp_clip = chk_rdp_clip;
+        dlg_state.chk_rdp_dynres = chk_rdp_dynres;
+
+        let tab_order = [
+            cb_theme,
+            chk_close_tray,
+            chk_start_min_tray,
+            chk_confirm_exit,
+            chk_restore_rdp,
+            chk_start_win,
+            chk_show_recent,
+            ed_max_recent,
+            chk_rdp_clip,
+            chk_rdp_dynres,
+            btn_ok,
+            btn_cancel,
+        ];
+
+        let _ = EnableWindow(owner, false);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = UpdateWindow(hwnd);
+        let _ = SetFocus(Some(cb_theme));
+
+        run_modal_loop(owner, hwnd, &tab_order);
+
+        dlg_state.result.take()
+    }
+}
+
+// =============================================================================
 // WNDPROC PRINCIPAL, POMPE D'ÉVÉNEMENTS WIN32/OLE & HELPERS
 // =============================================================================
 
 impl Drop for AppWindowState {
     fn drop(&mut self) {
+        self.remove_tray_icon();
         unsafe {
             let _ = KillTimer(Some(self.hwnd), IDT_RDP_STATE_POLL);
+            if !self.app_icon.is_invalid() {
+                let _ = DestroyIcon(self.app_icon);
+            }
         }
         self.sessions.close_all();
     }
@@ -5606,8 +7305,8 @@ unsafe extern "system" fn main_wnd_proc(
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const AppWindowState;
                 if !ptr.is_null() {
                     let hdc = HDC(wparam.0 as *mut _);
-                    let _ = SetTextColor(hdc, COLORREF(COL_TEXT_PRIMARY));
-                    let _ = SetBkColor(hdc, COLORREF(COL_BG_INPUT));
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_input()));
                     return LRESULT((*ptr).palette.brush_bg_input.0 as isize);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -5802,6 +7501,9 @@ unsafe extern "system" fn main_wnd_proc(
                             let cid = lparam.0 as i64;
                             (*ptr).open_connection_dialog(Some(cid), None);
                         }
+                        DEFERRED_OPEN_SETTINGS => {
+                            (*ptr).open_settings_dialog();
+                        }
                         _ => {}
                     }
                 }
@@ -5811,11 +7513,15 @@ unsafe extern "system" fn main_wnd_proc(
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
                 if !ptr.is_null() {
                     let (session_id, event_code) = unpack_rdp_event_wparam(wparam);
-                    let alert = (*ptr)
+                    let viewport = (*ptr).rdp_viewport_rect();
+                    let outcome = (*ptr)
                         .sessions
-                        .handle_rdp_event(session_id, event_code, lparam.0);
+                        .handle_rdp_event_with_viewport(session_id, event_code, lparam.0, viewport);
+                    if let Some(msg) = outcome.status_message {
+                        (*ptr).status_override = Some(msg);
+                    }
                     (*ptr).invalidate_canvas();
-                    if let Some((title, msg_err)) = alert {
+                    if let Some((title, msg_err)) = outcome.error_alert {
                         show_warning_dialog(hwnd, &title, &msg_err);
                     }
                 }
@@ -5824,11 +7530,28 @@ unsafe extern "system" fn main_wnd_proc(
             WM_TIMER => {
                 if wparam.0 == IDT_RDP_STATE_POLL {
                     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
-                    if !ptr.is_null() && !IsIconic(hwnd).as_bool() {
+                    if !ptr.is_null() && !IsIconic(hwnd).as_bool() && !(*ptr).is_hidden_in_tray {
                         ensure_main_window_frame_styles(hwnd);
-                        if (*ptr).sessions.sync_real_states() {
+                        let viewport = (*ptr).rdp_viewport_rect();
+                        if (*ptr).sessions.sync_real_states_with_viewport(viewport) {
                             (*ptr).invalidate_canvas();
                         }
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_TRAYICON => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+                if !ptr.is_null() {
+                    let mouse_msg = (lparam.0 as u32) & 0xFFFF;
+                    match mouse_msg {
+                        WM_LBUTTONDBLCLK => {
+                            (*ptr).restore_from_tray();
+                        }
+                        WM_RBUTTONUP | WM_CONTEXTMENU => {
+                            (*ptr).show_tray_context_menu();
+                        }
+                        _ => {}
                     }
                 }
                 LRESULT(0)
@@ -5836,9 +7559,10 @@ unsafe extern "system" fn main_wnd_proc(
             WM_CLOSE => {
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
                 if !ptr.is_null() {
-                    (*ptr).sessions.close_all();
+                    (*ptr).on_close_requested();
+                } else {
+                    let _ = DestroyWindow(hwnd);
                 }
-                let _ = DestroyWindow(hwnd);
                 LRESULT(0)
             }
             WM_DESTROY => {
@@ -5850,7 +7574,15 @@ unsafe extern "system" fn main_wnd_proc(
                 PostQuitMessage(0);
                 LRESULT(0)
             }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+            _ => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+                if !ptr.is_null() && msg != 0 && msg == (*ptr).wm_taskbar_created {
+                    (*ptr).tray_icon_added = false;
+                    (*ptr).init_tray_icon();
+                    return LRESULT(0);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
         }
     }
 }
@@ -5871,7 +7603,7 @@ pub fn run_app() -> Result<(), String> {
             .map_err(|e| format!("Impossible d'obtenir le handle d'instance : {e}"))?;
 
         let class_name = w!("MalvisionMainWindowClass");
-        let bg_brush = CreateSolidBrush(COLORREF(COL_BG_DEEP));
+        let bg_brush = CreateSolidBrush(COLORREF(col_bg_deep()));
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
@@ -5901,8 +7633,20 @@ pub fn run_app() -> Result<(), String> {
         )
         .map_err(|e| format!("Échec de CreateWindowExW : {e}"))?;
 
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = UpdateWindow(hwnd);
+        let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+        if !ptr.is_null() {
+            let state = &mut *ptr;
+            if state.settings.close_to_tray && state.settings.start_minimized_to_tray {
+                state.hide_to_tray();
+            } else {
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = UpdateWindow(hwnd);
+            }
+            state.restore_sessions_on_startup();
+        } else {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            let _ = UpdateWindow(hwnd);
+        }
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).into() {
@@ -6501,6 +8245,314 @@ mod tests {
             );
 
             let _ = SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    // =========================================================================
+    // TESTS JALON 2C : EM_SETSEL PORT RDP, DIALOGUE PARAMÈTRES, THÈMES & TRAY
+    // =========================================================================
+
+    unsafe extern "system" fn port_auto_select_driver_timer(
+        hwnd: HWND,
+        _msg: u32,
+        id_event: usize,
+        _dw_time: u32,
+    ) {
+        unsafe {
+            let Ok(dlg) = FindWindowExW(None, None, w!("MalvisionConnectionFormDlgClass"), None)
+            else {
+                return;
+            };
+            if dlg.0.is_null() || !IsWindow(Some(dlg)).as_bool() {
+                return;
+            }
+            let _ = KillTimer(Some(hwnd), id_event);
+
+            let ed_name = GetDlgItem(Some(dlg), IDC_DLG_NAME as i32).unwrap_or_default();
+            let ed_host = GetDlgItem(Some(dlg), IDC_DLG_HOST as i32).unwrap_or_default();
+            let ed_port = GetDlgItem(Some(dlg), IDC_DLG_PORT as i32).unwrap_or_default();
+
+            set_window_text(ed_name, "SRV-CUSTOM-PORT");
+            set_window_text(ed_host, "10.200.1.50");
+            assert_eq!(get_window_text(ed_port), "3389");
+
+            // 1. Focus par navigation clavier / SetFocus -> EM_SETSEL sélectionne tout ("3389", 0..4)
+            let _ = SetFocus(Some(ed_name));
+            let _ = SetFocus(Some(ed_port));
+            const EM_GETSEL: u32 = 0x00B0;
+            let mut sel_start: u32 = 99;
+            let mut sel_end: u32 = 99;
+            let _ = SendMessageW(
+                ed_port,
+                EM_GETSEL,
+                Some(WPARAM(&mut sel_start as *mut u32 as usize)),
+                Some(LPARAM(&mut sel_end as *mut u32 as isize)),
+            );
+            assert_eq!(
+                (sel_start, sel_end),
+                (0, 4),
+                "Le focus clavier sur le champ Port doit sélectionner l'intégralité de '3389'"
+            );
+
+            // 2. Focus par clic souris (WM_LBUTTONDOWN quand le champ n'a pas le focus)
+            let _ = SetFocus(Some(ed_host));
+            let _ = SendMessageW(
+                ed_port,
+                WM_LBUTTONDOWN,
+                Some(WPARAM(1)),
+                Some(LPARAM((10 << 16) | 10)),
+            );
+            let _ = SendMessageW(
+                ed_port,
+                WM_LBUTTONUP,
+                Some(WPARAM(0)),
+                Some(LPARAM((10 << 16) | 10)),
+            );
+            sel_start = 99;
+            sel_end = 99;
+            let _ = SendMessageW(
+                ed_port,
+                EM_GETSEL,
+                Some(WPARAM(&mut sel_start as *mut u32 as usize)),
+                Some(LPARAM(&mut sel_end as *mut u32 as isize)),
+            );
+            assert_eq!(
+                (sel_start, sel_end),
+                (0, 4),
+                "Le clic souris sur le champ Port doit conserver la sélection intégrale de '3389'"
+            );
+
+            // 3. Saisie directe de "42666" caractère par caractère via WM_CHAR sans effacement manuel
+            const WM_CHAR_MSG: u32 = 0x0102;
+            for ch in "42666".chars() {
+                let _ = SendMessageW(
+                    ed_port,
+                    WM_CHAR_MSG,
+                    Some(WPARAM(ch as usize)),
+                    Some(LPARAM(1)),
+                );
+            }
+            assert_eq!(
+                get_window_text(ed_port),
+                "42666",
+                "La saisie directe doit remplacer '3389' par '42666' sans resélection intempestive"
+            );
+
+            let btn_ok = GetDlgItem(Some(dlg), IDC_DLG_OK as i32).unwrap_or_default();
+            let _ = SendMessageW(btn_ok, BM_CLICK, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
+    }
+
+    #[test]
+    fn test_ui_port_field_auto_selects_all_on_focus_and_direct_typing() {
+        let _guard = WIN32_UI_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db_path = create_temp_test_db_path("port_setsel");
+        unsafe {
+            let hwnd = create_isolated_test_main_window(&db_path);
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+
+            let timer_fn: TIMERPROC = Some(port_auto_select_driver_timer);
+            let _ = SetTimer(Some(hwnd), 9501, 25, timer_fn);
+            (*ptr).open_connection_dialog(None, None);
+            let _ = KillTimer(Some(hwnd), 9501);
+
+            let conns = (*ptr).storage.list_connections().unwrap();
+            assert_eq!(conns.len(), 1);
+            assert_eq!(conns[0].name, "SRV-CUSTOM-PORT");
+            assert_eq!(conns[0].port, 42666);
+
+            let _ = SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    unsafe extern "system" fn settings_dialog_driver_timer(
+        hwnd: HWND,
+        _msg: u32,
+        id_event: usize,
+        _dw_time: u32,
+    ) {
+        unsafe {
+            let Ok(dlg) = FindWindowExW(None, None, w!("MalvisionSettingsDlgClass"), None) else {
+                return;
+            };
+            if dlg.0.is_null() || !IsWindow(Some(dlg)).as_bool() {
+                return;
+            }
+            let _ = KillTimer(Some(hwnd), id_event);
+
+            let cb_theme = GetDlgItem(Some(dlg), IDC_SET_THEME as i32).unwrap_or_default();
+            let chk_tray = GetDlgItem(Some(dlg), IDC_SET_CLOSE_TRAY as i32).unwrap_or_default();
+            let chk_min = GetDlgItem(Some(dlg), IDC_SET_START_MIN_TRAY as i32).unwrap_or_default();
+            let ed_max = GetDlgItem(Some(dlg), IDC_SET_MAX_RECENT as i32).unwrap_or_default();
+
+            // Par défaut, close_to_tray est décoché donc start_minimized_to_tray doit être désactivé
+            assert!(
+                !IsWindowEnabled(chk_min).as_bool(),
+                "Démarrer minimisé doit être désactivé tant que le tray n'est pas activé"
+            );
+
+            // Basculer le thème sur Clair (index 1) et vérifier l'aperçu immédiat sans redémarrage
+            let _ = SendMessageW(cb_theme, CB_SETCURSEL, Some(WPARAM(1)), Some(LPARAM(0)));
+            let _ = SendMessageW(
+                dlg,
+                WM_COMMAND,
+                Some(WPARAM((1usize << 16) | IDC_SET_THEME)),
+                Some(LPARAM(cb_theme.0 as isize)),
+            );
+            assert!(!is_active_theme_dark());
+
+            // Activer close_to_tray -> doit activer chk_min
+            let _ = SendMessageW(chk_tray, BM_SETCHECK, Some(WPARAM(1)), Some(LPARAM(0)));
+            let _ = SendMessageW(
+                dlg,
+                WM_COMMAND,
+                Some(WPARAM(IDC_SET_CLOSE_TRAY)),
+                Some(LPARAM(chk_tray.0 as isize)),
+            );
+            assert!(
+                IsWindowEnabled(chk_min).as_bool(),
+                "Démarrer minimisé doit devenir disponible dès que le tray est activé"
+            );
+            let _ = SendMessageW(chk_min, BM_SETCHECK, Some(WPARAM(1)), Some(LPARAM(0)));
+
+            // Configurer le nombre maximal de connexions récentes à 15
+            set_window_text(ed_max, "15");
+
+            let btn_ok = GetDlgItem(Some(dlg), IDC_DLG_OK as i32).unwrap_or_default();
+            let _ = SendMessageW(btn_ok, BM_CLICK, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
+    }
+
+    #[test]
+    fn test_ui_settings_dialog_theme_switching_and_persistence_real_win32() {
+        let _guard = WIN32_UI_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db_path = create_temp_test_db_path("settings_dlg");
+        unsafe {
+            let hwnd = create_isolated_test_main_window(&db_path);
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+
+            let timer_fn: TIMERPROC = Some(settings_dialog_driver_timer);
+            let _ = SetTimer(Some(hwnd), 9601, 25, timer_fn);
+            (*ptr).open_settings_dialog();
+            let _ = KillTimer(Some(hwnd), 9601);
+
+            assert_eq!((*ptr).settings.theme_mode, ThemeMode::Light);
+            assert!(!is_active_theme_dark());
+            assert!((*ptr).settings.close_to_tray);
+            assert!((*ptr).settings.start_minimized_to_tray);
+            assert_eq!((*ptr).settings.max_recent_connections, 15);
+
+            // Vérifier la persistance dans SQLite
+            let reopened = Storage::open_at_path(&db_path).unwrap();
+            let loaded = AppSettings::load(&reopened);
+            assert_eq!(loaded.theme_mode, ThemeMode::Light);
+            assert!(loaded.close_to_tray);
+            assert!(loaded.start_minimized_to_tray);
+            assert_eq!(loaded.max_recent_connections, 15);
+
+            // Remettre le thème sombre et quitter proprement
+            (*ptr).settings.theme_mode = ThemeMode::Dark;
+            (*ptr).apply_theme();
+            (*ptr).perform_clean_exit();
+        }
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_ui_system_tray_close_to_tray_restore_confirm_active_sessions_and_explicit_exit() {
+        let _guard = WIN32_UI_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db_path = create_temp_test_db_path("tray_lifecycle");
+        unsafe {
+            let hwnd = create_isolated_test_main_window(&db_path);
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+
+            // 1. Activer "Fermer vers la zone de notification" -> WM_CLOSE masque la fenêtre au lieu de la détruire
+            (*ptr).settings.close_to_tray = true;
+            let _ = SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+            assert!(
+                IsWindow(Some(hwnd)).as_bool(),
+                "La fenêtre ne doit pas être détruite lorsque close_to_tray est actif"
+            );
+            assert!(
+                (*ptr).is_hidden_in_tray,
+                "L'état is_hidden_in_tray doit être vrai après fermeture vers le tray"
+            );
+            assert!(
+                !windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd).as_bool(),
+                "La fenêtre doit être masquée (SW_HIDE)"
+            );
+
+            // 2. Double-clic sur l'icône du System Tray -> restaure la fenêtre
+            let _ = SendMessageW(
+                hwnd,
+                WM_TRAYICON,
+                Some(WPARAM(TRAY_ICON_ID as usize)),
+                Some(LPARAM(WM_LBUTTONDBLCLK as isize)),
+            );
+            assert!(
+                !(*ptr).is_hidden_in_tray,
+                "Le double-clic tray doit restaurer la fenêtre"
+            );
+            assert!(
+                windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd).as_bool(),
+                "La fenêtre doit redevenir visible après restauration depuis le tray"
+            );
+
+            // 3. Simuler une session RDP active et tester le refus puis l'acceptation de la confirmation de sortie
+            let viewport = (*ptr).rdp_viewport_rect();
+            let dummy_conn = ConnectionItem {
+                id: 1,
+                name: "SRV-TRAY-ACTIVE".to_string(),
+                protocol: Protocol::Rdp,
+                host: "127.0.0.1".to_string(),
+                port: 3389,
+                username: "admin".to_string(),
+                domain: String::new(),
+                folder_id: None,
+                description: String::new(),
+                is_favorite: false,
+                save_password: false,
+                has_saved_password: false,
+                dynamic_resolution: true,
+                redirect_clipboard: true,
+                sort_order: 0,
+                created_at: 0,
+                updated_at: 0,
+                last_connected_at: None,
+            };
+            let _ = (*ptr)
+                .sessions
+                .open_rdp_session(hwnd, viewport, &dummy_conn, None);
+            assert_eq!((*ptr).sessions.tabs().len(), 1);
+
+            // Simuler un clic sur "Annuler" dans la boîte de confirmation (-1)
+            TEST_EXIT_CONFIRM_OVERRIDE.store(-1, Ordering::SeqCst);
+            let _ = (*ptr).request_explicit_exit();
+            assert!(
+                IsWindow(Some(hwnd)).as_bool(),
+                "L'annulation de la confirmation doit empêcher la fermeture"
+            );
+            assert_eq!((*ptr).sessions.tabs().len(), 1);
+
+            // Simuler la confirmation de sortie (+1) -> ferme les sessions, retire l'icône tray et détruit la fenêtre
+            TEST_EXIT_CONFIRM_OVERRIDE.store(1, Ordering::SeqCst);
+            let _ = (*ptr).request_explicit_exit();
+            TEST_EXIT_CONFIRM_OVERRIDE.store(0, Ordering::SeqCst);
+            assert!(
+                !IsWindow(Some(hwnd)).as_bool(),
+                "La sortie explicite confirmée doit détruire la fenêtre et nettoyer les ressources"
+            );
         }
         let _ = std::fs::remove_file(&db_path);
     }
