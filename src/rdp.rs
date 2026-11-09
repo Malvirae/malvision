@@ -673,9 +673,19 @@ impl RdpActiveXHost {
         self.ax_hwnd
     }
 
-    /// Active l'objet OLE pour que le contrôle RDP reçoive immédiatement les entrées clavier et souris.
+    /// Active l'objet OLE et positionne le focus Win32 pour que le contrôle RDP reçoive immédiatement les entrées clavier et souris.
     pub fn focus_control(&self) {
         unsafe {
+            if !self.ax_hwnd.is_invalid() {
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(self.ax_hwnd));
+                if let Ok(child) = windows::Win32::UI::WindowsAndMessaging::GetWindow(
+                    self.ax_hwnd,
+                    windows::Win32::UI::WindowsAndMessaging::GW_CHILD,
+                ) && !child.is_invalid()
+                {
+                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(child));
+                }
+            }
             if let Ok(ole_obj) = self.rdp_client.cast::<IOleObject>() {
                 let mut rect = Default::default();
                 let _ = GetClientRect(self.ax_hwnd, &mut rect);
@@ -1051,10 +1061,9 @@ impl RdpActiveXHost {
 
     /// Envoie une séquence de touches au contrôle RDP via l'API officielle `IMsRdpClientNonScriptable::SendKeys`.
     ///
-    /// Respecte strictement la spécification Microsoft :
-    /// - `pbArrayKeyUp` : tableau de `VARIANT_BOOL` (0 = Enfoncé, -1 = Relâché).
-    /// - `plKeyData` : tableau de `LONG` représentant exactement la structure `lParam` de `WM_KEYDOWN` / `WM_KEYUP`
-    ///   avec le code de scan matériel (bits 16-23), le drapeau de touche étendue (bit 24) et l'état ALT (bit 29).
+    /// Respecte strictement la spécification Microsoft RDP (conforme à l'implémentation de référence RDCMan) :
+    /// - `pbArrayKeyUp` : tableau de `VARIANT_BOOL` (0 = Touche enfoncée, 1 = Touche relâchée).
+    /// - `plKeyData` : tableau de `LONG` représentant les codes de scan matériels PS/2 des touches.
     pub fn send_keys(
         &self,
         keys: &[(
@@ -1075,18 +1084,11 @@ impl RdpActiveXHost {
                 let num_keys = keys.len().min(20) as i32;
                 let mut up_array: Vec<i16> = Vec::with_capacity(num_keys as usize);
                 let mut key_data: Vec<i32> = Vec::with_capacity(num_keys as usize);
-                let mut alt_down = false;
 
                 for (vk, is_up) in keys.iter().take(num_keys as usize) {
-                    let (sc, ext) = virtual_key_to_scan_code_and_ext(*vk);
-                    if *vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_MENU
-                        || *vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_LMENU
-                        || *vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_RMENU
-                    {
-                        alt_down = !*is_up;
-                    }
-                    up_array.push(if *is_up { -1 } else { 0 }); // VARIANT_TRUE / VARIANT_FALSE
-                    key_data.push(build_send_keys_lparam(sc, ext, alt_down, *is_up));
+                    let sc = virtual_key_to_scan_code(*vk);
+                    up_array.push(if *is_up { 1 } else { 0 }); // 0 = Enfoncé, 1 = Relâché (compatible VARIANT_BOOL)
+                    key_data.push(sc as i32);
                 }
 
                 let hr = func(
@@ -1243,47 +1245,26 @@ impl RdpActiveXHost {
     }
 }
 
-/// Convertit une touche virtuelle en code de scan matériel PS/2 et indique si la touche est étendue.
-fn virtual_key_to_scan_code_and_ext(
+/// Convertit une touche virtuelle Win32 en code de scan PS/2 matériel attendu par `IMsRdpClientNonScriptable::SendKeys`.
+pub fn virtual_key_to_scan_code(
     vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
-) -> (u32, bool) {
+) -> u32 {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     match vk {
-        VK_CONTROL | VK_LCONTROL => (0x1D, false),
-        VK_RCONTROL => (0x1D, true),
-        VK_MENU | VK_LMENU => (0x38, false),
-        VK_RMENU => (0x38, true),
-        VK_END => (0x4F, true),
-        VK_DELETE => (0x53, true),
-        VK_INSERT => (0x52, true),
-        VK_HOME => (0x47, true),
-        VK_PRIOR => (0x49, true),
-        VK_NEXT => (0x51, true),
-        VK_LEFT => (0x4B, true),
-        VK_UP => (0x48, true),
-        VK_RIGHT => (0x4D, true),
-        VK_DOWN => (0x50, true),
-        _ => unsafe {
-            let sc = MapVirtualKeyW(vk.0 as u32, MAPVK_VK_TO_VSC);
-            (sc, false)
-        },
+        VK_CONTROL | VK_LCONTROL | VK_RCONTROL => 0x1D,
+        VK_MENU | VK_LMENU | VK_RMENU => 0x38,
+        VK_END => 0x4F,
+        VK_DELETE => 0x53,
+        VK_INSERT => 0x52,
+        VK_HOME => 0x47,
+        VK_PRIOR => 0x49,
+        VK_NEXT => 0x51,
+        VK_LEFT => 0x4B,
+        VK_UP => 0x48,
+        VK_RIGHT => 0x4D,
+        VK_DOWN => 0x50,
+        _ => unsafe { MapVirtualKeyW(vk.0 as u32, MAPVK_VK_TO_VSC) },
     }
-}
-
-/// Construit la valeur 32-bit `plKeyData` au format exact du paramètre `lParam` de `WM_KEYDOWN` / `WM_KEYUP`.
-fn build_send_keys_lparam(scan_code: u32, extended: bool, alt_down: bool, is_up: bool) -> i32 {
-    let mut lp: u32 = 1; // repeat count = 1
-    lp |= (scan_code & 0xFF) << 16;
-    if extended {
-        lp |= 1 << 24;
-    }
-    if alt_down {
-        lp |= 1 << 29;
-    }
-    if is_up {
-        lp |= (1 << 30) | (1 << 31);
-    }
-    lp as i32
 }
 
 impl RdpActiveXHost {
@@ -1482,38 +1463,53 @@ mod tests {
     }
 
     #[test]
-    fn test_rdp_scan_code_and_lparam_construction() {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_DELETE, VK_END, VK_MENU};
+    fn test_rdp_scan_codes_and_sequence_construction() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_LEFT, VK_MENU, VK_RIGHT, VK_UP,
+        };
 
-        // 1. Touches modificatrices standard
-        let (sc_ctrl, ext_ctrl) = virtual_key_to_scan_code_and_ext(VK_CONTROL);
-        assert_eq!(sc_ctrl, 0x1D);
-        assert!(!ext_ctrl);
+        // 1. Touches modificatrices standard PS/2
+        assert_eq!(virtual_key_to_scan_code(VK_CONTROL), 0x1D);
+        assert_eq!(virtual_key_to_scan_code(VK_MENU), 0x38);
 
-        let (sc_alt, ext_alt) = virtual_key_to_scan_code_and_ext(VK_MENU);
-        assert_eq!(sc_alt, 0x38);
-        assert!(!ext_alt);
+        // 2. Touches étendues / de contrôle RDP
+        assert_eq!(virtual_key_to_scan_code(VK_END), 0x4F);
+        assert_eq!(virtual_key_to_scan_code(VK_DELETE), 0x53);
+        assert_eq!(virtual_key_to_scan_code(VK_LEFT), 0x4B);
+        assert_eq!(virtual_key_to_scan_code(VK_UP), 0x48);
+        assert_eq!(virtual_key_to_scan_code(VK_RIGHT), 0x4D);
+        assert_eq!(virtual_key_to_scan_code(VK_DOWN), 0x50);
 
-        // 2. Touches de navigation étendues
-        let (sc_end, ext_end) = virtual_key_to_scan_code_and_ext(VK_END);
-        assert_eq!(sc_end, 0x4F);
-        assert!(ext_end);
+        // 3. Validation de la séquence atomique Ctrl + Alt + Fin (6 événements)
+        let seq_end = [
+            (VK_CONTROL, false),
+            (VK_MENU, false),
+            (VK_END, false),
+            (VK_END, true),
+            (VK_MENU, true),
+            (VK_CONTROL, true),
+        ];
+        assert_eq!(seq_end.len(), 6);
+        let sc_seq: Vec<u32> = seq_end
+            .iter()
+            .map(|(vk, _)| virtual_key_to_scan_code(*vk))
+            .collect();
+        assert_eq!(sc_seq, vec![0x1D, 0x38, 0x4F, 0x4F, 0x38, 0x1D]);
 
-        let (sc_del, ext_del) = virtual_key_to_scan_code_and_ext(VK_DELETE);
-        assert_eq!(sc_del, 0x53);
-        assert!(ext_del);
-
-        // 3. Construction des LPARAMs
-        let lp_down = build_send_keys_lparam(0x1D, false, false, false);
-        assert_eq!((lp_down >> 16) & 0xFF, 0x1D);
-        assert_eq!((lp_down >> 24) & 1, 0);
-        assert_eq!((lp_down >> 31) & 1, 0);
-
-        let lp_up = build_send_keys_lparam(0x4F, true, true, true);
-        assert_eq!((lp_up >> 16) & 0xFF, 0x4F);
-        assert_eq!((lp_up >> 24) & 1, 1); // Extended flag
-        assert_eq!((lp_up >> 29) & 1, 1); // Alt context
-        assert_eq!((lp_up >> 30) & 1, 1); // Previous state
-        assert_eq!((lp_up >> 31) & 1, 1); // Transition state (Key Up)
+        // 4. Validation de la séquence atomique Ctrl + Alt + Suppr (6 événements)
+        let seq_cad = [
+            (VK_CONTROL, false),
+            (VK_MENU, false),
+            (VK_DELETE, false),
+            (VK_DELETE, true),
+            (VK_MENU, true),
+            (VK_CONTROL, true),
+        ];
+        assert_eq!(seq_cad.len(), 6);
+        let sc_cad: Vec<u32> = seq_cad
+            .iter()
+            .map(|(vk, _)| virtual_key_to_scan_code(*vk))
+            .collect();
+        assert_eq!(sc_cad, vec![0x1D, 0x38, 0x53, 0x53, 0x38, 0x1D]);
     }
 }

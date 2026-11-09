@@ -2,9 +2,13 @@
 
 Application native **Windows 11 x64** de gestion de connexions distantes, écrite en **Rust** avec `windows-rs` (Win32 natif + COM/ActiveX + SQLite embarqué + DPAPI).
 
-## Vision et fonctionnalités (Jalons 1 à 3)
+## Vision et fonctionnalités (Jalons 1 à 3C)
 
-- **Intégration externe native d'AnyDesk et RustDesk (Jalons 3 et 3B)** :
+- **Double-clic unifié pour tous les protocoles (Jalon 3C)** :
+  - Lancement immédiat et fluide de n'importe quelle connexion par double-clic dans l'arborescence (TreeView), qu'il s'agisse de sessions RDP (onglet intégré), d'AnyDesk (avec transmission DPAPI sur stdin si configuré) ou de RustDesk.
+  - Résolution par hit-test Win32 natif (`TVM_HITTEST`) indépendant de l'état de sélection antérieur.
+  - Le double-clic sur un dossier ou une racine assure son développement/repli sans lancer de fausse connexion.
+- **Intégration externe native d'AnyDesk et RustDesk (Jalons 3, 3B et 3C)** :
   - **Gestion centralisée dans Paramètres > Applications externes** :
     - Chemins configurables vers `AnyDesk.exe` et `rustdesk.exe`.
     - Bouton **Parcourir...** exploitant le sélecteur standard moderne Windows (`IFileOpenDialog` avec filtre `*.exe`).
@@ -26,9 +30,10 @@ Application native **Windows 11 x64** de gestion de connexions distantes, écrit
     - Mode plein écran natif (`ContainerHandledFullScreen = 0`) avec barre de connexion supérieure (`DisplayConnectionBar = true`, `put_ConnectionBarText`).
     - Synchronisation d'état via les événements ActiveX `OnEnterFullScreenMode` et `OnLeaveFullScreenMode`.
     - Sortie fiable en plein écran via le raccourci Windows natif `Ctrl+Alt+Pause` ou la barre de connexion.
-  - **Envoi précis des combinaisons spéciales (`IMsRdpClientNonScriptable::SendKeys`)** :
-    - Conversion des touches en scan codes matériels PS/2 réels et encodage conforme des entiers 32 bits `lParam` (touches étendues, contexte Alt, transition up/down).
-    - Envoi fonctionnel de **Ctrl + Alt + Fin** (séquence SAS officielle de session distante RDP) et de **Ctrl + Alt + Suppr** selon les stratégies système Windows.
+  - **Envoi précis des combinaisons spéciales (`IMsRdpClientNonScriptable::SendKeys`, Jalon 3C)** :
+    - Injection directe des scan codes matériels PS/2 réels (`0x1D` Ctrl, `0x38` Alt, `0x4F` Fin, `0x53` Suppr) et gestion précise des transitions key-down / key-up conforme au modèle de référence Microsoft RDCMan.
+    - Focus Win32 et OLE systématique garantissant la réception des touches par la session distante active.
+    - Séquence officielle **Ctrl + Alt + Fin** (SAS RDP) recommandée pour accéder à l'écran de sécurité distant, et **Ctrl + Alt + Suppr** avec rétroaction d'état et dialogue explicatif d'erreur.
 - **RDP Avancé — Raccourcis Windows (`KeyboardHookMode`)** :
   - Propriété COM Microsoft `IMsRdpClientSecuredSettings2::put_KeyboardHookMode` configurée avant connexion :
     - `0` : Raccourcis exécutés sur le poste local.
@@ -48,7 +53,7 @@ Application native **Windows 11 x64** de gestion de connexions distantes, écrit
   - **Thème sombre** par défaut : anthracite profond (`#16181B`), barre de titre sombre DWM (`DWMWA_USE_IMMERSIVE_DARK_MODE`), typographie `Segoe UI`, rendu GDI double-bufferisé sans scintillement et prise en charge HiDPI Per-Monitor V2 (`DpiMetrics` 100 % / 125 % / 150 %).
   - **Thème clair** haute lisibilité : fond blanc pur (`#FFFFFF`), panneau latéral gris-bleu Fluent (`#F3F5F9`), bordures douces et contrastes optimisés, sans inversion brutale.
   - **Thème système** : synchronisation automatique et dynamique avec les préférences Windows 11 (`AppsUseLightTheme`).
-  - **Finition de rendu (Jalon 3B)** : traitement de `WM_CTLCOLORSTATIC` sur le champ de recherche pour éliminer tout artefact lors du basculement dynamique de thème.
+  - **Finition de rendu et zéro résidu (Jalon 3C)** : sous-classement dédié `search_edit_wnd_proc` interceptant `WM_ERASEBKGND`, neutralisation des styles UxTheme avec `SetWindowTheme`, mode de fond transparent et rafraîchissement complet `RedrawWindow` garantissant des transitions impeccables (Sombre <-> Clair) sans redémarrage.
 - **Centre de Paramètres complet & persistant** :
   - Bouton **Paramètres** avec icône vectorielle d'engrenage au bas du volet latéral gauche.
   - Fenêtre de réglages dédiée articulée en 5 sections :

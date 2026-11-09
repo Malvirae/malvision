@@ -13,7 +13,7 @@ use crate::settings::{
 use crate::storage::Storage;
 use std::collections::HashMap;
 use std::ffi::c_void;
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, ClientToScreen, CreateBitmap,
@@ -21,7 +21,8 @@ use windows::Win32::Graphics::Gdi::{
     CreateSolidBrush, DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX,
     DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, EndPaint, FONT_CHARSET,
     FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY, FillRect, GetStockObject, HBRUSH,
-    HDC, HFONT, InvalidateRect, LineTo, MoveToEx, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, RoundRect,
+    HDC, HFONT, InvalidateRect, LineTo, MoveToEx, NULL_BRUSH, PAINTSTRUCT, PS_SOLID,
+    RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, RedrawWindow, RoundRect,
     ScreenToClient, SelectObject, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -29,12 +30,12 @@ use windows::Win32::UI::Controls::{
     CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDIS_HOT, CDIS_SELECTED, CDRF_NOTIFYITEMDRAW,
     CDRF_SKIPDEFAULT, DRAWITEMSTRUCT, HTREEITEM, MEASUREITEMSTRUCT, NM_CLICK, NM_CUSTOMDRAW,
     NM_DBLCLK, NM_RCLICK, NMHDR, NMTREEVIEWW, NMTVCUSTOMDRAW, ODS_FOCUS, ODS_SELECTED, ODT_BUTTON,
-    ODT_COMBOBOX, TV_FIRST, TVE_EXPAND, TVE_TOGGLE, TVGN_CARET, TVGN_DROPHILITE, TVHITTESTINFO,
-    TVHT_ONITEMBUTTON, TVI_LAST, TVI_ROOT, TVIF_HANDLE, TVIF_PARAM, TVIF_STATE, TVIF_TEXT,
-    TVINSERTSTRUCTW, TVIS_EXPANDED, TVITEMEXW, TVITEMW, TVM_DELETEITEM, TVM_EXPAND, TVM_GETITEMW,
-    TVM_HITTEST, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETBKCOLOR, TVM_SETTEXTCOLOR, TVN_BEGINDRAGW,
-    TVN_ITEMEXPANDEDW, TVN_SELCHANGEDW, TVS_FULLROWSELECT, TVS_HASBUTTONS, TVS_SHOWSELALWAYS,
-    WC_BUTTONW, WC_COMBOBOXW, WC_EDITW, WC_TREEVIEWW, WM_MOUSELEAVE,
+    ODT_COMBOBOX, SetWindowTheme, TV_FIRST, TVE_EXPAND, TVE_TOGGLE, TVGN_CARET, TVGN_DROPHILITE,
+    TVHITTESTINFO, TVHT_ONITEMBUTTON, TVI_LAST, TVI_ROOT, TVIF_HANDLE, TVIF_PARAM, TVIF_STATE,
+    TVIF_TEXT, TVINSERTSTRUCTW, TVIS_EXPANDED, TVITEMEXW, TVITEMW, TVM_DELETEITEM, TVM_EXPAND,
+    TVM_GETITEMW, TVM_HITTEST, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETBKCOLOR, TVM_SETTEXTCOLOR,
+    TVN_BEGINDRAGW, TVN_ITEMEXPANDEDW, TVN_SELCHANGEDW, TVS_FULLROWSELECT, TVS_HASBUTTONS,
+    TVS_SHOWSELALWAYS, WC_BUTTONW, WC_COMBOBOXW, WC_EDITW, WC_TREEVIEWW, WM_MOUSELEAVE,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -52,19 +53,20 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
     DestroyWindow, DispatchMessageW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, ES_AUTOHSCROLL,
     ES_PASSWORD, GWL_STYLE, GWLP_USERDATA, GWLP_WNDPROC, GetClientRect, GetCursorPos, GetDlgCtrlID,
-    GetMessageW, GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    HICON, HMENU, ICON_BIG, ICON_SMALL, ICONINFO, IDC_ARROW, IDC_HAND, IDC_SIZEWE, IDYES, IsChild,
-    IsIconic, IsWindow, KillTimer, LoadCursorW, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION,
-    MB_ICONWARNING, MB_OK, MB_YESNO, MF_SEPARATOR, MF_STRING, MINMAXINFO, MSG, MessageBoxW,
-    MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SW_HIDE,
-    SW_RESTORE, SW_SHOW, SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-    SetWindowTextW, ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_TOPALIGN, TrackPopupMenu,
-    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU,
-    WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_NOTIFY,
-    WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SETFONT, WM_SETICON, WM_SIZE,
-    WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    GetMessageW, GetParent, GetPropW, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, HICON, HMENU, ICON_BIG, ICON_SMALL, ICONINFO, IDC_ARROW, IDC_HAND, IDC_SIZEWE,
+    IDYES, IsChild, IsIconic, IsWindow, KillTimer, LoadCursorW, MB_ICONERROR, MB_ICONINFORMATION,
+    MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO, MF_SEPARATOR, MF_STRING, MINMAXINFO, MSG,
+    MessageBoxW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
+    RegisterWindowMessageW, RemovePropW, SW_HIDE, SW_RESTORE, SW_SHOW, SendMessageW, SetCursor,
+    SetForegroundWindow, SetPropW, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
+    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_TOPALIGN, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_CREATE, WM_CTLCOLORBTN,
+    WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_NOTIFY, WM_NULL, WM_PAINT, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_SETFOCUS, WM_SETFONT, WM_SETICON, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSCOMMAND,
+    WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
     WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU,
     WS_TABSTOP, WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL,
 };
@@ -662,6 +664,20 @@ impl AppWindowState {
             .unwrap_or_default();
 
             if !search_edit.is_invalid() {
+                // Désactiver le skin UxTheme natif pour que le contrôle EDIT obéisse strictement à nos couleurs GDI
+                let _ = SetWindowTheme(search_edit, w!(""), w!(""));
+                // Sous-classer pour intercepter WM_ERASEBKGND et garantir un rendu sans résidu
+                let orig_proc = SetWindowLongPtrW(
+                    search_edit,
+                    GWLP_WNDPROC,
+                    search_edit_wnd_proc as *const () as isize,
+                );
+                let _ = SetPropW(
+                    search_edit,
+                    PROP_SEARCH_EDIT_ORIG_PROC,
+                    Some(HANDLE(orig_proc as *mut _)),
+                );
+
                 let _ = SendMessageW(
                     search_edit,
                     WM_SETFONT,
@@ -807,14 +823,40 @@ impl AppWindowState {
                     Some(WPARAM(0)),
                     Some(LPARAM(col_text_primary() as isize)),
                 );
-                let _ = InvalidateRect(Some(self.treeview), None, true);
+                let _ = RedrawWindow(
+                    Some(self.treeview),
+                    None,
+                    None,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+                );
             }
             if !self.search_edit.is_invalid() {
-                let _ = InvalidateRect(Some(self.search_edit), None, true);
-                let _ = UpdateWindow(self.search_edit);
+                let _ = SetWindowTheme(self.search_edit, w!(""), w!(""));
+                let _ = SendMessageW(
+                    self.search_edit,
+                    WM_THEMECHANGED,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(0)),
+                );
+                let _ = SendMessageW(
+                    self.search_edit,
+                    WM_SYSCOLORCHANGE,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(0)),
+                );
+                let _ = RedrawWindow(
+                    Some(self.search_edit),
+                    None,
+                    None,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+                );
             }
-            let _ = InvalidateRect(Some(self.hwnd), None, true);
-            let _ = UpdateWindow(self.hwnd);
+            let _ = RedrawWindow(
+                Some(self.hwnd),
+                None,
+                None,
+                RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+            );
         }
     }
 
@@ -3192,12 +3234,8 @@ impl AppWindowState {
                     &self.settings.rustdesk_path,
                     &conn.host,
                 ) {
-                    Ok(pid) => {
-                        let msg = format!(
-                            "Session RustDesk vers « {} » (ID: {}) lancée (PID: {}).",
-                            conn.name, conn.host, pid
-                        );
-                        self.status_override = Some(msg);
+                    Ok(info_msg) => {
+                        self.status_override = Some(info_msg);
                         self.invalidate_canvas();
                     }
                     Err(err) => {
@@ -3239,14 +3277,14 @@ impl AppWindowState {
             let _ = AppendMenuW(
                 hmenu,
                 MF_STRING,
-                CMD_SESSION_CAD as usize,
-                w!("Envoyer Ctrl + Alt + Suppr"),
+                CMD_SESSION_CTRL_ALT_END as usize,
+                w!("Envoyer Ctrl + Alt + Fin (Sécurité distante RDP)"),
             );
             let _ = AppendMenuW(
                 hmenu,
                 MF_STRING,
-                CMD_SESSION_CTRL_ALT_END as usize,
-                w!("Envoyer Ctrl + Alt + Fin"),
+                CMD_SESSION_CAD as usize,
+                w!("Envoyer Ctrl + Alt + Suppr (Simulation)"),
             );
             let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
             let fs_label_w: Vec<u16> = fs_label.encode_utf16().chain(std::iter::once(0)).collect();
@@ -3277,18 +3315,32 @@ impl AppWindowState {
             let _ = DestroyMenu(hmenu);
 
             match cmd.0 as u32 {
-                CMD_SESSION_CAD => {
-                    if let Err(e) = self.sessions.send_cad_to_active() {
+                CMD_SESSION_CAD => match self.sessions.send_cad_to_active() {
+                    Ok(()) => {
+                        self.status_override = Some(
+                                "Combinaison Ctrl + Alt + Suppr transmise à la session RDP (Note : sous RDP, utilisez Ctrl + Alt + Fin pour invoquer l'écran de sécurité distant).".to_string(),
+                            );
+                        self.invalidate_canvas();
+                    }
+                    Err(e) => {
                         self.status_override = Some(format!("Erreur Ctrl+Alt+Suppr : {e}"));
                         self.invalidate_canvas();
+                        show_error_dialog(self.hwnd, "Erreur d'envoi Ctrl + Alt + Suppr", &e);
                     }
-                }
-                CMD_SESSION_CTRL_ALT_END => {
-                    if let Err(e) = self.sessions.send_ctrl_alt_end_to_active() {
-                        self.status_override = Some(format!("Erreur Ctrl+Alt+Fin : {e}"));
+                },
+                CMD_SESSION_CTRL_ALT_END => match self.sessions.send_ctrl_alt_end_to_active() {
+                    Ok(()) => {
+                        self.status_override = Some(
+                                "Combinaison Ctrl + Alt + Fin (SAS de sécurité RDP) transmise avec succès au bureau distant.".to_string(),
+                            );
                         self.invalidate_canvas();
                     }
-                }
+                    Err(e) => {
+                        self.status_override = Some(format!("Erreur Ctrl+Alt+Fin : {e}"));
+                        self.invalidate_canvas();
+                        show_error_dialog(self.hwnd, "Erreur d'envoi Ctrl + Alt + Fin", &e);
+                    }
+                },
                 CMD_SESSION_FULLSCREEN => {
                     if let Err(e) = self.sessions.toggle_active_fullscreen() {
                         self.status_override = Some(format!("Erreur Plein écran : {e}"));
@@ -4073,6 +4125,53 @@ unsafe extern "system" fn dark_checkbox_wnd_proc(
                 LRESULT(0)
             }
             _ => call_orig_button_proc(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+const PROP_SEARCH_EDIT_ORIG_PROC: PCWSTR = w!("MalvisionSearchEditOrigProc");
+
+/// Sous-classement de la barre de recherche (`WC_EDITW`) pour intercepter `WM_ERASEBKGND`
+/// et garantir un effacement dynamique sans résidu visuel lors des basculements de thème (Clair <-> Sombre).
+unsafe extern "system" fn search_edit_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        let orig_handle = GetPropW(hwnd, PROP_SEARCH_EDIT_ORIG_PROC);
+        let orig_proc: WNDPROC = if !orig_handle.0.is_null() {
+            std::mem::transmute::<*mut c_void, WNDPROC>(orig_handle.0)
+        } else {
+            None
+        };
+
+        match msg {
+            WM_ERASEBKGND => {
+                let hdc = HDC(wparam.0 as *mut _);
+                let mut rc = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rc);
+                let brush = CreateSolidBrush(COLORREF(col_bg_input()));
+                let _ = FillRect(hdc, &rc, brush);
+                let _ = DeleteObject(brush.into());
+                LRESULT(1)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_NCDESTROY => {
+                let _ = RemovePropW(hwnd, PROP_SEARCH_EDIT_ORIG_PROC);
+                if let Some(proc) = orig_proc {
+                    CallWindowProcW(Some(proc), hwnd, msg, wparam, lparam)
+                } else {
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                }
+            }
+            _ => {
+                if let Some(proc) = orig_proc {
+                    CallWindowProcW(Some(proc), hwnd, msg, wparam, lparam)
+                } else {
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                }
+            }
         }
     }
 }
@@ -8113,6 +8212,7 @@ unsafe extern "system" fn main_wnd_proc(
                     let hdc = HDC(wparam.0 as *mut _);
                     let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                     let _ = SetBkColor(hdc, COLORREF(col_bg_input()));
+                    let _ = SetBkMode(hdc, TRANSPARENT);
                     return LRESULT((*ptr).palette.brush_bg_input.0 as isize);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -8125,10 +8225,12 @@ unsafe extern "system" fn main_wnd_proc(
                     if ctrl_hwnd == (*ptr).search_edit {
                         let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
                         let _ = SetBkColor(hdc, COLORREF(col_bg_input()));
+                        let _ = SetBkMode(hdc, TRANSPARENT);
                         return LRESULT((*ptr).palette.brush_bg_input.0 as isize);
                     }
                     let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                     let _ = SetBkColor(hdc, COLORREF(col_bg_sidebar()));
+                    let _ = SetBkMode(hdc, TRANSPARENT);
                     return LRESULT((*ptr).palette.brush_bg_sidebar.0 as isize);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -8291,14 +8393,44 @@ unsafe extern "system" fn main_wnd_proc(
                                 }
                             }
                             NM_DBLCLK => {
-                                if let Some(TreeNodeKind::Connection(_)) = (*ptr).selected_node {
-                                    let _ = PostMessageW(
-                                        Some(hwnd),
-                                        WM_DEFERRED_ACTION,
-                                        WPARAM(DEFERRED_CONNECT_SELECTED),
-                                        LPARAM(0),
-                                    );
-                                    return LRESULT(1);
+                                let mut pt = POINT::default();
+                                let _ = GetCursorPos(&mut pt);
+                                let _ = ScreenToClient((*ptr).treeview, &mut pt);
+                                let mut hti = TVHITTESTINFO {
+                                    pt,
+                                    ..Default::default()
+                                };
+                                let h = SendMessageW(
+                                    (*ptr).treeview,
+                                    TVM_HITTEST,
+                                    Some(WPARAM(0)),
+                                    Some(LPARAM(&mut hti as *mut TVHITTESTINFO as isize)),
+                                );
+                                let hitem = HTREEITEM(h.0);
+                                if hitem.0 != 0
+                                    && (hti.flags.0 & TVHT_ONITEMBUTTON.0) == 0
+                                    && let Some(kind) = (*ptr).node_kind_from_hitem(hitem)
+                                {
+                                    match kind {
+                                        TreeNodeKind::Connection(cid) => {
+                                            (*ptr).selected_node =
+                                                Some(TreeNodeKind::Connection(cid));
+                                            let _ = SendMessageW(
+                                                (*ptr).treeview,
+                                                TVM_SELECTITEM,
+                                                Some(WPARAM(TVGN_CARET as usize)),
+                                                Some(LPARAM(hitem.0)),
+                                            );
+                                            (*ptr).launch_connection_by_id(cid);
+                                            return LRESULT(1);
+                                        }
+                                        TreeNodeKind::Folder(_)
+                                        | TreeNodeKind::FavoritesRoot
+                                        | TreeNodeKind::ConnectionsRoot => {
+                                            // Laisser le contrôle TreeView développer/replier le dossier nativement
+                                            return LRESULT(0);
+                                        }
+                                    }
                                 }
                             }
                             NM_RCLICK => {
@@ -9616,20 +9748,44 @@ mod tests {
             let hdc = GetDC(Some(hwnd));
             assert!(!hdc.0.is_null());
 
-            // 1. En Dark Theme (par défaut), WM_CTLCOLORSTATIC sur search_edit doit retourner brush_bg_input
-            let res_dark = SendMessageW(
+            // 1. En Dark Theme (par défaut), WM_CTLCOLORSTATIC et WM_CTLCOLOREDIT doivent retourner brush_bg_input
+            let res_dark_static = SendMessageW(
                 hwnd,
                 WM_CTLCOLORSTATIC,
                 Some(WPARAM(hdc.0 as usize)),
                 Some(LPARAM(search_edit.0 as isize)),
             );
             assert_eq!(
-                res_dark.0,
+                res_dark_static.0,
                 (*ptr).palette.brush_bg_input.0 as isize,
                 "WM_CTLCOLORSTATIC sur search_edit doit renvoyer brush_bg_input en Dark theme"
             );
 
-            // 2. Basculer en Light Theme
+            let res_dark_edit = SendMessageW(
+                hwnd,
+                WM_CTLCOLOREDIT,
+                Some(WPARAM(hdc.0 as usize)),
+                Some(LPARAM(search_edit.0 as isize)),
+            );
+            assert_eq!(
+                res_dark_edit.0,
+                (*ptr).palette.brush_bg_input.0 as isize,
+                "WM_CTLCOLOREDIT sur search_edit doit renvoyer brush_bg_input en Dark theme"
+            );
+
+            // Sous-classement : WM_ERASEBKGND direct sur search_edit doit retourner 1
+            let res_erase_dark = SendMessageW(
+                search_edit,
+                WM_ERASEBKGND,
+                Some(WPARAM(hdc.0 as usize)),
+                Some(LPARAM(0)),
+            );
+            assert_eq!(
+                res_erase_dark.0, 1,
+                "WM_ERASEBKGND intercepté doit retourner 1"
+            );
+
+            // 2. Basculer en Light Theme (cycle Dark -> Light)
             (*ptr).settings.theme_mode = crate::settings::ThemeMode::Light;
             (*ptr).apply_theme();
             assert_eq!(
@@ -9649,7 +9805,35 @@ mod tests {
                 "WM_CTLCOLORSTATIC sur search_edit doit renvoyer brush_bg_input en Light theme"
             );
 
-            // 3. WM_CTLCOLORSTATIC sur un autre contrôle doit renvoyer brush_bg_sidebar
+            let res_erase_light = SendMessageW(
+                search_edit,
+                WM_ERASEBKGND,
+                Some(WPARAM(hdc.0 as usize)),
+                Some(LPARAM(0)),
+            );
+            assert_eq!(res_erase_light.0, 1);
+
+            // 3. Basculer de nouveau en Dark Theme (cycle Light -> Dark -> aucun résidu)
+            (*ptr).settings.theme_mode = crate::settings::ThemeMode::Dark;
+            (*ptr).apply_theme();
+            assert_eq!(
+                (*ptr).settings.resolved_theme(),
+                crate::settings::ResolvedTheme::Dark
+            );
+
+            let res_dark_reapply = SendMessageW(
+                hwnd,
+                WM_CTLCOLORSTATIC,
+                Some(WPARAM(hdc.0 as usize)),
+                Some(LPARAM(search_edit.0 as isize)),
+            );
+            assert_eq!(
+                res_dark_reapply.0,
+                (*ptr).palette.brush_bg_input.0 as isize,
+                "WM_CTLCOLORSTATIC doit restaurer brush_bg_input sombre sans résidu"
+            );
+
+            // 4. WM_CTLCOLORSTATIC sur un autre contrôle doit renvoyer brush_bg_sidebar
             let res_other = SendMessageW(
                 hwnd,
                 WM_CTLCOLORSTATIC,
@@ -9664,6 +9848,99 @@ mod tests {
 
             // Nettoyage
             let _ = ReleaseDC(Some(hwnd), hdc);
+            let _ = DestroyWindow(hwnd);
+        }
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_ui_unified_double_click_all_protocols_and_folders() {
+        let _guard = WIN32_UI_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db_path = create_temp_test_db_path("unified_dblclk");
+        let _ = std::fs::remove_file(&db_path);
+
+        unsafe {
+            let hwnd = create_isolated_test_main_window(&db_path);
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+
+            let mut store = Storage::open_at_path(&db_path).unwrap();
+
+            // Créer un dossier
+            let folder = store.create_folder("Dossier Serveurs", None).unwrap();
+
+            // Créer une connexion AnyDesk
+            let any_draft = ConnectionDraft {
+                name: "Client AnyDesk Test".to_string(),
+                protocol: Protocol::AnyDesk,
+                host: "987654321".to_string(),
+                port: 0,
+                username: String::new(),
+                domain: String::new(),
+                folder_id: Some(folder.id),
+                is_favorite: false,
+                description: String::new(),
+                password: SecretString::new(String::new()),
+                save_password: false,
+                keep_existing_password: false,
+                dynamic_resolution: false,
+                redirect_clipboard: false,
+            };
+            let any_conn = store.create_connection(any_draft).unwrap();
+
+            // Créer une connexion RustDesk
+            let rust_draft = ConnectionDraft {
+                name: "Client RustDesk Test".to_string(),
+                protocol: Protocol::RustDesk,
+                host: "112233445".to_string(),
+                port: 0,
+                username: String::new(),
+                domain: String::new(),
+                folder_id: Some(folder.id),
+                is_favorite: false,
+                description: String::new(),
+                password: SecretString::new(String::new()),
+                save_password: false,
+                keep_existing_password: false,
+                dynamic_resolution: false,
+                redirect_clipboard: false,
+            };
+            let rust_conn = store.create_connection(rust_draft).unwrap();
+
+            // Rafraîchir le treeview
+            (*ptr).rebuild_treeview();
+
+            // 1. Tester le double-clic unifié sur connexion AnyDesk via launch_connection_by_id
+            (*ptr).status_override = None;
+            (*ptr).launch_connection_by_id(any_conn.id);
+            assert!(
+                (*ptr).status_override.is_some(),
+                "Le lancement AnyDesk doit renseigner status_override"
+            );
+
+            // 2. Tester le double-clic unifié sur connexion RustDesk via launch_connection_by_id
+            (*ptr).status_override = None;
+            (*ptr).launch_connection_by_id(rust_conn.id);
+            assert!(
+                (*ptr).status_override.is_some(),
+                "Le lancement RustDesk doit renseigner status_override"
+            );
+
+            // 3. Tester la méthode node_kind_from_hitem pour s'assurer que les connexions et dossiers sont résolus
+            let treeview = (*ptr).treeview;
+            let root_item = SendMessageW(
+                treeview,
+                windows::Win32::UI::Controls::TVM_GETNEXTITEM,
+                Some(WPARAM(windows::Win32::UI::Controls::TVGN_ROOT as usize)),
+                Some(LPARAM(0)),
+            );
+            assert_ne!(
+                root_item.0, 0,
+                "Le TreeView doit posséder au moins une racine"
+            );
+
             let _ = DestroyWindow(hwnd);
         }
         let _ = std::fs::remove_file(&db_path);

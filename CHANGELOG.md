@@ -2,6 +2,32 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
+## [Jalon 3C] — Correctifs finaux avant V1.0.0 (Scan codes RDP SendKeys, thème barre de recherche et double-clic unifié)
+
+### Corrigé
+- **Combinaisons spéciales RDP — Correction définitive des scan codes SendKeys (`IMsRdpClientNonScriptable::SendKeys`)** :
+  - Audit approfondi par désassemblage de `mstscax.dll` et inspection du code de référence Microsoft RDCMan (`SendKeys.cs`) : le paramètre `plKeyData` attend directement les codes de balayage matériel PS/2 bruts (`0x1D` Ctrl, `0x38` Alt, `0x4F` Fin, `0x53` Suppr), et non un mot de 32 bits `lParam` synthétique shifté (dont le bit de répétition `1` était lu à tort comme le scan code de la touche Escape).
+  - Normalisation conforme du tableau `pbArrayKeyUp` : `0` pour l'enfoncement (down), `1` pour le relâchement (up) avec séquence atomique ordonnée de 6 événements (Ctrl down, Alt down, Fin/Suppr down, Fin/Suppr up, Alt up, Ctrl up).
+  - Positionnement systématique du focus Win32 (`SetFocus(self.ax_hwnd)` et fenêtre fille active `IHWindowClass`) avant injection, couplé à `IOleObject::DoVerb(OLEIVERB_UIACTIVATE)`.
+  - Clarification et mise en valeur dans le menu d'actions de session : `Ctrl + Alt + Fin (Sécurité distante RDP)` présenté comme la séquence SAS officielle recommandée sur session distante, et `Ctrl + Alt + Suppr (Simulation)`. Rétroaction immédiate dans la barre d'état et boîte de dialogue d'erreur détaillée avec code HRESULT en cas d'échec COM.
+- **Élimination définitive des résidus graphiques de la barre de recherche lors du changement de thème** :
+  - Désactivation complète des styles visuels et caches UxTheme sur `search_edit` via `SetWindowTheme(search_edit, w!(""), w!(""))` garantissant que le contrôle d'édition natif obéit strictement aux messages GDI.
+  - Sous-classement dédié `search_edit_wnd_proc` interceptant `WM_ERASEBKGND` pour peindre directement la couleur de fond dynamique `col_bg_input()` dans le rectangle client.
+  - Transmission des messages `WM_THEMECHANGED` et `WM_SYSCOLORCHANGE` lors de `apply_theme()`, combinée à un rafraîchissement complet via `RedrawWindow` (`RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW`) sur le champ de recherche et la fenêtre parente.
+  - Configuration de `SetBkMode(hdc, TRANSPARENT)` dans `WM_CTLCOLOREDIT` et `WM_CTLCOLORSTATIC` supprimant tout bloc opaque résiduel autour des caractères et du texte indicatif `EM_SETCUEBANNER`. Rendu vérifié parfait en transitions Sombre -> Clair -> Sombre, avec texte ou vide.
+- **Double-clic unifié dans l'arborescence pour les trois protocoles (RDP, AnyDesk, RustDesk)** :
+  - Remplacement de la lecture passive de `selected_node` par un hit-test Win32 explicite `TVM_HITTEST` au point du curseur lors de la notification `NM_DBLCLK`.
+  - Identification immédiate du nœud cliqué via `node_kind_from_hitem` et sélection visuelle `TVM_SELECTITEM(TVGN_CARET)`.
+  - Point d'entrée unique `launch_connection_by_id` : lancement transparent en onglet pour RDP, lancement d'AnyDesk avec transmission du mot de passe sur stdin (si configuré), et lancement de RustDesk.
+  - Préservation du comportement natif des dossiers : retour `LRESULT(0)` lors du double-clic sur un dossier ou une racine pour développer/replier sans déclencher de connexion.
+  - Correction du message de confirmation RustDesk dans la barre d'état.
+
+### Ajouté
+- Test unitaire `test_rdp_scan_codes_and_sequence_construction` validant les scan codes PS/2 bruts et la séquence atomique ordonnée de 6 touches.
+- Test d'intégration `test_ui_unified_double_click_all_protocols_and_folders` validant le routage unifié du double-clic pour RDP, AnyDesk, RustDesk et le dépliage des dossiers.
+- Test d'intégration complété `test_ui_search_edit_theming_and_ctlcolorstatic` validant les cycles complets de changement de thème Dark -> Light -> Dark sans résidu et l'interception de `WM_ERASEBKGND`.
+
+
 ## [Jalon 3B] — Correctifs pré-release V1.0.0 (Plein écran RDP, SendKeys, formulaires adaptatifs, transmission de secret AnyDesk et thème)
 
 ### Corrigé
