@@ -1,0 +1,35 @@
+[package]
+name = "malvision"
+version = "0.1.0"
+edition = "2024"
+description = "Application native Windows 11 x64 de gestion de connexions distantes (RDP intégré, AnyDesk, RustDesk)"
+authors = ["Malvirae"]
+publish = false
+
+[[bin]]
+name = "Malvision"
+path = "src/main.rs"
+
+[dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = "0.61"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

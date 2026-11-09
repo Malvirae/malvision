@@ -1,0 +1,25 @@
+# Compiled output
+/target/
+**/*.rs.bk
+*.pdb
+*.exe
+*.dll
+*.lib
+*.exp
+
+# Cargo lock (optional for bin, kept out of ignore so builds are reproducible, but ignore temp files)
+# Cargo.lock is tracked for binary applications
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Sensitive / local configuration
+*.rdp
+.env
+*.secret
+*.key
+*.pem
