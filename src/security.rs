@@ -79,6 +79,22 @@ pub fn zeroize_bytes(buf: &mut Vec<u8>) {
     buf.clear();
 }
 
+/// Convertit une tranche d'octets en chaîne hexadécimale en minuscules.
+pub fn bytes_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Décode une chaîne hexadécimale en vecteur d'octets.
+pub fn hex_to_bytes(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
 /// Chiffre une chaîne secrète avec Windows DPAPI (portée utilisateur courant, sans UI).
 pub fn encrypt_secret(plaintext: &str) -> Result<Vec<u8>, String> {
     if plaintext.is_empty() {
@@ -437,5 +453,18 @@ mod tests {
             hmac3, "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe",
             "Vecteur officiel RFC 4231 Cas 3"
         );
+    }
+
+    #[test]
+    fn test_bytes_to_hex_and_hex_to_bytes() {
+        let original = b"Malvision_Security_Bytes_12345";
+        let hex = bytes_to_hex(original);
+        assert_eq!(hex.len(), original.len() * 2);
+        let decoded = hex_to_bytes(&hex).expect("Décodage hex valide");
+        assert_eq!(decoded, original);
+
+        assert!(hex_to_bytes("odd").is_none());
+        assert!(hex_to_bytes("zz").is_none());
+        assert_eq!(hex_to_bytes("").unwrap(), Vec::<u8>::new());
     }
 }

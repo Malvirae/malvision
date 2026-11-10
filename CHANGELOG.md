@@ -22,11 +22,17 @@ Toutes les évolutions notables du projet **Malvision** sont documentées dans c
   - **Règles de sécurité sur la cible** : restriction stricte aux fichiers `.exe` et interdiction absolue de cibler les répertoires système Windows (`SystemRoot`).
   - **Confirmation de santé explicite (Health Check)** : émission d'un signal de disponibilité explicite (événement Win32 `Local\Malvision_Health_<token>` et fichier drapeau) après initialisation complète de tous les composants critiques (COM/ActiveX, base de données, fenêtre principale).
   - **Rollback automatique vérifié cryptographiquement** : en cas de plantage, de fermeture prématurée ou de gel au démarrage du nouveau binaire, le processus enfant est terminé pour libérer les verrous Windows, l'ancienne version (`Malvision.exe.bak`) est restaurée en place avec contrôle strict de l'empreinte SHA-256 originale attendue, et l'application est relancée.
-  - **Sécurisation absolue de la récupération différée (`pending_recovery.json`)** : validation contre l'exécutable courant, rejet des liens symboliques et des répertoires système, dérivation stricte du chemin de sauvegarde et vérification cryptographique avant toute opération sur les fichiers.
+  - **Récupération différée par processus auxiliaire distinct & Authentification DPAPI (`pending_recovery.json`)** :
+    - Élimination de toute tentative de remplacement d'un exécutable Windows en cours d'exécution : lorsqu'une récupération est requise au démarrage, Malvision délègue l'opération à `malvision_updater.exe --apply-recovery <parent_pid> <parent_creation_filetime>` et quitte immédiatement pour déverrouiller son image.
+    - Le helper auxiliaire attend la libération effective du processus principal via `WaitForSingleObject` avant de restaurer le backup `.bak`.
+    - Authentification absolue par Windows DPAPI (`CryptProtectData`) : la cible et l'empreinte originale sont extraites d'un blob chiffré non falsifiable, interdisant toute modification locale du JSON par un tiers.
+    - Persistance de la directive : `pending_recovery.json` n'est supprimée qu'après confirmation cryptographique de la restauration.
+    - Procédure de secours manuelle documentée dans un message d'erreur natif explicite en cas d'impossibilité technique de restauration automatique.
   - **Conservation du backup et nettoyage sécurisé** : le backup `.bak` est rigoureusement conservé jusqu'à la confirmation de santé du nouveau processus. Purge préventive sécurisée au démarrage normal.
 
 ### Testé
-- Suite de tests automatisés étendue à **88 tests (100 % passants)** :
+- Suite de tests automatisés étendue à **90 tests (100 % passants)** :
+  - `test_bytes_to_hex_and_hex_to_bytes` : conversion bidirectionnelle hexadécimale vérifiée.
   - `test_bcrypt_gen_random_bytes` : génération aléatoire CSPRNG sans motif prévisible.
   - `test_constant_time_compare` : comparaison en temps constant insensible aux attaques par canal auxiliaire.
   - `test_hmac_sha256_rfc4231_official_vectors` : validation avec les vecteurs de test officiels RFC 4231 Cas 1, 2 et 3.
@@ -35,7 +41,7 @@ Toutes les évolutions notables du projet **Malvision** sont documentées dans c
   - `test_auth_token_expiration_logic` : contrôle de la fenêtre d'expiration de 5 minutes.
   - `test_target_exe_safety_rules` : validation de l'extension `.exe` et exclusion des dossiers système Windows.
   - `test_perform_rollback_and_verify_success_and_failure` : restauration vérifiée par SHA-256 du backup et gestion des erreurs.
-  - `test_pending_recovery_persistence_and_cleanup` et `test_pending_recovery_negative_scenarios_rejected` : validation stricte et rejet des directives altérées.
+  - `test_pending_recovery_persistence_and_cleanup` et `test_pending_recovery_negative_scenarios_rejected` : scellement DPAPI, persistance et rejet des directives altérées.
   - `test_health_token_registration_and_notification` : cycle d'enregistrement et d'émission du signal de santé.
   - `test_in_use_file_lock_reproduction_and_wait` : reproduction du verrouillage de fichier en cours d'exécution sous Windows et libération de handle.
 

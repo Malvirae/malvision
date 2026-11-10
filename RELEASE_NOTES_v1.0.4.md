@@ -4,8 +4,8 @@
 **Version :** `1.0.4`  
 **Binaire officiel :** `Malvision.exe`  
 **Architecture :** Windows 11 x64 (binaire portable autonome, sans dépendances externes)  
-**Empreinte SHA-256 :** `3e0b40c5d622d5c0d41fa828204d4a5a2d78bc69cb9ef8fcef6aee26b304b337`  
-**Taille :** 5 276 160 octets  
+**Empreinte SHA-256 :** `c5c5d80cb3f8a0a37ffd1abd47becadcde2976d2ddff2dabf8361d9459019238`  
+**Taille :** 5 282 816 octets  
 
 ---
 
@@ -23,11 +23,12 @@ Malvision résout définitivement la contrainte historique du verrouillage d'ima
 - **Secret non exposé sur le disque** : le jeton d'authentification secret (`auth_token`) de 256 bits généré par `BCryptGenRandom` n'est jamais écrit dans le fichier manifeste JSON sur le disque ; il est transmis exclusivement par argument mémoire au processus auxiliaire éphémère.
 - **Vérification obligatoire du processus parent & anti-recyclage de PID** : contrôle obligatoire et strict du chemin d'image (`QueryFullProcessImageNameW`) et validation de l'horodatage de création du processus (`GetProcessTimes`), interdisant tout détournement de processus ou réutilisation de PID.
 - **Restauration et Rollback cryptographiquement vérifiés** : toute restauration de l'ancienne version (`Malvision.exe.bak`) contrôle obligatoirement l'empreinte SHA-256 d'origine avant et après la restauration.
-- **Sécurisation absolue de la récupération différée (`pending_recovery.json`)** :
-  - Validation stricte contre l'exécutable courant (`std::env::current_exe()`).
-  - Dérivation stricte du chemin de sauvegarde (aucun chemin arbitraire accepté).
-  - Contrôle d'exclusion des répertoires système (`SystemRoot`) et rejet catégorique des liens symboliques ou jonctions.
-  - Vérification cryptographique de l'empreinte du backup avant toute opération sur les fichiers.
+- **Sécurisation absolue et processus auxiliaire de récupération différée (`pending_recovery.json`)** :
+  - **Ne tente jamais de modifier un exécutable Windows en cours d'exécution** : lorsqu'une récupération est requise au démarrage, Malvision délègue l'opération à un processus relais éphémère (`--apply-recovery <parent_pid> <parent_creation_filetime>`) et quitte immédiatement pour libérer son image.
+  - **Attente de libération d'image** : le processus auxiliaire attend la fermeture effective du processus principal via `WaitForSingleObject` avant toute manipulation de fichiers.
+  - **Authentification Windows DPAPI de la directive** : la directive est scellée par un blob DPAPI chiffré (`CryptProtectData`), garantissant que le chemin cible et le SHA-256 attendu proviennent exclusivement d'une source de confiance liée au compte utilisateur Windows et ne peuvent être falsifiés.
+  - **Persistance garantie jusqu'à confirmation** : la directive n'est supprimée qu'après confirmation cryptographique de la restauration du binaire.
+  - **Procédure manuelle documentée** : en cas d'impossibilité technique de restauration automatique, une boîte de dialogue explicite détaille la procédure pas-à-pas de récupération manuelle avec les chemins exacts.
 - **Confirmation explicite de santé (Health Check)** :
   - Surveillance active par événement Win32 dédié (`Local\Malvision_Health_<token>`) et drapeau fichier.
   - Le binaire précédent (`Malvision.exe.bak`) est conservé jusqu'à validation complète de l'initialisation de l'application (DPI, single-instance, COM/ActiveX, SQLite, création de fenêtre).
@@ -41,12 +42,16 @@ Malvision résout définitivement la contrainte historique du verrouillage d'ima
 
 | Fichier | Taille (octets) | Empreinte SHA-256 |
 | :--- | :--- | :--- |
-| `Malvision.exe` | `5 276 160` | `3e0b40c5d622d5c0d41fa828204d4a5a2d78bc69cb9ef8fcef6aee26b304b337` |
+| `Malvision.exe` | `5 282 816` | `c5c5d80cb3f8a0a37ffd1abd47becadcde2976d2ddff2dabf8361d9459019238` |
 
 ---
 
 ## Validation et Tests
 
-- **88 tests unitaires et d'intégration réussis (100 % passants)** incluant les vecteurs officiels RFC 4231 pour HMAC-SHA-256.
+- **90 tests unitaires et d'intégration réussis (100 % passants)** incluant les vecteurs officiels RFC 4231 pour HMAC-SHA-256, tests DPAPI, et validation de récupération différée.
 - **Clippy et rustfmt stricts** sans avertissements (`-D warnings`).
-- **Validation réelle sous Windows 11 x64** : tests de qualification nominaux, rejet des manifestes altérés et vérification réelle du rollback après crash.
+- **Validation réelle sous Windows 11 x64** :
+  1. Scénario nominal avec Health Check Win32.
+  2. Scénario d'anti-altération de manifeste (Anti-Tampering).
+  3. Scénario de crash au démarrage avec rollback vérifié.
+  4. Scénario de récupération différée avec exécutable verrouillé et binaire restauré via processus relais auxiliaire.

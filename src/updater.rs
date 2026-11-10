@@ -1,7 +1,8 @@
 //! Vérification des mises à jour via GitHub Releases et téléchargement sécurisé des assets.
 
 use crate::security::{
-    compute_file_sha256, compute_hmac_sha256, constant_time_compare, generate_crypto_random_bytes,
+    bytes_to_hex, compute_file_sha256, compute_hmac_sha256, constant_time_compare, decrypt_secret,
+    encrypt_secret, generate_crypto_random_bytes, hex_to_bytes,
 };
 use std::fmt;
 use std::os::windows::io::AsRawHandle;
@@ -732,6 +733,35 @@ fn show_native_error(msg: &str) {
     }
 }
 
+/// Affiche une boîte de dialogue d'erreur de récupération native Windows.
+fn show_native_recovery_error(msg: &str) {
+    let title: Vec<u16> = "Malvision — Récupération\0".encode_utf16().collect();
+    let text: Vec<u16> = format!("{msg}\0").encode_utf16().collect();
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+/// Affiche une boîte de dialogue d'erreur explicite avec documentation de la procédure de récupération manuelle.
+pub fn show_manual_recovery_error(target: &Path) {
+    let target_dir = target.parent().unwrap_or_else(|| Path::new("."));
+    let target_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Malvision.exe");
+    let msg = format!(
+        "Échec de la restauration automatique de Malvision.\n\n        L'exécutable n'a pas pu être restauré automatiquement à l'emplacement :\n        {}\n\n        Procédure de récupération manuelle :\n        1. Assurez-vous que Malvision est complètement fermé.\n        2. Ouvrez le dossier :\n        {}\n        3. Supprimez l'éventuel fichier endommagé '{target_name}'.\n        4. Renommez le fichier de sauvegarde '{target_name}.bak' en '{target_name}'.\n        5. Relancez Malvision.",
+        target.display(),
+        target_dir.display(),
+    );
+    show_native_recovery_error(&msg);
+}
+
 /// Prépare le binaire auxiliaire et le manifeste de mise à jour sécurisé.
 pub fn prepare_update_helper(
     new_exe_path: &Path,
@@ -915,23 +945,83 @@ pub fn perform_rollback_and_verify(
     Ok(())
 }
 
-/// Enregistre une directive de récupération différée dans `%LOCALAPPDATA%\Malvision\updates\pending_recovery.json`.
-/// Note de sécurité : le chemin de backup n'est jamais consigné arbitrairement ; il sera obligatoirement dérivé
-/// du chemin de l'exécutable légitime lors de la reprise au redémarrage.
-pub fn record_pending_recovery(target: &Path, original_target_sha256: &str) {
-    if let Ok(updates_dir) = get_updates_temp_dir() {
-        let recovery_path = updates_dir.join("pending_recovery.json");
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let val = serde_json::json!({
-            "target_exe_path": target.to_string_lossy(),
-            "expected_backup_sha256": original_target_sha256,
-            "created_at_epoch_secs": now,
-        });
-        let _ = std::fs::write(&recovery_path, val.to_string());
+/// Structure de directive de récupération différée authentifiée cryptographiquement par Windows DPAPI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingRecoveryDirective {
+    pub target_exe_path: PathBuf,
+    pub expected_backup_sha256: String,
+    pub created_at_epoch_secs: u64,
+}
+
+/// Analyse et authentifie une directive de récupération à partir de son blob DPAPI.
+/// Le SHA-256 et la cible sont impérativement extraits du blob chiffré/signé par DPAPI.
+pub fn parse_and_authenticate_recovery_directive(
+    content: &str,
+) -> Result<PendingRecoveryDirective, String> {
+    let v: serde_json::Value = serde_json::from_str(content)
+        .map_err(|e| format!("Format JSON de récupération invalide : {e}"))?;
+
+    let auth_blob_hex = v["auth_blob"]
+        .as_str()
+        .ok_or_else(|| "Champ auth_blob manquant".to_string())?;
+
+    let auth_blob_bytes = hex_to_bytes(auth_blob_hex)
+        .ok_or_else(|| "Encodage hexadécimal de auth_blob invalide".to_string())?;
+
+    let decrypted = decrypt_secret(&auth_blob_bytes)
+        .map_err(|e| format!("Échec d'authentification DPAPI de la directive : {e}"))?;
+
+    let payload = decrypted.as_str();
+    let parts: Vec<&str> = payload.split('|').collect();
+    if parts.len() != 3 {
+        return Err("Payload d'authentification DPAPI invalide".to_string());
     }
+
+    let target_str = parts[0];
+    let expected_backup_sha256 = parts[1].to_string();
+    let created_at_epoch_secs = parts[2]
+        .parse::<u64>()
+        .map_err(|_| "Horodatage d'authentification invalide".to_string())?;
+
+    Ok(PendingRecoveryDirective {
+        target_exe_path: PathBuf::from(target_str),
+        expected_backup_sha256,
+        created_at_epoch_secs,
+    })
+}
+
+/// Enregistre une directive de récupération différée scellée cryptographiquement par Windows DPAPI
+/// dans `%LOCALAPPDATA%\Malvision\updates\pending_recovery.json`.
+/// Note de sécurité : le chemin et le SHA-256 sont protégés dans un blob DPAPI non falsifiable.
+pub fn record_pending_recovery(target: &Path, original_target_sha256: &str) {
+    let Ok(updates_dir) = get_updates_temp_dir() else {
+        return;
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let payload = format!(
+        "{}|{}|{}",
+        target.to_string_lossy(),
+        original_target_sha256,
+        now
+    );
+    let auth_blob_bytes = match encrypt_secret(&payload) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    let auth_blob = bytes_to_hex(&auth_blob_bytes);
+
+    let recovery_path = updates_dir.join("pending_recovery.json");
+    let val = serde_json::json!({
+        "target_exe_path": target.to_string_lossy(),
+        "expected_backup_sha256": original_target_sha256,
+        "created_at_epoch_secs": now,
+        "auth_blob": auth_blob,
+    });
+    let _ = std::fs::write(&recovery_path, val.to_string());
 }
 
 /// Exécute la logique du processus auxiliaire `--apply-update <token>`.
@@ -1317,64 +1407,43 @@ pub fn notify_startup_healthy() {
     }
 }
 
-/// Vérifie et applique une restauration différée hautement sécurisée si un rollback immédiat avait été bloqué par un verrou.
-/// Règles de sécurité strictes :
-/// 1. La cible doit correspondre strictement à l'exécutable Malvision en cours d'exécution.
-/// 2. Le chemin backup est strictement dérivé du binaire courant (.exe.bak) et n'est jamais lu comme un chemin arbitraire.
-/// 3. Rejet catégorique si la cible ou le backup se situe dans le répertoire Windows (SystemRoot) ou est un lien symbolique.
-/// 4. Vérification cryptographique préalable : l'empreinte SHA-256 du backup doit correspondre exactement à `expected_backup_sha256`.
-/// 5. En cas de doute ou d'anomalie, la directive est supprimée sans modification des fichiers du disque.
-pub fn check_and_apply_pending_recovery() {
+/// Vérifie s'il existe une directive de récupération différée authentifiée par DPAPI.
+/// Règles de fonctionnement et de sécurité strictes :
+/// 1. Ne tente JAMAIS de modifier `current_exe` pendant qu'il est en cours d'exécution.
+/// 2. Délègue la restauration à un processus auxiliaire distinct (`malvision_updater.exe --apply-recovery <pid> <creation_ft>`).
+/// 3. Retourne `true` si une récupération est prise en charge pour que le processus principal quitte immédiatement,
+///    libérant ainsi le verrou de fichier Windows.
+/// 4. Ne supprime JAMAIS une directive valide tant que la restauration n'est pas confirmée avec succès.
+pub fn check_and_apply_pending_recovery() -> bool {
     let Ok(updates_dir) = get_updates_temp_dir() else {
-        return;
+        return false;
     };
     let recovery_file = updates_dir.join("pending_recovery.json");
     if !recovery_file.exists() {
-        return;
+        return false;
     }
-
-    let cleanup_recovery = || {
-        let _ = std::fs::remove_file(&recovery_file);
-    };
 
     let content = match std::fs::read_to_string(&recovery_file) {
         Ok(c) => c,
-        Err(_) => {
-            cleanup_recovery();
-            return;
-        }
+        Err(_) => return false,
     };
 
-    let v: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(val) => val,
+    let directive = match parse_and_authenticate_recovery_directive(&content) {
+        Ok(d) => d,
         Err(_) => {
-            cleanup_recovery();
-            return;
+            // Directive falsifiée, altérée ou corrompue : refus strict
+            return false;
         }
-    };
-
-    let (Some(target_str), Some(expected_backup_sha256)) = (
-        v["target_exe_path"].as_str(),
-        v["expected_backup_sha256"].as_str(),
-    ) else {
-        cleanup_recovery();
-        return;
     };
 
     let current_exe = match std::env::current_exe() {
         Ok(p) => p,
-        Err(_) => {
-            cleanup_recovery();
-            return;
-        }
+        Err(_) => return false,
     };
 
-    let target_path = PathBuf::from(target_str);
-
-    // 1. La cible dans la directive DOIT correspondre strictement à l'exécutable courant
-    if !is_same_file_path(&target_path, &current_exe) {
-        cleanup_recovery();
-        return;
+    // 1. La cible authentifiée DOIT correspondre strictement à l'exécutable courant
+    if !is_same_file_path(&directive.target_exe_path, &current_exe) {
+        return false;
     }
 
     // 2. Extension .exe obligatoire
@@ -1383,16 +1452,14 @@ pub fn check_and_apply_pending_recovery() {
         .and_then(|s| s.to_str())
         .unwrap_or("");
     if !ext.eq_ignore_ascii_case("exe") {
-        cleanup_recovery();
-        return;
+        return false;
     }
 
     // 3. Protection répertoire système Windows
     if let Ok(windir) = std::env::var("SystemRoot") {
         let win_path = PathBuf::from(windir);
         if current_exe.starts_with(&win_path) {
-            cleanup_recovery();
-            return;
+            return false;
         }
     }
 
@@ -1400,61 +1467,192 @@ pub fn check_and_apply_pending_recovery() {
     if let Ok(meta) = std::fs::symlink_metadata(&current_exe)
         && meta.file_type().is_symlink()
     {
-        cleanup_recovery();
-        return;
+        return false;
     }
 
     // 5. Dérivation stricte du chemin backup (jamais de chemin arbitraire externe)
     let backup_path = current_exe.with_extension("exe.bak");
     if !backup_path.exists() {
-        cleanup_recovery();
-        return;
+        show_manual_recovery_error(&current_exe);
+        return false;
     }
 
     if let Ok(meta) = std::fs::symlink_metadata(&backup_path)
         && meta.file_type().is_symlink()
     {
-        cleanup_recovery();
-        return;
+        show_manual_recovery_error(&current_exe);
+        return false;
     }
 
-    // 6. Vérification cryptographique OBLIGATOIRE de la sauvegarde avant toute opération sur les fichiers
+    // 6. Vérification cryptographique préalable : l'empreinte du backup doit correspondre au SHA-256 authentifié DPAPI
     let actual_backup_sha256 = match compute_file_sha256(&backup_path) {
         Ok(h) => h,
         Err(_) => {
-            cleanup_recovery();
+            show_manual_recovery_error(&current_exe);
+            return false;
+        }
+    };
+
+    if !constant_time_compare(&actual_backup_sha256, &directive.expected_backup_sha256) {
+        show_manual_recovery_error(&current_exe);
+        return false;
+    }
+
+    // 7. Préparation et lancement du helper auxiliaire distinct
+    let helper_exe = updates_dir.join("malvision_updater.exe");
+    if helper_exe.exists() {
+        let _ = std::fs::remove_file(&helper_exe);
+    }
+    let _ = std::fs::copy(&current_exe, &helper_exe);
+    if !helper_exe.exists() {
+        show_manual_recovery_error(&current_exe);
+        return false;
+    }
+
+    let parent_pid = std::process::id();
+    let mut creation_ft = FILETIME::default();
+    let mut exit_ft = FILETIME::default();
+    let mut kernel_ft = FILETIME::default();
+    let mut user_ft = FILETIME::default();
+    let times_res = unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation_ft,
+            &mut exit_ft,
+            &mut kernel_ft,
+            &mut user_ft,
+        )
+    };
+    if times_res.is_err() {
+        show_manual_recovery_error(&current_exe);
+        return false;
+    }
+    let parent_creation_filetime =
+        ((creation_ft.dwHighDateTime as u64) << 32) | (creation_ft.dwLowDateTime as u64);
+
+    let mut cmd = std::process::Command::new(&helper_exe);
+    cmd.arg("--apply-recovery")
+        .arg(parent_pid.to_string())
+        .arg(parent_creation_filetime.to_string());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    match cmd.spawn() {
+        Ok(_) => true,
+        Err(_) => {
+            show_manual_recovery_error(&current_exe);
+            false
+        }
+    }
+}
+
+/// Exécute la logique du processus auxiliaire `--apply-recovery <parent_pid> <parent_creation_filetime>`.
+/// Attend la libération complète du processus principal verrouillé, applique la restauration et relance l'application.
+pub fn run_apply_recovery_mode(args: &[String]) {
+    if args.len() < 2 {
+        eprintln!("Arguments insuffisants pour --apply-recovery.");
+        return;
+    }
+    let parent_pid: u32 = match args[0].parse() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let parent_creation_filetime: u64 = match args[1].parse() {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+
+    let updates_dir = match get_updates_temp_dir() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let recovery_file = updates_dir.join("pending_recovery.json");
+    if !recovery_file.exists() {
+        return;
+    }
+
+    let content = match std::fs::read_to_string(&recovery_file) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let directive = match parse_and_authenticate_recovery_directive(&content) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+
+    let target = directive.target_exe_path;
+    let backup = target.with_extension("exe.bak");
+
+    // Lier et contrôler le processus parent
+    let parent_handle = match unsafe {
+        OpenProcess(
+            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            false,
+            parent_pid,
+        )
+    } {
+        Ok(h) if !h.is_invalid() => h,
+        _ => {
+            show_manual_recovery_error(&target);
             return;
         }
     };
 
-    if !constant_time_compare(&actual_backup_sha256, expected_backup_sha256) {
-        // Sauvegarde non authentique ou corrompue : refus strict sans altération du binaire
-        cleanup_recovery();
+    let mut p_creation = FILETIME::default();
+    let mut p_exit = FILETIME::default();
+    let mut p_kernel = FILETIME::default();
+    let mut p_user = FILETIME::default();
+    let times_res = unsafe {
+        GetProcessTimes(
+            parent_handle,
+            &mut p_creation,
+            &mut p_exit,
+            &mut p_kernel,
+            &mut p_user,
+        )
+    };
+    if times_res.is_err() {
+        let _ = unsafe { CloseHandle(parent_handle) };
+        show_manual_recovery_error(&target);
+        return;
+    }
+    let actual_creation =
+        ((p_creation.dwHighDateTime as u64) << 32) | (p_creation.dwLowDateTime as u64);
+    if actual_creation != parent_creation_filetime {
+        let _ = unsafe { CloseHandle(parent_handle) };
+        show_manual_recovery_error(&target);
         return;
     }
 
-    // 7. Restauration avec boucle de réessai
-    let mut restored = false;
-    for _ in 0..15 {
-        let _ = std::fs::remove_file(&current_exe);
-        if std::fs::rename(&backup_path, &current_exe).is_ok() {
-            restored = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(200));
+    // Attendre la fin effective du processus principal (jusqu'à 30 secondes)
+    let wait_res = unsafe { WaitForSingleObject(parent_handle, 30_000) };
+    let _ = unsafe { CloseHandle(parent_handle) };
+    if wait_res.0 != 0 {
+        show_manual_recovery_error(&target);
+        return;
     }
 
-    if restored {
-        // Contrôle cryptographique final du binaire restauré
-        if let Ok(restored_sha256) = compute_file_sha256(&current_exe)
-            && constant_time_compare(&restored_sha256, expected_backup_sha256)
-        {
-            cleanup_recovery();
-            return;
-        }
-    }
+    // Laisser le temps à Windows de libérer les verrous d'image
+    std::thread::sleep(Duration::from_millis(200));
 
-    cleanup_recovery();
+    // Effectuer le rollback et vérifier l'intégrité de la restauration
+    let rollback_res =
+        perform_rollback_and_verify(&target, &backup, &directive.expected_backup_sha256);
+    if rollback_res.is_ok() {
+        // SUCCÈS CONFIRMÉ : SEULEMENT ICI la directive est supprimée !
+        let _ = std::fs::remove_file(&recovery_file);
+
+        // Relancer l'application Malvision restaurée
+        let _ = std::process::Command::new(&target).spawn();
+    } else {
+        // ÉCHEC : la directive n'est PAS supprimée et on affiche l'erreur documentée
+        show_manual_recovery_error(&target);
+    }
 }
 
 /// Nettoie les fichiers résiduels d'une mise à jour précédente lors d'un démarrage normal.
@@ -2072,40 +2270,50 @@ mod tests {
         fs::write(&backup, orig_bytes).unwrap();
         fs::write(&target, b"BROKEN_TARGET").unwrap();
         let expected_backup_sha256 = crate::security::compute_sha256(orig_bytes).unwrap();
+        let now = 1700000000u64;
 
-        // Enregistrer la directive de récupération
+        // Générer le blob authentifié DPAPI
+        let payload = format!(
+            "{}|{}|{}",
+            target.to_string_lossy(),
+            expected_backup_sha256,
+            now
+        );
+        let auth_blob_bytes = encrypt_secret(&payload).expect("Chiffrement DPAPI");
+        let auth_blob = bytes_to_hex(&auth_blob_bytes);
+
+        // Enregistrer la directive de récupération authentifiée
         let rec_json = serde_json::json!({
             "target_exe_path": target.to_string_lossy(),
             "expected_backup_sha256": expected_backup_sha256,
-            "created_at_epoch_secs": 1700000000u64,
+            "created_at_epoch_secs": now,
+            "auth_blob": auth_blob,
         });
         fs::write(&recovery_file, rec_json.to_string()).unwrap();
         assert!(recovery_file.exists());
 
-        // Simulation de validation stricte :
-        if let Ok(content) = fs::read_to_string(&recovery_file)
-            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&content)
-            && let (Some(t_str), Some(exp_sha)) = (
-                v["target_exe_path"].as_str(),
-                v["expected_backup_sha256"].as_str(),
-            )
-        {
-            let t = PathBuf::from(t_str);
-            let b = t.with_extension("exe.bak"); // dérivé obligatoirement
-            if b.exists() {
-                let actual_hash = crate::security::compute_file_sha256(&b).unwrap();
-                if crate::security::constant_time_compare(&actual_hash, exp_sha) {
-                    let _ = fs::remove_file(&t);
-                    if fs::rename(&b, &t).is_ok() {
-                        let _ = fs::remove_file(&recovery_file);
-                    }
-                }
-            }
-        }
+        // Authentifier la directive via DPAPI
+        let content = fs::read_to_string(&recovery_file).unwrap();
+        let directive =
+            parse_and_authenticate_recovery_directive(&content).expect("Directive DPAPI valide");
+        assert_eq!(directive.target_exe_path, target);
+        assert_eq!(directive.expected_backup_sha256, expected_backup_sha256);
+
+        // Vérification de la restauration
+        let b = directive.target_exe_path.with_extension("exe.bak");
+        assert!(b.exists());
+        let res = perform_rollback_and_verify(
+            &directive.target_exe_path,
+            &b,
+            &directive.expected_backup_sha256,
+        );
+        assert!(res.is_ok(), "Restauration vérifiée");
+        // Suppression confirmée seulement après succès
+        let _ = fs::remove_file(&recovery_file);
 
         assert!(
             !recovery_file.exists(),
-            "La directive doit être supprimée après récupération"
+            "La directive doit être supprimée après récupération confirmée"
         );
         assert!(!backup.exists(), "La sauvegarde a été restaurée en place");
         assert_eq!(
@@ -2135,33 +2343,58 @@ mod tests {
         fs::write(&target, initial_target_bytes).unwrap();
         fs::write(&backup, tampered_bytes).unwrap();
         let expected_sha256 = crate::security::compute_sha256(orig_bytes).unwrap();
+        let now = 1700000000u64;
 
-        // SCÉNARIO 1 : Empreinte de backup corrompue / divergente
-        let rec_json = serde_json::json!({
+        // SCÉNARIO 1 : Directive falsifiée sans blob DPAPI valide -> Rejet strict
+        let fake_json = serde_json::json!({
             "target_exe_path": target.to_string_lossy(),
             "expected_backup_sha256": expected_sha256,
-            "created_at_epoch_secs": 1700000000u64,
+            "created_at_epoch_secs": now,
+            "auth_blob": "00112233445566778899aabbccddeeff",
         });
-        fs::write(&recovery_file, rec_json.to_string()).unwrap();
-
-        let content = fs::read_to_string(&recovery_file).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
-        let exp_sha = v["expected_backup_sha256"].as_str().unwrap();
-        let actual_hash = crate::security::compute_file_sha256(&backup).unwrap();
-
-        // Le contrôle doit refuser strictement l'opération
         assert!(
-            !crate::security::constant_time_compare(&actual_hash, exp_sha),
-            "Le hash doit être détecté comme non conforme"
+            parse_and_authenticate_recovery_directive(&fake_json.to_string()).is_err(),
+            "Un faux auth_blob DPAPI doit être rejeté"
         );
-        // La cible et le backup ne doivent pas être altérés
+
+        // SCÉNARIO 2 : Directive authentifiée DPAPI mais fichier backup altéré
+        let payload = format!("{}|{}|{}", target.to_string_lossy(), expected_sha256, now);
+        let auth_blob_bytes = encrypt_secret(&payload).unwrap();
+        let auth_blob = bytes_to_hex(&auth_blob_bytes);
+
+        let valid_auth_json = serde_json::json!({
+            "target_exe_path": target.to_string_lossy(),
+            "expected_backup_sha256": expected_sha256,
+            "created_at_epoch_secs": now,
+            "auth_blob": auth_blob,
+        });
+        fs::write(&recovery_file, valid_auth_json.to_string()).unwrap();
+
+        let directive =
+            parse_and_authenticate_recovery_directive(&fs::read_to_string(&recovery_file).unwrap())
+                .unwrap();
+
+        // Le backup contient tampered_bytes, donc l'empreinte ne correspond pas
+        let actual_hash = crate::security::compute_file_sha256(&backup).unwrap();
+        assert!(
+            !constant_time_compare(&actual_hash, &directive.expected_backup_sha256),
+            "L'empreinte du backup doit être détectée comme altérée"
+        );
+
+        // La tentative de rollback doit échouer sans supprimer la directive ni toucher aux fichiers
+        let rb_res =
+            perform_rollback_and_verify(&target, &backup, &directive.expected_backup_sha256);
+        assert!(rb_res.is_err(), "Le rollback doit échouer");
+        assert!(
+            recovery_file.exists(),
+            "La directive NE doit PAS être supprimée si la restauration échoue"
+        );
         assert_eq!(fs::read(&target).unwrap(), initial_target_bytes);
         assert_eq!(fs::read(&backup).unwrap(), tampered_bytes);
 
-        // SCÉNARIO 2 : Cible divergente (tentative de ciblage d'un autre fichier)
-        let other_exe = temp_dir.join("OtherApp.exe");
+        // SCÉNARIO 3 : Cible système divergente
         let fake_target = PathBuf::from(r"C:\Windows\System32\cmd.exe");
-        assert!(!is_same_file_path(&fake_target, &other_exe));
+        assert!(!is_same_file_path(&fake_target, &target));
 
         let _ = fs::remove_file(&target);
         let _ = fs::remove_file(&backup);

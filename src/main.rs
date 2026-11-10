@@ -29,6 +29,10 @@ fn main() {
         updater::run_apply_update_mode(&args[2..]);
         return;
     }
+    if args.len() >= 2 && args[1] == "--apply-recovery" {
+        updater::run_apply_recovery_mode(&args[2..]);
+        return;
+    }
 
     // Réception du jeton de santé si Malvision a été relancé post-mise à jour
     if args.len() >= 3 && args[1] == "--health-check" {
@@ -36,7 +40,11 @@ fn main() {
     }
 
     // 1. Appliquer une éventuelle restauration différée si le rollback précédent était bloqué
-    updater::check_and_apply_pending_recovery();
+    // Si une récupération est enclenchée, le processus principal quitte immédiatement
+    // pour permettre au helper de restaurer l'image déverrouillée.
+    if updater::check_and_apply_pending_recovery() {
+        return;
+    }
 
     // 2. Nettoyage préventif des fichiers résiduels d'une éventuelle mise à jour précédente (.bak, helper)
     updater::cleanup_leftover_update_files();
