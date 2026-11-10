@@ -22,19 +22,29 @@ Toutes les évolutions notables du projet **Malvision** sont documentées dans c
   - Dans chaque dossier et à la racine : **connexions directes toujours affichées avant les sous-dossiers**.
   - Tri alphabétique insensible à la casse (A à Z) appliqué récursivement dans toute la hiérarchie.
   - Préservation intégrale des favoris, icônes de protocoles, expansion/repli des nœuds et double-clic pleine largeur.
-- **Tableau de bord : Section « Toutes les connexions » & Défilement vertical fluide** :
-  - Nouvelle section affichant toutes les connexions sous les connexions récentes, ordonnée selon la hiérarchie logique de l'arborescence.
-  - Cartes compactes Fluent (`hauteur = 56px`) en grille responsive (1 à 4 colonnes) avec badge protocole, nom en gras, étoile dorée, chemin du dossier et hôte / identifiant distant.
+- **En-tête : Badge de version dynamique de l'application** :
+  - Remplacement du badge statique `Win11` par le numéro de version de l'application (`v1.0.1`) à droite du titre « Malvision ».
+  - Largeur dynamique calculée via GDI (`DT_CALCRECT`) garantissant une adaptation automatique sans troncature pour les futures versions (`v1.0.2`, `v1.1.0`, etc.).
+  - Préservation du style officiel : fond bleu accent, texte blanc, coins arrondis, parfaitement intégré aux thèmes sombre, clair et système.
+- **Tableau de bord : Section « Toutes les connexions », Grille adaptative & Badges uniformisés** :
+  - Nouvelle section affichant toutes les connexions ordonnée selon la hiérarchie logique de l'arborescence.
+  - Cartes compactes ajustées en largeur (210 à 250 pixels logiques, espacement de 12px) permettant d'aligner idéalement 4 à 5 cartes par ligne sur une fenêtre large, sans étirement excessif.
+  - Badges de protocole strictement uniformisés avec l'arborescence : `RDP` (bleu), `ANY` (rouge `#D84339`), `RST` (turquoise `#16968A`).
   - Prise en charge complète du défilement à la molette (`WM_MOUSEWHEEL`) avec conservation de la zone visible et hit-testing précis des cartes.
   - **Repositionnement dynamique intelligent** :
     - *Cas A (Connexions récentes activées)* : enchaînement classique sous les favoris et récentes.
     - *Cas B (Connexions récentes désactivées)* : masquage intégral de la section récente sans aucun espace résiduel, « Toutes les connexions » remontant directement sous les favoris / actions rapides.
   - Clic direct sur une carte pour lancer instantanément la session correspondante.
+- **Sécurisation absolue du bootstrap SQLite (`bootstrap.json`)** :
+  - Règle stricte : si le fichier `bootstrap.json` est absent, l'emplacement par défaut (`%LOCALAPPDATA%\Malvision\malvision.db`) est utilisé.
+  - Si le fichier `bootstrap.json` existe mais est illisible, invalide, ou contient un chemin non absolu / nom de fichier incorrect, Malvision interrompt immédiatement le démarrage avec une alerte explicite sans jamais basculer silencieusement sur une autre base ni créer de base vide.
+  - Dialogue de récupération contrôlée proposant de réessayer, de resélectionner le dossier ou de réinitialiser la configuration avec sauvegarde automatique `bootstrap.json.corrupt_bak`.
 
 ### Testé
-- Suite de tests portée à **62 tests automatisés (100 % passants)** :
+- Suite de tests portée à **63 tests automatisés (100 % passants)** :
+  - `test_bootstrap_corrupted_json_and_invalid_inputs` (rejet de syntaxes corrompues, versions non supportées, chemins relatifs ou types invalides).
   - `test_single_instance_guard_drop_clean` & `test_activate_message_registration` (instance unique Win32).
-  - `test_bootstrap_defaults_and_roundtrip` & `test_validate_directory_writable_success_and_plan` (bootstrap et validation des dossiers).
+  - `test_bootstrap_defaults_and_roundtrip` & `test_validate_directory_writable_success_and_plan`.
   - `test_collect_tree_ordered_connections_rules` (tri connexions avant dossiers).
   - `test_ui_single_instance_activation_message_restores_from_tray_and_focuses`.
   - `test_ui_dashboard_layout_cas_a_and_cas_b_and_scrolling`.

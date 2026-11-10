@@ -18,9 +18,9 @@ use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowA
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, ClientToScreen, CreateBitmap,
     CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen,
-    CreateSolidBrush, DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX,
-    DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, EndPaint,
-    FONT_CHARSET, FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY, FillRect,
+    CreateSolidBrush, DIB_RGB_COLORS, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT,
+    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW,
+    EndPaint, FONT_CHARSET, FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY, FillRect,
     GetStockObject, HBITMAP, HBRUSH, HDC, HFONT, InvalidateRect, LineTo, MoveToEx, NULL_BRUSH,
     PAINTSTRUCT, PS_SOLID, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
     RedrawWindow, RoundRect, ScreenToClient, SelectObject, SetBkColor, SetBkMode, SetTextColor,
@@ -2056,17 +2056,30 @@ impl AppWindowState {
                 },
             );
 
-            // Point d'accentuation bleu à côté du titre
+            // Badge de version dynamique à droite du titre (ex: v1.0.1)
+            let version_str = format!("v{}", env!("CARGO_PKG_VERSION"));
+            let mut trc = RECT::default();
+            let mut wide_v: Vec<u16> = version_str.encode_utf16().collect();
+            let _ = SelectObject(hdc, self.palette.font_small.into());
+            let _ = DrawTextW(
+                hdc,
+                &mut wide_v,
+                &mut trc,
+                DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+            );
+            let text_w = trc.right - trc.left;
+            let badge_w = (text_w + 14).max(42);
+            let badge_left = 114;
             draw_filled_badge(
                 hdc,
                 RECT {
-                    left: 114,
+                    left: badge_left,
                     top: 14,
-                    right: 158,
+                    right: badge_left + badge_w,
                     bottom: 32,
                 },
                 col_accent(),
-                "Win11",
+                &version_str,
                 self.palette.font_small,
             );
 
@@ -2931,18 +2944,23 @@ impl AppWindowState {
         folders: &[Folder],
     ) -> i32 {
         unsafe {
-            let avail_w = (area.right - area.left - pad_x * 2).max(300);
-            let cols = if avail_w >= 1050 {
-                4
-            } else if avail_w >= 750 {
-                3
-            } else if avail_w >= 480 {
-                2
+            let avail_w = (area.right - area.left - pad_x * 2).max(240);
+            let gap = 12;
+            let target_w = 230;
+            let mut cols = ((avail_w + gap) / (target_w + gap)).max(1);
+            let w_for_cols = (avail_w - gap * (cols - 1)) / cols;
+            if w_for_cols > 250 {
+                let next_w = (avail_w - gap * cols) / (cols + 1);
+                if next_w >= 205 {
+                    cols += 1;
+                }
+            }
+            let raw_card_w = (avail_w - gap * (cols - 1)) / cols;
+            let card_w = if cols > 1 {
+                raw_card_w.clamp(210, 250)
             } else {
-                1
+                raw_card_w.min(320)
             };
-            let gap = 10;
-            let card_w = (avail_w - gap * (cols - 1)) / cols;
             let card_h = 56;
 
             let mut folder_map = HashMap::new();
@@ -2978,23 +2996,19 @@ impl AppWindowState {
                         if is_hover { col_accent() } else { col_border() },
                     );
 
-                    let proto_color = match conn.protocol {
-                        Protocol::Rdp => col_accent(),
-                        Protocol::AnyDesk => 0x003B46D9,
-                        Protocol::RustDesk => 0x00B5721E,
+                    // Badge protocole uniforme avec l'arborescence (RDP, ANY, RST)
+                    let (badge_col, badge_txt) = match conn.protocol {
+                        Protocol::Rdp => (col_accent(), "RDP"),
+                        Protocol::AnyDesk => (COL_PROTO_ANYDESK, "ANY"),
+                        Protocol::RustDesk => (COL_PROTO_RUSTDESK, "RST"),
                     };
-                    draw_filled_badge(
-                        hdc,
-                        RECT {
-                            left: card_rc.left + 8,
-                            top: card_rc.top + 8,
-                            right: card_rc.left + 54,
-                            bottom: card_rc.top + 26,
-                        },
-                        proto_color,
-                        conn.protocol.display_name(),
-                        self.palette.font_small,
-                    );
+                    let badge_rc = RECT {
+                        left: card_rc.left + 8,
+                        top: card_rc.top + 8,
+                        right: card_rc.left + 8 + 32,
+                        bottom: card_rc.top + 8 + 17,
+                    };
+                    draw_filled_badge(hdc, badge_rc, badge_col, badge_txt, self.palette.font_small);
 
                     let _ = SelectObject(hdc, self.palette.font_ui_bold.into());
                     let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
@@ -3003,15 +3017,15 @@ impl AppWindowState {
                         hdc,
                         &conn.name,
                         RECT {
-                            left: card_rc.left + 60,
+                            left: card_rc.left + 46,
                             top: card_rc.top + 7,
-                            right: card_rc.right - 10 - star_w,
+                            right: card_rc.right - 8 - star_w,
                             bottom: card_rc.top + 27,
                         },
                     );
 
                     if conn.is_favorite {
-                        draw_icon_star(hdc, card_rc.right - 22, card_rc.top + 9, 0x0041B8FF);
+                        draw_icon_star(hdc, card_rc.right - 20, card_rc.top + 9, COL_GOLD_STAR);
                     }
 
                     let mut path_str = String::new();
@@ -10351,6 +10365,93 @@ pub fn prompt_missing_custom_db_at_startup(
         } else if choice_res == IDNO {
             let _ = crate::bootstrap::set_custom_database_path(None);
             return crate::bootstrap::default_database_path();
+        } else {
+            std::process::exit(0);
+        }
+    }
+}
+
+pub fn prompt_corrupt_bootstrap_at_startup(
+    err_msg: &str,
+) -> Result<crate::bootstrap::BootstrapConfig, String> {
+    if cfg!(test) {
+        return Err(err_msg.to_string());
+    }
+    let bootstrap_path = crate::bootstrap::bootstrap_file_path()
+        .unwrap_or_else(|_| std::path::PathBuf::from("bootstrap.json"));
+    loop {
+        let msg = format!(
+            "Malvision a détecté une anomalie dans le fichier de configuration bootstrap :\n\n{}\n\nFichier concerné :\n{}\n\nPar mesure de sécurité, le démarrage est suspendu pour éviter d'ouvrir ou de créer une mauvaise base de données.\n\n• Cliquez sur [Recommencer] pour réessayer de lire le fichier.\n• Cliquez sur [Annuler] pour afficher les options de récupération.",
+            err_msg,
+            bootstrap_path.display()
+        );
+        let res = unsafe {
+            let mut title_w: Vec<u16> =
+                "Erreur de configuration bootstrap".encode_utf16().collect();
+            title_w.push(0);
+            let mut msg_w: Vec<u16> = msg.encode_utf16().collect();
+            msg_w.push(0);
+            MessageBoxW(
+                None,
+                PCWSTR(msg_w.as_ptr()),
+                PCWSTR(title_w.as_ptr()),
+                MB_RETRYCANCEL | MB_ICONERROR,
+            )
+        };
+        if res == IDRETRY {
+            if let Ok(cfg) = crate::bootstrap::load_bootstrap() {
+                return Ok(cfg);
+            }
+            continue;
+        }
+
+        // Annuler -> Proposer les alternatives
+        let choice_msg = "Options de récupération :\n\n• [Oui] : Choisir un dossier pour redéfinir l'emplacement de votre base malvision.db.\n• [Non] : Réinitialiser la configuration pour utiliser l'emplacement standard (%LOCALAPPDATA%). Une copie de sauvegarde bootstrap.json.corrupt_bak sera conservée.\n• [Annuler] : Quitter l'application sans modifier vos données.";
+        let choice_res = unsafe {
+            let mut title_w: Vec<u16> = "Options de récupération du bootstrap"
+                .encode_utf16()
+                .collect();
+            title_w.push(0);
+            let mut msg_w: Vec<u16> = choice_msg.encode_utf16().collect();
+            msg_w.push(0);
+            MessageBoxW(
+                None,
+                PCWSTR(msg_w.as_ptr()),
+                PCWSTR(title_w.as_ptr()),
+                MB_YESNOCANCEL | MB_ICONQUESTION,
+            )
+        };
+
+        if choice_res == IDYES {
+            if let Some(folder) = crate::external_apps::browse_for_folder(
+                HWND::default(),
+                "Sélectionnez le dossier contenant malvision.db",
+            ) {
+                let target_db = folder.join(crate::bootstrap::DATABASE_FILENAME);
+                if target_db.exists() {
+                    let new_cfg = crate::bootstrap::BootstrapConfig {
+                        version: 1,
+                        custom_db_path: Some(target_db),
+                    };
+                    let _ = crate::bootstrap::save_bootstrap(&new_cfg);
+                    return Ok(new_cfg);
+                } else {
+                    show_error_dialog(
+                        HWND::default(),
+                        "Fichier introuvable",
+                        &format!(
+                            "Aucun fichier malvision.db n'a été trouvé dans le dossier :\n{}",
+                            folder.display()
+                        ),
+                    );
+                }
+            }
+        } else if choice_res == IDNO {
+            let bak_path = bootstrap_path.with_extension("json.corrupt_bak");
+            let _ = std::fs::copy(&bootstrap_path, &bak_path);
+            let def_cfg = crate::bootstrap::BootstrapConfig::default();
+            let _ = crate::bootstrap::save_bootstrap(&def_cfg);
+            return Ok(def_cfg);
         } else {
             std::process::exit(0);
         }

@@ -24,16 +24,23 @@ Cette version **1.0.1** apporte l'instance unique pour éviter les doublons de p
   - Si une base `malvision.db` existe déjà dans le dossier cible : validation préalable du schéma et confirmation utilisateur avant bascule.
 - **Contrôle des volumes amovibles et réseau** : Avertissement préventif clair si le dossier sélectionné réside sur un lecteur réseau ou une clé USB amovible.
 - **Persistance légère** : Mémorisation du chemin personnalisé dans `%LOCALAPPDATA%\Malvision\bootstrap.json`.
-- **Résilience au démarrage** : Si le volume personnalisé est déconnecté ou inaccessible au démarrage, Malvision n'écrase rien silencieusement : une boîte de dialogue interactive permet de *Réessayer*, *Choisir un autre dossier*, *Revenir à l'emplacement standard*, ou *Quitter sans rien altérer*.
+- **Sécurisation absolue du bootstrap** : Le fichier `bootstrap.json` est rigoureusement validé. En cas de fichier manquant, l'emplacement par défaut est utilisé. En cas de fichier corrompu ou invalide, Malvision interrompt le démarrage avec une alerte explicite sans jamais basculer silencieusement sur une autre base ni écraser de données.
+- **Résilience au démarrage** : Si le volume personnalisé est déconnecté ou inaccessible au démarrage, une boîte de dialogue interactive permet de *Réessayer*, *Choisir un autre dossier*, *Revenir à l'emplacement standard*, ou *Quitter sans rien altérer*.
+
+### 🏷️ En-tête & Identité : Badge de version dynamique
+- Remplacement du badge statique `Win11` par le badge de version officiel `v1.0.1` à droite du titre « Malvision ».
+- Dimensionnement dynamique automatique pour les futures versions sans risque de troncature.
+- Parfaite intégration dans les thèmes Sombre, Clair et Système à 100 %, 125 % et 150 % HiDPI.
 
 ### 📂 Tri perfectionné de l'arborescence
 - **Connexions directes avant les sous-dossiers** : Dans chaque dossier ainsi qu'à la racine, toutes les connexions directes s'affichent en premier, suivies des sous-dossiers.
 - **Tri alphabétique insensible à la casse (A à Z)** appliqué uniformément pour les connexions comme pour les dossiers.
 - **Règle récursive et préservation d'état** : Maintien intégral des favoris, icônes de protocoles (RDP, AnyDesk, RustDesk), recherche dynamique et état développé/replié des dossiers.
 
-### 📊 Tableau de bord : Section « Toutes les connexions » & Défilement fluide
-- **Section complète sous les connexions récentes** : Affichage de l'intégralité des connexions sous forme de cartes compactes Fluent (`hauteur = 56px`) organisées en grille adaptative (1 à 4 colonnes selon la largeur).
-- **Informations claires en un coup d'œil** : Badge protocole coloré, nom en gras, étoile dorée pour les favoris, chemin du dossier et hôte / identifiant distant.
+### 📊 Tableau de bord : Section « Toutes les connexions » adaptative
+- **Cartes compactes optimisées** : Largeur cible de 210 à 250 pixels logiques (espacement de 12px) permettant d'aligner 4 à 5 cartes par ligne sur une fenêtre large, sans étirement excessif.
+- **Badges de protocole uniformisés** : Réutilisation exacte du style compact de l'arborescence (`RDP` en bleu, `ANY` en rouge, `RST` en turquoise).
+- **Informations claires en un coup d'œil** : Nom en gras avec gestion des libellés longs par ellipsis, étoile dorée pour les favoris, chemin du dossier et hôte / identifiant distant.
 - **Défilement vertical fluide** : Prise en charge de la molette souris (`WM_MOUSEWHEEL`) sur la vue d'accueil avec barres et limites de défilement dynamiques.
 - **Repositionnement dynamique intelligent** :
   - *Cas A (Connexions récentes activées)* : Enchaînement naturel Actions rapides -> Connexions favorites -> Connexions récentes -> Toutes les connexions.
@@ -46,7 +53,7 @@ Cette version **1.0.1** apporte l'instance unique pour éviter les doublons de p
 
 | Fichier | Taille | Empreinte SHA-256 |
 | :--- | :--- | :--- |
-| **`Malvision.exe`** | 5 187 584 octets (~5.0 Mo) | `d9bf73c9027ccd16ed021c2d32dd40cf114cce361e254f19a7c290cad8fa7b35` |
+| **`Malvision.exe`** | 5 195 264 octets (~5.0 Mo) | `000b9f558f3e14eb5ff8d564902369ad924f3dd6db28a7ffb03b40749b73df4d` |
 
 ---
 

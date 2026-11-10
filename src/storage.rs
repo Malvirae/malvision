@@ -72,7 +72,16 @@ impl Storage {
     /// sinon emplacement par défaut dans `%LOCALAPPDATA%\Malvision\malvision.db`).
     /// Si un emplacement personnalisé configuré est introuvable au démarrage, sollicite l'utilisateur.
     pub fn open_default() -> Result<Self, String> {
-        let cfg = crate::bootstrap::load_bootstrap();
+        let cfg = match crate::bootstrap::load_bootstrap() {
+            Ok(c) => c,
+            Err(err) => {
+                if !cfg!(test) {
+                    crate::ui::prompt_corrupt_bootstrap_at_startup(&err)?
+                } else {
+                    return Err(err);
+                }
+            }
+        };
         let db_path = if let Some(custom) = cfg.custom_db_path {
             if !custom.exists() && !cfg!(test) {
                 crate::ui::prompt_missing_custom_db_at_startup(&custom)?

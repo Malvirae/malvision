@@ -25,9 +25,13 @@ Application native **Windows 11 x64** de gestion de connexions distantes, écrit
   - Règle stricte et intuitive : **dans chaque dossier et à la racine, les connexions directes apparaissent toujours avant les sous-dossiers**.
   - Tri alphabétique insensible à la casse (A à Z) appliqué récursivement.
   - Préservation intégrale des favoris, icônes de protocoles (RDP, AnyDesk, RustDesk) et de l'état développé/replié des dossiers.
+- **En-tête & Identité : Badge de version dynamique (V1.0.1)** :
+  - Remplacement du badge `Win11` par le badge de version dynamique `v1.0.1` à droite du titre « Malvision ».
+  - Dimensionnement dynamique sans risque de troncature, cohérent sur tous les thèmes et facteurs d'échelle DPI.
 - **Tableau de bord : « Toutes les connexions » & Défilement fluide (V1.0.1)** :
-  - Section complète affichant l'intégralité des connexions sous forme de cartes compactes Fluent (`hauteur = 56px`) en grille adaptative (1 à 4 colonnes).
-  - Informations synthétiques : badge protocole, nom en gras, étoile dorée de favori, chemin du dossier et hôte / identifiant distant.
+  - Section complète affichant l'intégralité des connexions sous forme de cartes compactes Fluent (`hauteur = 56px`, largeur 210 à 250px) en grille adaptative (4 à 5 cartes par ligne sur écran large sans étirement excessif).
+  - Badges de protocoles strictement uniformisés avec l'arborescence : `RDP` (bleu), `ANY` (rouge), `RST` (turquoise).
+  - Informations synthétiques : nom en gras avec gestion des noms longs par ellipsis, étoile dorée de favori, chemin du dossier et hôte / identifiant distant.
   - Défilement vertical fluide à la molette (`WM_MOUSEWHEEL`) sur toute la page d'accueil avec hit-testing précis des cartes.
   - **Repositionnement dynamique intelligent** :
     - *Cas A (Connexions récentes activées)* : enchaînement harmonieux Actions rapides -> Favoris -> Récentes -> Toutes les connexions.
