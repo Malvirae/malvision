@@ -32,7 +32,7 @@ Cette version **1.0.2** apporte des améliorations ergonomiques majeures demand�
   1. **Connexions prioritaires** classées par ordre alphabétique (A à Z).
   2. **Connexions normales** classées par ordre alphabétique (A à Z).
   3. **Sous-dossiers** classés par ordre alphabétique (A à Z).
-- **Épingle Fluent minimaliste antialiasée** : Remplacement de l'ancienne flèche par une épingle vectorielle discrète (pushpin Fluent) de couleur bleu ciel `#38BDF8`, parfaitement alignée avec le texte et distincte de l'étoile dorée des favoris.
+- **Triangle creux vert émeraude antialiasé** : Remplacement de l'ancienne flèche par un triangle équilatéral régulier creux (contour seul) orienté vers le haut (`▲`) de couleur vert émeraude `#34C88A`, parfaitement aligné avec le texte et distinct de l'étoile dorée des favoris.
 - **Contrôle ergonomique rapide** :
   - Case à cocher « Marquer comme prioritaire » intégrée dans les formulaires de création et de modification de connexion.
   - Action instantanée dans le menu contextuel clic droit : « Marquer comme prioritaire » / « Retirer la priorité ».
@@ -54,7 +54,7 @@ Cette version **1.0.2** apporte des améliorations ergonomiques majeures demand�
 
 | Fichier | Taille | Empreinte SHA-256 |
 | :--- | :--- | :--- |
-| **`Malvision.exe`** | 5 209 088 octets (~5.2 Mo) | `2715e0ed71368db49193de19b153a2c03abae3ee71c6e07375d474a85cf85cac` |
+| **`Malvision.exe`** | 5 208 064 octets (~5.2 Mo) | `463544f040aec4febbf50df412cd6a629dc5f203356e86e335d52223fa81447e` |
 
 ---
 

@@ -190,7 +190,7 @@ fn col_status_err() -> u32 {
 
 const COL_TEXT_ON_ACCENT: u32 = 0x00F6F3F0; // Blanc pur sur boutons primaires et badges colorés
 const COL_GOLD_STAR: u32 = 0x00249CE8; // Doré lisible sur fond sombre et clair
-const COL_PRIORITY_PIN: u32 = 0x00F8BD38; // Bleu ciel #38BDF8 pour l'épingle prioritaire Fluent
+const COL_PRIORITY_TRIANGLE: u32 = 0x008AC834; // Vert émeraude #34C88A pour le triangle prioritaire creux
 const COL_FOLDER_AMBER: u32 = 0x003294DC; // Ambre dossier lisible sur fond sombre et clair
 const COL_PROTO_ANYDESK: u32 = 0x003943D8; // #D84339 Badge AnyDesk
 const COL_PROTO_RUSTDESK: u32 = 0x008A9616; // #16968A Badge RustDesk
@@ -2033,7 +2033,7 @@ impl AppWindowState {
                         let right_pad = if conn.is_favorite { 24 } else { 8 };
 
                         if conn.is_priority {
-                            draw_icon_priority(hdc, indent + 47, mid_y - 6, COL_PRIORITY_PIN);
+                            draw_icon_priority(hdc, indent + 47, mid_y - 6, COL_PRIORITY_TRIANGLE);
                         }
 
                         let _ = SelectObject(
@@ -3603,7 +3603,7 @@ unsafe fn draw_icon_star(hdc: HDC, x: i32, y: i32, color: u32) {
     }
 }
 
-/// Dessine un indicateur de connexion prioritaire discret (épingle / pushpin Fluent antialiasée).
+/// Dessine un indicateur de connexion prioritaire discret (triangle équilatéral creux vert émeraude #34C88A).
 unsafe fn draw_icon_priority(hdc: HDC, x: i32, y: i32, color: u32) {
     ensure_gdiplus_initialized();
     unsafe {
@@ -3617,53 +3617,26 @@ unsafe fn draw_icon_priority(hdc: HDC, x: i32, y: i32, color: u32) {
         let argb = colorref_to_argb(color);
         let mut pen: *mut GpPen = std::ptr::null_mut();
         if GdipCreatePen1(argb, 1.5, UnitPixel, &mut pen) == Ok {
-            let _ = GdipSetPenStartCap(pen, LineCapRound);
-            let _ = GdipSetPenEndCap(pen, LineCapRound);
             let _ = GdipSetPenLineJoin(pen, LineJoinRound);
 
-            let cx = x as f32 + 5.0;
+            let cx = x as f32 + 5.5;
             let cy = y as f32 + 6.0;
 
-            // 1. Tête de l'épingle (barre supérieure arrondie)
-            let _ = GdipDrawLine(graphics, pen, cx - 3.2, cy - 4.8, cx + 3.2, cy - 4.8);
+            // Triangle équilatéral régulier creux (contour seul) orienté vers le haut ▲
+            // Côté 10.5 px, hauteur 9.1 px, trait 1.5 px (encombrement total ~12x10.6 px)
+            let pts = [
+                PointF { X: cx, Y: cy - 4.8 },
+                PointF {
+                    X: cx - 5.25,
+                    Y: cy + 4.3,
+                },
+                PointF {
+                    X: cx + 5.25,
+                    Y: cy + 4.3,
+                },
+            ];
 
-            // 2. Collerette / garde horizontale arrondie
-            let _ = GdipDrawLine(graphics, pen, cx - 3.8, cy - 1.2, cx + 3.8, cy - 1.2);
-
-            // 3. Corps plein de l'épingle entre la tête et la collerette
-            let mut brush: *mut GpSolidFill = std::ptr::null_mut();
-            if GdipCreateSolidFill(argb, &mut brush) == Ok {
-                let pts = [
-                    PointF {
-                        X: cx - 2.0,
-                        Y: cy - 4.8,
-                    },
-                    PointF {
-                        X: cx + 2.0,
-                        Y: cy - 4.8,
-                    },
-                    PointF {
-                        X: cx + 2.5,
-                        Y: cy - 1.2,
-                    },
-                    PointF {
-                        X: cx - 2.5,
-                        Y: cy - 1.2,
-                    },
-                ];
-                let _ = GdipFillPolygon(
-                    graphics,
-                    brush as *mut _,
-                    pts.as_ptr(),
-                    4,
-                    FillModeAlternate,
-                );
-                let _ = GdipDeleteBrush(brush as *mut _);
-            }
-
-            // 4. Pointe fine de l'aiguille vers le bas
-            let _ = GdipDrawLine(graphics, pen, cx, cy - 0.5, cx, cy + 5.2);
-
+            let _ = GdipDrawPolygon(graphics, pen, pts.as_ptr(), 3);
             let _ = GdipDeletePen(pen);
         }
         let _ = GdipDeleteGraphics(graphics);
@@ -14238,6 +14211,14 @@ mod tests {
             let l_res = GdipDrawLine(graphics, pen, 2.0, 2.0, 10.0, 10.0);
             assert_eq!(l_res, Ok);
 
+            let poly_pts = [
+                PointF { X: 2.0, Y: 2.0 },
+                PointF { X: 6.0, Y: 2.0 },
+                PointF { X: 4.0, Y: 6.0 },
+            ];
+            let poly_res = GdipDrawPolygon(graphics, pen, poly_pts.as_ptr(), 3);
+            assert_eq!(poly_res, Ok);
+
             let _ = GdipDeletePen(pen);
 
             let mut brush: *mut GpSolidFill = std::ptr::null_mut();
@@ -14267,7 +14248,7 @@ mod tests {
                 draw_icon_chevron(hdc, cx, cy, false, 0x00FFFFFF);
                 draw_icon_double_chevron(hdc, cx, cy, true, 0x00FFFFFF);
                 draw_icon_double_chevron(hdc, cx, cy, false, 0x00FFFFFF);
-                draw_icon_priority(hdc, cx - 5, cy - 6, COL_PRIORITY_PIN);
+                draw_icon_priority(hdc, cx - 5, cy - 6, COL_PRIORITY_TRIANGLE);
             }
 
             let _ = SelectObject(hdc, old);
