@@ -190,7 +190,7 @@ fn col_status_err() -> u32 {
 
 const COL_TEXT_ON_ACCENT: u32 = 0x00F6F3F0; // Blanc pur sur boutons primaires et badges colorés
 const COL_GOLD_STAR: u32 = 0x00249CE8; // Doré lisible sur fond sombre et clair
-const COL_PRIORITY_ARROW: u32 = 0x00E08020; // Orange/ambre priorité lisible sur fond sombre et clair
+const COL_PRIORITY_PIN: u32 = 0x00F8BD38; // Bleu ciel #38BDF8 pour l'épingle prioritaire Fluent
 const COL_FOLDER_AMBER: u32 = 0x003294DC; // Ambre dossier lisible sur fond sombre et clair
 const COL_PROTO_ANYDESK: u32 = 0x003943D8; // #D84339 Badge AnyDesk
 const COL_PROTO_RUSTDESK: u32 = 0x008A9616; // #16968A Badge RustDesk
@@ -2033,7 +2033,7 @@ impl AppWindowState {
                         let right_pad = if conn.is_favorite { 24 } else { 8 };
 
                         if conn.is_priority {
-                            draw_icon_priority(hdc, indent + 47, mid_y - 6, COL_PRIORITY_ARROW);
+                            draw_icon_priority(hdc, indent + 47, mid_y - 6, COL_PRIORITY_PIN);
                         }
 
                         let _ = SelectObject(
@@ -3498,22 +3498,66 @@ unsafe fn draw_vertical_line(hdc: HDC, x: i32, y1: i32, y2: i32, color: u32) {
     }
 }
 
-/// Dessine un chevron vectoriel (`>` replié ou `v` déplié) centré en `(cx, cy)`.
+fn ensure_gdiplus_initialized() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    static mut TOKEN: usize = 0;
+    ONCE.call_once(|| unsafe {
+        let input = windows::Win32::Graphics::GdiPlus::GdiplusStartupInput {
+            GdiplusVersion: 1,
+            ..Default::default()
+        };
+        let _ = windows::Win32::Graphics::GdiPlus::GdiplusStartup(
+            &raw mut TOKEN,
+            &input,
+            std::ptr::null_mut(),
+        );
+    });
+}
+
+#[inline]
+fn colorref_to_argb(color: u32) -> u32 {
+    let r = color & 0xFF;
+    let g = (color >> 8) & 0xFF;
+    let b = (color >> 16) & 0xFF;
+    0xFF00_0000 | (r << 16) | (g << 8) | b
+}
+
+/// Dessine un chevron vectoriel antialiasé GDI+ (`>` replié ou `⌄` déplié) centré en `(cx, cy)`.
+/// Utilise une géométrie vectorielle commune avec une rotation stricte de 90° entre les états.
 unsafe fn draw_icon_chevron(hdc: HDC, cx: i32, cy: i32, expanded: bool, color: u32) {
+    ensure_gdiplus_initialized();
     unsafe {
-        let pen = CreatePen(PS_SOLID, 2, COLORREF(color));
-        let old = SelectObject(hdc, pen.into());
-        if expanded {
-            let _ = MoveToEx(hdc, cx - 4, cy - 2, None);
-            let _ = LineTo(hdc, cx, cy + 2);
-            let _ = LineTo(hdc, cx + 5, cy - 3);
-        } else {
-            let _ = MoveToEx(hdc, cx - 2, cy - 4, None);
-            let _ = LineTo(hdc, cx + 2, cy);
-            let _ = LineTo(hdc, cx - 3, cy + 5);
+        use windows::Win32::Graphics::GdiPlus::*;
+        let mut graphics: *mut GpGraphics = std::ptr::null_mut();
+        if GdipCreateFromHDC(hdc, &mut graphics) != Ok {
+            return;
         }
-        let _ = SelectObject(hdc, old);
-        let _ = DeleteObject(pen.into());
+        let _ = GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
+
+        let argb = colorref_to_argb(color);
+        let mut pen: *mut GpPen = std::ptr::null_mut();
+        if GdipCreatePen1(argb, 1.5, UnitPixel, &mut pen) == Ok {
+            let _ = GdipSetPenStartCap(pen, LineCapRound);
+            let _ = GdipSetPenEndCap(pen, LineCapRound);
+            let _ = GdipSetPenLineJoin(pen, LineJoinRound);
+
+            let cxf = cx as f32;
+            let cyf = cy as f32;
+            let d = 3.0f32;
+
+            if expanded {
+                // Chevron déplié vers le bas ⌄ (sommet à cy + 1.5)
+                let _ = GdipDrawLine(graphics, pen, cxf - d, cyf - d / 2.0, cxf, cyf + d / 2.0);
+                let _ = GdipDrawLine(graphics, pen, cxf, cyf + d / 2.0, cxf + d, cyf - d / 2.0);
+            } else {
+                // Chevron replié vers la droite > (rotation stricte de 90°, sommet à cx + 1.5)
+                let _ = GdipDrawLine(graphics, pen, cxf - d / 2.0, cyf - d, cxf + d / 2.0, cyf);
+                let _ = GdipDrawLine(graphics, pen, cxf + d / 2.0, cyf, cxf - d / 2.0, cyf + d);
+            }
+
+            let _ = GdipDeletePen(pen);
+        }
+        let _ = GdipDeleteGraphics(graphics);
     }
 }
 
@@ -3559,49 +3603,117 @@ unsafe fn draw_icon_star(hdc: HDC, x: i32, y: i32, color: u32) {
     }
 }
 
-/// Dessine un indicateur de connexion prioritaire discret (flèche verticale vers le haut).
+/// Dessine un indicateur de connexion prioritaire discret (épingle / pushpin Fluent antialiasée).
 unsafe fn draw_icon_priority(hdc: HDC, x: i32, y: i32, color: u32) {
+    ensure_gdiplus_initialized();
     unsafe {
-        let pen = CreatePen(PS_SOLID, 2, COLORREF(color));
-        let old = SelectObject(hdc, pen.into());
-        let cx = x + 5;
-        let cy = y + 6;
-        let _ = MoveToEx(hdc, cx, cy + 5, None);
-        let _ = LineTo(hdc, cx, cy - 4);
-        let _ = MoveToEx(hdc, cx - 4, cy, None);
-        let _ = LineTo(hdc, cx, cy - 4);
-        let _ = LineTo(hdc, cx + 5, cy + 1);
-        let _ = SelectObject(hdc, old);
-        let _ = DeleteObject(pen.into());
+        use windows::Win32::Graphics::GdiPlus::*;
+        let mut graphics: *mut GpGraphics = std::ptr::null_mut();
+        if GdipCreateFromHDC(hdc, &mut graphics) != Ok {
+            return;
+        }
+        let _ = GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
+
+        let argb = colorref_to_argb(color);
+        let mut pen: *mut GpPen = std::ptr::null_mut();
+        if GdipCreatePen1(argb, 1.5, UnitPixel, &mut pen) == Ok {
+            let _ = GdipSetPenStartCap(pen, LineCapRound);
+            let _ = GdipSetPenEndCap(pen, LineCapRound);
+            let _ = GdipSetPenLineJoin(pen, LineJoinRound);
+
+            let cx = x as f32 + 5.0;
+            let cy = y as f32 + 6.0;
+
+            // 1. Tête de l'épingle (barre supérieure arrondie)
+            let _ = GdipDrawLine(graphics, pen, cx - 3.2, cy - 4.8, cx + 3.2, cy - 4.8);
+
+            // 2. Collerette / garde horizontale arrondie
+            let _ = GdipDrawLine(graphics, pen, cx - 3.8, cy - 1.2, cx + 3.8, cy - 1.2);
+
+            // 3. Corps plein de l'épingle entre la tête et la collerette
+            let mut brush: *mut GpSolidFill = std::ptr::null_mut();
+            if GdipCreateSolidFill(argb, &mut brush) == Ok {
+                let pts = [
+                    PointF {
+                        X: cx - 2.0,
+                        Y: cy - 4.8,
+                    },
+                    PointF {
+                        X: cx + 2.0,
+                        Y: cy - 4.8,
+                    },
+                    PointF {
+                        X: cx + 2.5,
+                        Y: cy - 1.2,
+                    },
+                    PointF {
+                        X: cx - 2.5,
+                        Y: cy - 1.2,
+                    },
+                ];
+                let _ = GdipFillPolygon(
+                    graphics,
+                    brush as *mut _,
+                    pts.as_ptr(),
+                    4,
+                    FillModeAlternate,
+                );
+                let _ = GdipDeleteBrush(brush as *mut _);
+            }
+
+            // 4. Pointe fine de l'aiguille vers le bas
+            let _ = GdipDrawLine(graphics, pen, cx, cy - 0.5, cx, cy + 5.2);
+
+            let _ = GdipDeletePen(pen);
+        }
+        let _ = GdipDeleteGraphics(graphics);
     }
 }
 
-/// Dessine une icône à doubles chevrons (descendants pour « Tout déplier », montants pour « Tout replier »).
+/// Dessine une icône à doubles chevrons antialiasée GDI+ (descendants pour « Tout déplier », montants pour « Tout replier »).
+/// Géométrie strictement symétrique par réflexion verticale autour de `cy`.
 unsafe fn draw_icon_double_chevron(hdc: HDC, cx: i32, cy: i32, downwards: bool, color: u32) {
+    ensure_gdiplus_initialized();
     unsafe {
-        let pen = CreatePen(PS_SOLID, 2, COLORREF(color));
-        let old = SelectObject(hdc, pen.into());
-        if downwards {
-            // Chevrons vers le bas ︾
-            let _ = MoveToEx(hdc, cx - 4, cy - 3, None);
-            let _ = LineTo(hdc, cx, cy);
-            let _ = LineTo(hdc, cx + 5, cy - 4);
-
-            let _ = MoveToEx(hdc, cx - 4, cy + 2, None);
-            let _ = LineTo(hdc, cx, cy + 5);
-            let _ = LineTo(hdc, cx + 5, cy + 1);
-        } else {
-            // Chevrons vers le haut ︽
-            let _ = MoveToEx(hdc, cx - 4, cy - 1, None);
-            let _ = LineTo(hdc, cx, cy - 4);
-            let _ = LineTo(hdc, cx + 5, cy);
-
-            let _ = MoveToEx(hdc, cx - 4, cy + 4, None);
-            let _ = LineTo(hdc, cx, cy + 1);
-            let _ = LineTo(hdc, cx + 5, cy + 5);
+        use windows::Win32::Graphics::GdiPlus::*;
+        let mut graphics: *mut GpGraphics = std::ptr::null_mut();
+        if GdipCreateFromHDC(hdc, &mut graphics) != Ok {
+            return;
         }
-        let _ = SelectObject(hdc, old);
-        let _ = DeleteObject(pen.into());
+        let _ = GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
+
+        let argb = colorref_to_argb(color);
+        let mut pen: *mut GpPen = std::ptr::null_mut();
+        if GdipCreatePen1(argb, 1.5, UnitPixel, &mut pen) == Ok {
+            let _ = GdipSetPenStartCap(pen, LineCapRound);
+            let _ = GdipSetPenEndCap(pen, LineCapRound);
+            let _ = GdipSetPenLineJoin(pen, LineJoinRound);
+
+            let cxf = cx as f32;
+            let cyf = cy as f32;
+            let d = 3.0f32;
+
+            if downwards {
+                // Chevrons vers le bas ︾ (Tout déplier)
+                // Chevron 1 supérieur (sommet à cy - 0.5)
+                let _ = GdipDrawLine(graphics, pen, cxf - d, cyf - 3.5, cxf, cyf - 0.5);
+                let _ = GdipDrawLine(graphics, pen, cxf, cyf - 0.5, cxf + d, cyf - 3.5);
+                // Chevron 2 inférieur (sommet à cy + 3.5)
+                let _ = GdipDrawLine(graphics, pen, cxf - d, cyf + 0.5, cxf, cyf + 3.5);
+                let _ = GdipDrawLine(graphics, pen, cxf, cyf + 3.5, cxf + d, cyf + 0.5);
+            } else {
+                // Chevrons vers le haut ︽ (Tout replier) — réflexion verticale stricte
+                // Chevron 1 inférieur inversé (sommet à cy + 0.5)
+                let _ = GdipDrawLine(graphics, pen, cxf - d, cyf + 3.5, cxf, cyf + 0.5);
+                let _ = GdipDrawLine(graphics, pen, cxf, cyf + 0.5, cxf + d, cyf + 3.5);
+                // Chevron 2 supérieur inversé (sommet à cy - 3.5)
+                let _ = GdipDrawLine(graphics, pen, cxf - d, cyf - 0.5, cxf, cyf - 3.5);
+                let _ = GdipDrawLine(graphics, pen, cxf, cyf - 3.5, cxf + d, cyf - 0.5);
+            }
+
+            let _ = GdipDeletePen(pen);
+        }
+        let _ = GdipDeleteGraphics(graphics);
     }
 }
 
@@ -3647,7 +3759,7 @@ unsafe fn draw_compact_toolbar_button(
         let start_x = rc.left + ((btn_w - total_content_w) / 2).max(4);
 
         let mid_y = (rc.top + rc.bottom) / 2;
-        draw_icon_double_chevron(hdc, start_x + 5, mid_y, downwards, icon_col);
+        draw_icon_double_chevron(hdc, start_x + 6, mid_y, downwards, icon_col);
 
         let _ = SetTextColor(hdc, COLORREF(text_col));
         let text_left = start_x + icon_w + spacing;
@@ -14098,6 +14210,69 @@ mod tests {
             assert_eq!(rc_expand_all.top, rc_collapse_all.top);
             assert_eq!(rc_btn_fold.left - rc_btn_conn.right, btn_gap);
             assert_eq!(rc_collapse_all.left - rc_expand_all.right, btn_gap);
+        }
+    }
+
+    #[test]
+    fn test_gdiplus_api() {
+        use windows::Win32::Graphics::Gdi::*;
+        use windows::Win32::Graphics::GdiPlus::*;
+        ensure_gdiplus_initialized();
+        unsafe {
+            let hdc = CreateCompatibleDC(None);
+            let hbm = CreateCompatibleBitmap(hdc, 32, 32);
+            let old = SelectObject(hdc, hbm.into());
+
+            let mut graphics: *mut GpGraphics = std::ptr::null_mut();
+            let g_res = GdipCreateFromHDC(hdc, &mut graphics);
+            assert_eq!(g_res, Ok);
+            let _ = GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
+
+            let mut pen: *mut GpPen = std::ptr::null_mut();
+            let pen_res = GdipCreatePen1(0xFF38BDF8, 1.5, UnitPixel, &mut pen);
+            assert_eq!(pen_res, Ok);
+            let _ = GdipSetPenStartCap(pen, LineCapRound);
+            let _ = GdipSetPenEndCap(pen, LineCapRound);
+            let _ = GdipSetPenLineJoin(pen, LineJoinRound);
+
+            let l_res = GdipDrawLine(graphics, pen, 2.0, 2.0, 10.0, 10.0);
+            assert_eq!(l_res, Ok);
+
+            let _ = GdipDeletePen(pen);
+
+            let mut brush: *mut GpSolidFill = std::ptr::null_mut();
+            let br_res = GdipCreateSolidFill(0xFF38BDF8, &mut brush);
+            assert_eq!(br_res, Ok);
+            let pts = [
+                PointF { X: 2.0, Y: 2.0 },
+                PointF { X: 6.0, Y: 2.0 },
+                PointF { X: 4.0, Y: 6.0 },
+            ];
+            let _ = GdipFillPolygon(
+                graphics,
+                brush as *mut _,
+                pts.as_ptr(),
+                3,
+                FillModeAlternate,
+            );
+            let _ = GdipDeleteBrush(brush as *mut _);
+
+            let _ = GdipDeleteGraphics(graphics);
+
+            // Teste l'appel direct des fonctions de tracé vectoriel GDI+ aux 3 échelles DPI
+            for dpi_scale in [1.0f32, 1.25f32, 1.50f32] {
+                let cx = (16.0 * dpi_scale) as i32;
+                let cy = (16.0 * dpi_scale) as i32;
+                draw_icon_chevron(hdc, cx, cy, true, 0x00FFFFFF);
+                draw_icon_chevron(hdc, cx, cy, false, 0x00FFFFFF);
+                draw_icon_double_chevron(hdc, cx, cy, true, 0x00FFFFFF);
+                draw_icon_double_chevron(hdc, cx, cy, false, 0x00FFFFFF);
+                draw_icon_priority(hdc, cx - 5, cy - 6, COL_PRIORITY_PIN);
+            }
+
+            let _ = SelectObject(hdc, old);
+            let _ = DeleteObject(hbm.into());
+            let _ = DeleteDC(hdc);
         }
     }
 }

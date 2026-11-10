@@ -10,9 +10,13 @@ Cette version **1.0.2** apporte des améliorations ergonomiques majeures demand�
 
 ### 📂 Contrôle global : Boutons « Tout déplier » et « Tout replier »
 - **Boutons compacts intégrés** : Positionnés élégamment sous la zone de recherche et au-dessus de l'arborescence, ces deux boutons Fluent permettent de contrôler en un clic l'affichage de l'ensemble de la hiérarchie.
-- **Icônes vectorielles claires** : Dessinées avec une grande netteté en GDI natif (double chevron descendant pour « Tout déplier », double chevron montant pour « Tout replier »).
+- **Pictogrammes vectoriels Fluent antialiasés** : Rendu vectoriel ultra-net via GDI+ avec antialiasing intégral, traits d'épaisseur uniforme et extrémités arrondies. Deux chevrons descendants pour « Tout déplier », deux chevrons montants pour « Tout replier », avec une symétrie verticale rigoureuse et un alignement optique centré.
 - **Exécution instantanée et atomique** : L'action récursive parcourt l'ensemble des nœuds et synchronise immédiatement l'état persistant dans la base SQLite (`Storage::set_all_folders_expanded`).
 - **Préservation intégrale** : Ne modifie aucunement les favoris, les métadonnées de dossiers ni les sessions en cours.
+
+### 🌿 Chevrons vectoriels de l'arborescence des dossiers
+- **Géométrie vectorielle commune à 90°** : Les chevrons d'expansion des dossiers utilisent désormais un tracé vectoriel unique tourné de 90° entre l'état replié (`>`) et l'état déplié (`⌄`).
+- **Netteté et antialiasing GDI+** : Rendu parfaitement lisse sans aucun effet de pixelisation ni escalier, avec des extrémités arrondies et un centrage vertical parfait sur chaque ligne à 100 %, 125 % et 150 % DPI.
 
 ### 💾 Persistance individuelle de l'état développé / replié des dossiers
 - **Mémorisation par identifiant stable** : Chaque dossier enregistre son propre état d'expansion (`is_expanded`) indexé par son identifiant SQLite unique, insensible aux renommages et à l'ordre d'affichage.
@@ -28,7 +32,7 @@ Cette version **1.0.2** apporte des améliorations ergonomiques majeures demand�
   1. **Connexions prioritaires** classées par ordre alphabétique (A à Z).
   2. **Connexions normales** classées par ordre alphabétique (A à Z).
   3. **Sous-dossiers** classés par ordre alphabétique (A à Z).
-- **Indicateur visuel distinctif** : Une flèche montante stylisée (`▲`) de couleur ambre / bleu accent s'affiche directement sur le nœud de connexion dans l'arborescence, garantissant une distinction visuelle immédiate par rapport à l'étoile dorée des favoris.
+- **Épingle Fluent minimaliste antialiasée** : Remplacement de l'ancienne flèche par une épingle vectorielle discrète (pushpin Fluent) de couleur bleu ciel `#38BDF8`, parfaitement alignée avec le texte et distincte de l'étoile dorée des favoris.
 - **Contrôle ergonomique rapide** :
   - Case à cocher « Marquer comme prioritaire » intégrée dans les formulaires de création et de modification de connexion.
   - Action instantanée dans le menu contextuel clic droit : « Marquer comme prioritaire » / « Retirer la priorité ».
@@ -50,7 +54,7 @@ Cette version **1.0.2** apporte des améliorations ergonomiques majeures demand�
 
 | Fichier | Taille | Empreinte SHA-256 |
 | :--- | :--- | :--- |
-| **`Malvision.exe`** | 5 207 040 octets (~5.2 Mo) | `8e3f4bd5549073876f2be59c787f01644245a5f86abee51e5e8bfc35dffa0d0f` |
+| **`Malvision.exe`** | 5 209 088 octets (~5.2 Mo) | `2715e0ed71368db49193de19b153a2c03abae3ee71c6e07375d474a85cf85cac` |
 
 ---
 
