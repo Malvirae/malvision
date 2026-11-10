@@ -2,17 +2,23 @@
 
 Application native **Windows 11 x64** de gestion de connexions distantes, écrite en **Rust** avec `windows-rs` (Win32 natif + COM/ActiveX + SQLite embarqué + DPAPI).
 
-**Version actuelle :** `1.0.2` (V1.0.2 Stable Portable)
+**Version actuelle :** `1.0.3` (V1.0.3 Stable Portable)
 
 ---
 
-## Fonctionnalités principales (V1.0.2)
+## Fonctionnalités principales (V1.0.3)
+
+- **Source unique de vérité pour le moteur de mises à jour (V1.0.3)** :
+  - **Élimination de la duplication de version** : suppression de la constante codée en dur `SemVer::CURRENT` au profit de `CARGO_PKG_VERSION` via la fonction centralisée `current_semver()`.
+  - **Comparaison exacte des versions GitHub** : la version installée se compare désormais à sa version locale réelle (`1.0.3 == 1.0.3` -> à jour ; `1.0.2 < 1.0.3` -> à jour ; seule une version supérieure `> 1.0.3` propose le téléchargement).
+  - **Sécurité et résilience** : en cas d'erreur de lecture de la version locale, aucun téléchargement n'est autorisé (`unwrap_or(false)`).
+  - **En-têtes HTTP dynamiques** : User-Agent WinHTTP formaté dynamiquement avec la version courante (`Malvision/1.0.3`).
 
 - **Ergonomie avancée de l'arborescence (V1.0.2)** :
   - **Boutons « Tout déplier » et « Tout replier »** : deux boutons compacts style Fluent situés sous le champ de recherche avec doubles chevrons vectoriels descendants (déplier) et montants (replier). Actions instantanées et fluides sur plusieurs centaines de dossiers sans altérer les sessions en cours.
   - **Persistance individuelle de l'état des dossiers** : mémorisation de l'état développé ou replié de chaque dossier par identifiant stable SQLite (`folders.is_expanded`). Restauration fidèle après fermeture complète et redémarrage, préservée lors des changements de thèmes, rafraîchissements ou recherches sans écritures redondantes.
   - **Connexions prioritaires** : nouvelle propriété locale à chaque dossier permettant de faire remonter les connexions critiques en haut de liste. Ordre obligatoire respecté dans l'arborescence et sur le tableau de bord : (1) Connexions prioritaires alphabétiques, (2) Connexions normales alphabétiques, (3) Sous-dossiers alphabétiques.
-  - **Indicateur visuel distinctif** : flèche verticale vers le haut (orange/ambre) affichée à côté du nom de la connexion prioritaire, parfaitement dissociée du losange doré des favoris (avec lesquels elle peut coexister).
+  - **Indicateur visuel distinctif** : triangle creux vert émeraude (`#34C88A`) affiché à côté du nom de la connexion prioritaire, parfaitement dissocié du losange doré des favoris (avec lesquels elle peut coexister).
   - **Gestion complète de la priorité** : case à cocher « Connexion prioritaire » dans les formulaires de création et de modification, et bascule immédiate via le menu contextuel (« Marquer comme prioritaire » / « Retirer la priorité »).
   - **Symétrie stricte des boutons d'en-tête** : calcul dynamique de la largeur disponible `(largeur_disponible - espacement) / 2` conférant une largeur et une hauteur strictement identiques aux boutons « + Connexion » (bleu accentué) et « + Dossier » (surface neutre), ainsi qu'aux boutons « Tout déplier » et « Tout replier », testé à 100 %, 125 % et 150 % DPI.
 

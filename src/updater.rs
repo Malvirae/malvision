@@ -25,11 +25,11 @@ pub struct SemVer {
 }
 
 impl SemVer {
-    pub const CURRENT: Self = Self {
-        major: 1,
-        minor: 0,
-        patch: 1,
-    };
+    /// Retourne la version locale courante dérivée de Cargo (source unique de vérité).
+    #[allow(dead_code)]
+    pub fn current() -> Result<Self, String> {
+        current_semver()
+    }
 
     #[allow(dead_code)]
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
@@ -54,6 +54,13 @@ impl SemVer {
             patch,
         })
     }
+}
+
+/// Retourne la version locale de l'application sous forme de `SemVer`,
+/// extraite de `CARGO_PKG_VERSION` (source unique de vérité).
+pub fn current_semver() -> Result<SemVer, String> {
+    SemVer::parse(CURRENT_VERSION)
+        .ok_or_else(|| format!("Version locale invalide : {CURRENT_VERSION}"))
 }
 
 impl PartialOrd for SemVer {
@@ -204,9 +211,10 @@ fn winhttp_get_with_depth(url: &str, depth: u32) -> Result<Vec<u8>, String> {
     unsafe {
         let (host, port, path) = parse_url(url)?;
 
-        let user_agent = w!("Malvision/1.0.2 (Windows NT 10.0; Win64; x64)");
+        let ua_str = format!("Malvision/{CURRENT_VERSION} (Windows NT 10.0; Win64; x64)\0");
+        let ua_w: Vec<u16> = ua_str.encode_utf16().collect();
         let session = WinHttpOpen(
-            user_agent,
+            PCWSTR(ua_w.as_ptr()),
             WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
             PCWSTR::null(),
             PCWSTR::null(),
@@ -245,9 +253,10 @@ fn winhttp_get_with_depth(url: &str, depth: u32) -> Result<Vec<u8>, String> {
         let _ = WinHttpSetTimeouts(request, 5000, 5000, 5000, 10000);
 
         // Envoyer la requête avec accept header standard
-        let headers: Vec<u16> = "Accept: application/vnd.github.v3+json, application/octet-stream, */*\r\nUser-Agent: Malvision/1.0.2\r\n"
-            .encode_utf16()
-            .collect();
+        let headers_str = format!(
+            "Accept: application/vnd.github.v3+json, application/octet-stream, */*\r\nUser-Agent: Malvision/{CURRENT_VERSION}\r\n"
+        );
+        let headers: Vec<u16> = headers_str.encode_utf16().collect();
         let send_res = WinHttpSendRequest(request, Some(&headers), None, 0, 0, 0);
         if let Err(e) = send_res {
             let _ = WinHttpCloseHandle(request);
@@ -704,5 +713,138 @@ mod tests {
         let res = parse_release_json(not_found_json);
         assert!(res.is_err());
         assert_eq!(res.unwrap_err(), MSG_NO_PUBLIC_RELEASE);
+    }
+
+    #[test]
+    fn test_current_semver_matches_cargo_pkg_version() {
+        let current = current_semver()
+            .expect("La version locale doit être dérivée sans erreur de CARGO_PKG_VERSION");
+        assert_eq!(current.to_string(), CURRENT_VERSION);
+        assert_eq!(current.to_string(), "1.0.3");
+        assert_eq!(current, SemVer::new(1, 0, 3));
+        assert_eq!(SemVer::current().unwrap(), current);
+    }
+
+    #[test]
+    fn test_semver_comparison_matrix_for_v103() {
+        let local_v103 = SemVer::parse("1.0.3").unwrap();
+
+        // 1.0.3 == 1.0.3 -> À jour (pas de mise à jour)
+        let remote_equal = SemVer::parse("1.0.3").unwrap();
+        assert_eq!(remote_equal, local_v103);
+        assert!(
+            !(remote_equal > local_v103),
+            "1.0.3 == 1.0.3 ne doit pas être considéré comme une mise à jour"
+        );
+
+        // 1.0.4 > 1.0.3 -> Mise à jour disponible
+        let remote_patch_higher = SemVer::parse("1.0.4").unwrap();
+        assert!(
+            remote_patch_higher > local_v103,
+            "1.0.4 > 1.0.3 doit être détecté comme une mise à jour disponible"
+        );
+
+        // 1.1.0 > 1.0.3 -> Mise à jour disponible
+        let remote_minor_higher = SemVer::parse("1.1.0").unwrap();
+        assert!(
+            remote_minor_higher > local_v103,
+            "1.1.0 > 1.0.3 doit être détecté comme une mise à jour disponible"
+        );
+
+        // 2.0.0 > 1.0.3 -> Mise à jour disponible
+        let remote_major_higher = SemVer::parse("2.0.0").unwrap();
+        assert!(
+            remote_major_higher > local_v103,
+            "2.0.0 > 1.0.3 doit être détecté comme une mise à jour disponible"
+        );
+
+        // 1.0.2 < 1.0.3 -> Aucune mise à jour
+        let remote_older_v102 = SemVer::parse("1.0.2").unwrap();
+        assert!(
+            !(remote_older_v102 > local_v103),
+            "1.0.2 < 1.0.3 ne doit pas être considéré comme une mise à jour"
+        );
+
+        // 1.0.1 < 1.0.3 -> Aucune mise à jour
+        let remote_older_v101 = SemVer::parse("1.0.1").unwrap();
+        assert!(
+            !(remote_older_v101 > local_v103),
+            "1.0.1 < 1.0.3 ne doit pas être considéré comme une mise à jour"
+        );
+
+        // 0.9.9 < 1.0.3 -> Aucune mise à jour
+        let remote_older_v099 = SemVer::parse("0.9.9").unwrap();
+        assert!(
+            !(remote_older_v099 > local_v103),
+            "0.9.9 < 1.0.3 ne doit pas être considéré comme une mise à jour"
+        );
+    }
+
+    #[test]
+    fn test_invalid_local_version_never_authorizes_update() {
+        // En cas d'erreur de parsing de la version locale, is_upgrade doit TOUJOURS valoir false
+        let fake_err: Result<SemVer, String> = Err("Format invalide".to_string());
+        let remote = SemVer::new(9, 9, 9);
+        let is_upgrade = fake_err.map(|local| remote > local).unwrap_or(false);
+        assert!(
+            !is_upgrade,
+            "Une erreur de version locale ne doit JAMAIS autoriser une mise à jour"
+        );
+    }
+
+    #[test]
+    fn test_startup_and_manual_comparison_simulation() {
+        let local = current_semver().expect("Version locale valide");
+
+        // Simulation réponse GitHub distante égale à 1.0.3
+        let remote_info_same = ReleaseInfo {
+            tag_name: "v1.0.3".to_string(),
+            name: "Malvision 1.0.3".to_string(),
+            version: SemVer::new(1, 0, 3),
+            body: String::new(),
+            html_url: String::new(),
+            exe_asset: None,
+            expected_exe_sha256: None,
+            sha256_sums_asset: None,
+        };
+        let is_upgrade_same = remote_info_same.version > local;
+        assert!(
+            !is_upgrade_same,
+            "1.0.3 distant == 1.0.3 local -> Doit indiquer à jour"
+        );
+
+        // Simulation réponse GitHub distante antérieure (ex: 1.0.2 alors qu'on est en 1.0.3)
+        let remote_info_old = ReleaseInfo {
+            tag_name: "v1.0.2".to_string(),
+            name: "Malvision 1.0.2".to_string(),
+            version: SemVer::new(1, 0, 2),
+            body: String::new(),
+            html_url: String::new(),
+            exe_asset: None,
+            expected_exe_sha256: None,
+            sha256_sums_asset: None,
+        };
+        let is_upgrade_old = remote_info_old.version > local;
+        assert!(
+            !is_upgrade_old,
+            "1.0.2 distant < 1.0.3 local -> Doit indiquer à jour"
+        );
+
+        // Simulation réponse GitHub distante postérieure (ex: 1.0.4)
+        let remote_info_new = ReleaseInfo {
+            tag_name: "v1.0.4".to_string(),
+            name: "Malvision 1.0.4".to_string(),
+            version: SemVer::new(1, 0, 4),
+            body: String::new(),
+            html_url: String::new(),
+            exe_asset: None,
+            expected_exe_sha256: None,
+            sha256_sums_asset: None,
+        };
+        let is_upgrade_new = remote_info_new.version > local;
+        assert!(
+            is_upgrade_new,
+            "1.0.4 distant > 1.0.3 local -> Doit indiquer mise à jour disponible"
+        );
     }
 }

@@ -4879,7 +4879,9 @@ impl AppWindowState {
             // Pause initiale discrète de 3 secondes pour ne pas ralentir le démarrage
             std::thread::sleep(std::time::Duration::from_secs(3));
             if let Ok(info) = crate::updater::check_latest_release(crate::updater::GITHUB_REPO)
-                && info.version > crate::updater::SemVer::CURRENT
+                && crate::updater::current_semver()
+                    .map(|local| info.version > local)
+                    .unwrap_or(false)
             {
                 let ver_str = info.version.to_string();
                 if ignored.as_deref() != Some(&ver_str) {
@@ -9423,7 +9425,10 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                         match crate::updater::check_latest_release(crate::updater::GITHUB_REPO) {
                             Ok(info) => {
                                 let _ = EnableWindow(state.btn_check_update, true);
-                                if info.version > crate::updater::SemVer::CURRENT {
+                                let is_upgrade = crate::updater::current_semver()
+                                    .map(|local| info.version > local)
+                                    .unwrap_or(false);
+                                if is_upgrade {
                                     state.update_status_text = format!(
                                         "Nouvelle version disponible : v{} !",
                                         info.version

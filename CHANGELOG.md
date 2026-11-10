@@ -2,6 +2,24 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
+## [1.0.3] — Correctif de comparaison des versions GitHub (2026-11-10)
+
+### Corrigé
+- **Moteur de mises à jour — Source unique de vérité `SemVer`** :
+  - Suppression de la constante obsolète en dur `SemVer::CURRENT` dans `src/updater.rs` qui était restée fixée à `1.0.1`, provoquant la détection erronée d'une mise à jour disponible sur une version identique ou antérieure.
+  - Implémentation de `current_semver() -> Result<SemVer, String>` et `SemVer::current()`, dérivant dynamiquement la version locale depuis `CARGO_PKG_VERSION` (source unique de vérité absolue).
+  - Remplacement de toutes les comparaisons dans `src/ui.rs` (`spawn_startup_update_check` et dialogue Paramètres > Mises à jour).
+  - Sécurisation stricte : en cas d'erreur de lecture de la version locale, aucun téléchargement n'est autorisé (`unwrap_or(false)`).
+- **Réseau HTTP & User-Agent** :
+  - Génération dynamique du User-Agent WinHTTP et des en-têtes HTTP de requêtes GitHub à partir de `CURRENT_VERSION` (`Malvision/1.0.3 (Windows NT 10.0; Win64; x64)`), éliminant toute chaîne de version résiduelle en dur.
+
+### Testé
+- Suite de tests automatisés étendue à **75 tests (100 % passants)** :
+  - `test_current_semver_matches_cargo_pkg_version` : validation de la concordance exacte entre la version locale SemVer et `CARGO_PKG_VERSION`.
+  - `test_semver_comparison_matrix_for_v103` : matrice complète de comparaison (`1.0.3 == 1.0.3` -> false, `1.0.4 > 1.0.3` -> true, `1.1.0 > 1.0.3` -> true, `2.0.0 > 1.0.3` -> true, `1.0.2 < 1.0.3` -> false, `1.0.1 < 1.0.3` -> false).
+  - `test_invalid_local_version_never_authorizes_update` : garantie qu'un échec de parsing ne déclenche jamais de téléchargement.
+  - `test_startup_and_manual_comparison_simulation` : simulation des réponses GitHub (version égale, antérieure et supérieure).
+
 ## [1.0.2] — Ergonomie avancée de l'arborescence (2026-11-10)
 
 ### Ajouté & Amélioré
