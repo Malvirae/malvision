@@ -31,14 +31,13 @@ use windows::Win32::UI::Controls::{
     CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDIS_HOT, CDIS_SELECTED, CDRF_NOTIFYITEMDRAW,
     CDRF_SKIPDEFAULT, DRAWITEMSTRUCT, HTREEITEM, MEASUREITEMSTRUCT, NM_CLICK, NM_CUSTOMDRAW,
     NM_DBLCLK, NM_RCLICK, NMHDR, NMTREEVIEWW, NMTVCUSTOMDRAW, ODS_FOCUS, ODS_SELECTED, ODT_BUTTON,
-    ODT_COMBOBOX, SetWindowTheme, TV_FIRST, TVE_COLLAPSE, TVE_EXPAND, TVE_TOGGLE, TVGN_CARET,
-    TVGN_DROPHILITE, TVGN_FIRSTVISIBLE, TVGN_NEXTVISIBLE, TVHITTESTINFO, TVHT_ONITEMBUTTON,
-    TVI_LAST, TVI_ROOT, TVIF_HANDLE, TVIF_PARAM, TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW,
-    TVIS_EXPANDED, TVITEMEXW, TVITEMW, TVM_DELETEITEM, TVM_EXPAND, TVM_GETITEMRECT, TVM_GETITEMW,
-    TVM_GETNEXTITEM, TVM_HITTEST, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETBKCOLOR,
-    TVM_SETTEXTCOLOR, TVN_BEGINDRAGW, TVN_ITEMEXPANDEDW, TVN_SELCHANGEDW, TVS_FULLROWSELECT,
-    TVS_HASBUTTONS, TVS_SHOWSELALWAYS, WC_BUTTONW, WC_COMBOBOXW, WC_EDITW, WC_TREEVIEWW,
-    WM_MOUSELEAVE,
+    ODT_COMBOBOX, SetWindowTheme, TV_FIRST, TVE_COLLAPSE, TVE_EXPAND, TVGN_CARET, TVGN_DROPHILITE,
+    TVGN_FIRSTVISIBLE, TVGN_NEXTVISIBLE, TVHITTESTINFO, TVHT_ONITEMBUTTON, TVI_LAST, TVI_ROOT,
+    TVIF_HANDLE, TVIF_PARAM, TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW, TVIS_EXPANDED, TVITEMEXW,
+    TVITEMW, TVM_DELETEITEM, TVM_EXPAND, TVM_GETITEMRECT, TVM_GETITEMW, TVM_GETNEXTITEM,
+    TVM_HITTEST, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETBKCOLOR, TVM_SETTEXTCOLOR, TVN_BEGINDRAGW,
+    TVN_ITEMEXPANDEDW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW, TVS_FULLROWSELECT, TVS_HASBUTTONS,
+    TVS_SHOWSELALWAYS, WC_BUTTONW, WC_COMBOBOXW, WC_EDITW, WC_TREEVIEWW, WM_MOUSELEAVE,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -1666,6 +1665,62 @@ impl AppWindowState {
         self.rebuild_treeview();
     }
 
+    pub fn toggle_or_set_folder_expansion(
+        &mut self,
+        hitem: HTREEITEM,
+        fid: i64,
+        force_state: Option<bool>,
+    ) {
+        if hitem.0 == 0 {
+            return;
+        }
+        let current = self.is_tree_item_expanded(hitem);
+        let new_state = force_state.unwrap_or(!current);
+
+        let prev_prog = self.is_programmatic_tree_update;
+        self.is_programmatic_tree_update = true;
+
+        let act = if new_state { TVE_EXPAND } else { TVE_COLLAPSE };
+        unsafe {
+            let _ = SendMessageW(
+                self.treeview,
+                TVM_EXPAND,
+                Some(WPARAM(act.0 as usize)),
+                Some(LPARAM(hitem.0)),
+            );
+        }
+
+        self.is_programmatic_tree_update = prev_prog;
+
+        let _ = self.storage.set_folder_expanded(fid, new_state);
+        if let Some(f) = self.cached_folders.get_mut(&fid) {
+            f.is_expanded = new_state;
+        }
+
+        unsafe {
+            let _ = InvalidateRect(Some(self.treeview), None, false);
+        }
+        self.invalidate_canvas();
+    }
+
+    pub fn toggle_root_expansion(&mut self, hitem: HTREEITEM) {
+        if hitem.0 == 0 {
+            return;
+        }
+        let current = self.is_tree_item_expanded(hitem);
+        let act = if !current { TVE_EXPAND } else { TVE_COLLAPSE };
+        unsafe {
+            let _ = SendMessageW(
+                self.treeview,
+                TVM_EXPAND,
+                Some(WPARAM(act.0 as usize)),
+                Some(LPARAM(hitem.0)),
+            );
+            let _ = InvalidateRect(Some(self.treeview), None, false);
+        }
+        self.invalidate_canvas();
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn populate_folder_subtree(
         &self,
@@ -2028,13 +2083,17 @@ impl AppWindowState {
                 Some(WPARAM(0)),
                 Some(LPARAM(&mut hti as *mut TVHITTESTINFO as isize)),
             );
-            let hitem = HTREEITEM(h.0);
+            let hitem = if h.0 != 0 {
+                HTREEITEM(h.0)
+            } else if hti.hItem.0 != 0 {
+                hti.hItem
+            } else {
+                HTREEITEM(0)
+            };
             if hitem.0 == 0 {
                 return;
             }
-            if (hti.flags.0 & TVHT_ONITEMBUTTON.0) != 0 {
-                return;
-            }
+
             if let Some(kind) = self.node_kind_from_hitem(hitem)
                 && matches!(
                     kind,
@@ -2042,14 +2101,38 @@ impl AppWindowState {
                         | TreeNodeKind::ConnectionsRoot
                         | TreeNodeKind::Folder(_)
                 )
-                && pt.x <= 48
             {
-                let _ = SendMessageW(
-                    self.treeview,
-                    TVM_EXPAND,
-                    Some(WPARAM(TVE_TOGGLE.0 as usize)),
-                    Some(LPARAM(hitem.0)),
-                );
+                let is_toggle_zone = if (hti.flags.0 & TVHT_ONITEMBUTTON.0) != 0 {
+                    true
+                } else {
+                    let mut item_rect = [0u8; 32];
+                    let ptr_rect = item_rect.as_mut_ptr() as *mut usize;
+                    *ptr_rect = hitem.0 as usize;
+                    let ok = SendMessageW(
+                        self.treeview,
+                        TVM_GETITEMRECT,
+                        Some(WPARAM(1)), // 1 = rectangle du texte uniquement
+                        Some(LPARAM(item_rect.as_mut_ptr() as isize)),
+                    );
+                    if ok.0 != 0 {
+                        let rc = *(item_rect.as_ptr() as *const RECT);
+                        pt.x < rc.left
+                    } else {
+                        pt.x <= 48
+                    }
+                };
+
+                if is_toggle_zone {
+                    match kind {
+                        TreeNodeKind::Folder(fid) => {
+                            self.toggle_or_set_folder_expansion(hitem, fid, None);
+                        }
+                        TreeNodeKind::FavoritesRoot | TreeNodeKind::ConnectionsRoot => {
+                            self.toggle_root_expansion(hitem);
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
     }
@@ -5207,16 +5290,12 @@ unsafe extern "system" fn treeview_wnd_proc(
                                 // Consommer le message : évite le comportement natif par défaut et élimine tout double lancement
                                 return LRESULT(0);
                             }
-                            TreeNodeKind::Folder(_)
-                            | TreeNodeKind::FavoritesRoot
-                            | TreeNodeKind::ConnectionsRoot => {
-                                // Développer ou replier le dossier directement
-                                let _ = SendMessageW(
-                                    hwnd,
-                                    TVM_EXPAND,
-                                    Some(WPARAM(TVE_TOGGLE.0 as usize)),
-                                    Some(LPARAM(hitem.0)),
-                                );
+                            TreeNodeKind::Folder(fid) => {
+                                (*ptr).toggle_or_set_folder_expansion(hitem, fid, None);
+                                return LRESULT(0);
+                            }
+                            TreeNodeKind::FavoritesRoot | TreeNodeKind::ConnectionsRoot => {
+                                (*ptr).toggle_root_expansion(hitem);
                                 return LRESULT(0);
                             }
                         }
@@ -11087,16 +11166,26 @@ unsafe extern "system" fn main_wnd_proc(
                                 let _ = InvalidateRect(Some((*ptr).treeview), None, false);
                                 (*ptr).invalidate_canvas();
                             }
+                            TVN_ITEMEXPANDINGW => {
+                                return LRESULT(0);
+                            }
                             TVN_ITEMEXPANDEDW => {
                                 if !(*ptr).is_programmatic_tree_update
                                     && (*ptr).search_query.trim().is_empty()
                                 {
                                     let nmtv = &*(lparam.0 as *const NMTREEVIEWW);
-                                    if let Some(TreeNodeKind::Folder(fid)) =
-                                        TreeNodeKind::from_lparam(nmtv.itemNew.lParam.0)
-                                    {
-                                        let expanded =
-                                            (*ptr).is_tree_item_expanded(nmtv.itemNew.hItem);
+                                    let hitem = nmtv.itemNew.hItem;
+                                    let raw_lparam = nmtv.itemNew.lParam.0;
+                                    let kind = TreeNodeKind::from_lparam(raw_lparam)
+                                        .or_else(|| (*ptr).node_kind_from_hitem(hitem));
+                                    if let Some(TreeNodeKind::Folder(fid)) = kind {
+                                        let expanded = if (nmtv.action.0 & TVE_EXPAND.0) != 0 {
+                                            true
+                                        } else if (nmtv.action.0 & TVE_COLLAPSE.0) != 0 {
+                                            false
+                                        } else {
+                                            (*ptr).is_tree_item_expanded(hitem)
+                                        };
                                         let _ = (*ptr).storage.set_folder_expanded(fid, expanded);
                                         if let Some(f) = (*ptr).cached_folders.get_mut(&fid) {
                                             f.is_expanded = expanded;
@@ -11142,11 +11231,16 @@ unsafe extern "system" fn main_wnd_proc(
                                                 (*ptr).launch_connection_by_id(cid);
                                                 return LRESULT(1);
                                             }
-                                            TreeNodeKind::Folder(_)
-                                            | TreeNodeKind::FavoritesRoot
+                                            TreeNodeKind::Folder(fid) => {
+                                                (*ptr).toggle_or_set_folder_expansion(
+                                                    hitem, fid, None,
+                                                );
+                                                return LRESULT(1);
+                                            }
+                                            TreeNodeKind::FavoritesRoot
                                             | TreeNodeKind::ConnectionsRoot => {
-                                                // Laisser le contrôle TreeView développer/replier le dossier nativement
-                                                return LRESULT(0);
+                                                (*ptr).toggle_root_expansion(hitem);
+                                                return LRESULT(1);
                                             }
                                         }
                                     }
@@ -13546,11 +13640,44 @@ mod tests {
 
     #[test]
     fn test_ui_folder_expansion_individual_and_global_commands() {
+        use windows::Win32::UI::Controls::{TVGN_CHILD, TVGN_NEXT, TVGN_ROOT};
         let _guard = WIN32_UI_TEST_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let db_path = create_temp_test_db_path("tree_expand_pers");
         let _ = std::fs::remove_file(&db_path);
+
+        fn find_tree_item(
+            tv: HWND,
+            item: HTREEITEM,
+            target: TreeNodeKind,
+            st: &AppWindowState,
+        ) -> Option<HTREEITEM> {
+            if item.0 == 0 {
+                return None;
+            }
+            if st.node_kind_from_hitem(item) == Some(target) {
+                return Some(item);
+            }
+            unsafe {
+                let child = SendMessageW(
+                    tv,
+                    TVM_GETNEXTITEM,
+                    Some(WPARAM(TVGN_CHILD as usize)),
+                    Some(LPARAM(item.0)),
+                );
+                if let Some(f) = find_tree_item(tv, HTREEITEM(child.0), target, st) {
+                    return Some(f);
+                }
+                let next = SendMessageW(
+                    tv,
+                    TVM_GETNEXTITEM,
+                    Some(WPARAM(TVGN_NEXT as usize)),
+                    Some(LPARAM(item.0)),
+                );
+                find_tree_item(tv, HTREEITEM(next.0), target, st)
+            }
+        }
 
         unsafe {
             let hwnd = create_isolated_test_main_window(&db_path);
@@ -13563,10 +13690,24 @@ mod tests {
                 .storage
                 .create_folder("Client A", Some(f_clients.id))
                 .unwrap();
+            let f_infra = state
+                .storage
+                .create_folder("Infrastructure", Some(f_a.id))
+                .unwrap();
             let f_b = state
                 .storage
                 .create_folder("Client B", Some(f_clients.id))
                 .unwrap();
+
+            let mut draft = make_test_draft(
+                "Srv Prio",
+                Protocol::Rdp,
+                "10.0.0.1",
+                Some(f_infra.id),
+                false,
+            );
+            draft.is_priority = true;
+            let _conn_prio = state.storage.create_connection(draft).unwrap();
 
             state.rebuild_treeview();
 
@@ -13574,53 +13715,145 @@ mod tests {
             let f_map = state.storage.list_folders().unwrap();
             assert!(f_map.iter().all(|f| f.is_expanded));
 
-            // Replier individuellement Client A
-            state.storage.set_folder_expanded(f_a.id, false).unwrap();
-            state.rebuild_treeview();
+            let root_item = SendMessageW(
+                state.treeview,
+                TVM_GETNEXTITEM,
+                Some(WPARAM(TVGN_ROOT as usize)),
+                Some(LPARAM(0)),
+            );
+            let h_clients = find_tree_item(
+                state.treeview,
+                HTREEITEM(root_item.0),
+                TreeNodeKind::Folder(f_clients.id),
+                state,
+            )
+            .expect("Dossier Clients introuvable dans le TreeView");
+            let h_a = find_tree_item(
+                state.treeview,
+                HTREEITEM(root_item.0),
+                TreeNodeKind::Folder(f_a.id),
+                state,
+            )
+            .expect("Dossier Client A introuvable dans le TreeView");
 
-            assert!(state.cached_folders.get(&f_clients.id).unwrap().is_expanded);
-            assert!(!state.cached_folders.get(&f_a.id).unwrap().is_expanded);
-            assert!(state.cached_folders.get(&f_b.id).unwrap().is_expanded);
+            // 1. Simulation d'un double-clic sur la rangée de Client A -> doit le replier et sauvegarder dans SQLite
+            let mut item_rect_a = [0u8; 32];
+            *(item_rect_a.as_mut_ptr() as *mut usize) = h_a.0 as usize;
+            let _ = SendMessageW(
+                state.treeview,
+                TVM_GETITEMRECT,
+                Some(WPARAM(0)),
+                Some(LPARAM(item_rect_a.as_mut_ptr() as isize)),
+            );
+            let rc_a = *(item_rect_a.as_ptr() as *const RECT);
+            let dbl_x = (rc_a.left + 50) as i16 as u32;
+            let dbl_y = (rc_a.top + (rc_a.bottom - rc_a.top) / 2) as i16 as u32;
+            let dbl_lparam = LPARAM(((dbl_y << 16) | (dbl_x & 0xFFFF)) as isize);
+            let _ = SendMessageW(
+                state.treeview,
+                WM_LBUTTONDBLCLK,
+                Some(WPARAM(1)),
+                Some(dbl_lparam),
+            );
 
-            // Action globale : Tout replier
-            state.collapse_all_folders();
-            for f in state.storage.list_folders().unwrap() {
-                assert!(!f.is_expanded, "Le dossier {} doit être replié", f.name);
-            }
-
-            // Action globale : Tout déplier
-            state.expand_all_folders();
-            for f in state.storage.list_folders().unwrap() {
-                assert!(f.is_expanded, "Le dossier {} doit être déplié", f.name);
-            }
-
-            // Remettre Client A replié
-            state.storage.set_folder_expanded(f_a.id, false).unwrap();
-            state.rebuild_treeview();
-
-            // Changement de thème : ne doit pas réinitialiser les états
-            state.apply_theme();
+            // Vérification immédiate dans SQLite
+            let db_a = state.storage.get_folder(f_a.id).unwrap().unwrap();
             assert!(
-                !state
+                !db_a.is_expanded,
+                "Client A DOIT être replié dans SQLite suite au double-clic"
+            );
+            assert!(
+                state
                     .storage
-                    .list_folders()
+                    .get_folder(f_clients.id)
                     .unwrap()
-                    .into_iter()
-                    .find(|f| f.id == f_a.id)
+                    .unwrap()
+                    .is_expanded
+            );
+            assert!(
+                state
+                    .storage
+                    .get_folder(f_infra.id)
+                    .unwrap()
+                    .unwrap()
+                    .is_expanded
+            );
+            assert!(
+                state
+                    .storage
+                    .get_folder(f_b.id)
+                    .unwrap()
                     .unwrap()
                     .is_expanded
             );
 
-            // Recherche temporaire : ne doit pas écraser les états en base
+            // 2. Simulation d'un clic chevron sur Clients -> doit le replier
+            let mut item_rect_c = [0u8; 32];
+            *(item_rect_c.as_mut_ptr() as *mut usize) = h_clients.0 as usize;
+            let _ = SendMessageW(
+                state.treeview,
+                TVM_GETITEMRECT,
+                Some(WPARAM(0)),
+                Some(LPARAM(item_rect_c.as_mut_ptr() as isize)),
+            );
+            let rc_c = *(item_rect_c.as_ptr() as *const RECT);
+            let clk_x = (rc_c.left + 8) as i16 as u32;
+            let clk_y = (rc_c.top + (rc_c.bottom - rc_c.top) / 2) as i16 as u32;
+            let clk_lparam = LPARAM(((clk_y << 16) | (clk_x & 0xFFFF)) as isize);
+            let _ = SendMessageW(
+                state.treeview,
+                WM_LBUTTONDOWN,
+                Some(WPARAM(1)),
+                Some(clk_lparam),
+            );
+            let _ = SendMessageW(
+                state.treeview,
+                WM_LBUTTONUP,
+                Some(WPARAM(0)),
+                Some(clk_lparam),
+            );
+
+            let db_c = state.storage.get_folder(f_clients.id).unwrap().unwrap();
+            assert!(
+                !db_c.is_expanded,
+                "Clients DOIT être replié dans SQLite suite au clic chevron"
+            );
+
+            // Redéplier Clients via double-clic
+            let _ = SendMessageW(
+                state.treeview,
+                WM_LBUTTONDBLCLK,
+                Some(WPARAM(1)),
+                Some(clk_lparam),
+            );
+            assert!(
+                state
+                    .storage
+                    .get_folder(f_clients.id)
+                    .unwrap()
+                    .unwrap()
+                    .is_expanded
+            );
+
+            // 3. Changement de thème : ne doit pas réinitialiser les états
+            state.apply_theme();
+            assert!(
+                !state
+                    .storage
+                    .get_folder(f_a.id)
+                    .unwrap()
+                    .unwrap()
+                    .is_expanded
+            );
+
+            // 4. Recherche temporaire : ne doit pas écraser les états en base
             state.search_query = "quelquechose".to_string();
             state.rebuild_treeview();
             assert!(
                 !state
                     .storage
-                    .list_folders()
+                    .get_folder(f_a.id)
                     .unwrap()
-                    .into_iter()
-                    .find(|f| f.id == f_a.id)
                     .unwrap()
                     .is_expanded
             );
@@ -13630,10 +13863,8 @@ mod tests {
             assert!(
                 !state
                     .storage
-                    .list_folders()
+                    .get_folder(f_a.id)
                     .unwrap()
-                    .into_iter()
-                    .find(|f| f.id == f_a.id)
                     .unwrap()
                     .is_expanded
             );
@@ -13641,7 +13872,7 @@ mod tests {
             let _ = DestroyWindow(hwnd);
         }
 
-        // Test de persistance après redémarrage complet de l'application (nouvelle fenêtre sur la même base)
+        // 5. Test de persistance après redémarrage complet (nouvelle fenêtre sur la même base)
         unsafe {
             let hwnd2 = create_isolated_test_main_window(&db_path);
             let ptr2 = GetWindowLongPtrW(hwnd2, GWLP_USERDATA) as *mut AppWindowState;
@@ -13649,8 +13880,12 @@ mod tests {
             let state2 = &mut *ptr2;
 
             let folders = state2.storage.list_folders().unwrap();
+            let c = folders.iter().find(|f| f.name == "Clients").unwrap();
             let a = folders.iter().find(|f| f.name == "Client A").unwrap();
+            let infra = folders.iter().find(|f| f.name == "Infrastructure").unwrap();
             let b = folders.iter().find(|f| f.name == "Client B").unwrap();
+
+            assert!(c.is_expanded, "Clients doit être déplié après redémarrage");
             assert!(
                 !a.is_expanded,
                 "Client A doit rester replié après redémarrage"
@@ -13659,9 +13894,70 @@ mod tests {
                 b.is_expanded,
                 "Client B doit rester déplié après redémarrage"
             );
+            assert!(
+                infra.is_expanded,
+                "Infrastructure doit rester déplié en base bien que son parent soit replié"
+            );
+
+            // 6. Action globale : Tout replier
+            state2.collapse_all_folders();
+            for f in state2.storage.list_folders().unwrap() {
+                assert!(
+                    !f.is_expanded,
+                    "Le dossier {} doit être replié suite à collapse_all",
+                    f.name
+                );
+            }
 
             let _ = DestroyWindow(hwnd2);
         }
+
+        // 7. Redémarrage après « Tout replier » : tous les dossiers doivent rester repliés
+        unsafe {
+            let hwnd3 = create_isolated_test_main_window(&db_path);
+            let ptr3 = GetWindowLongPtrW(hwnd3, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr3.is_null());
+            let state3 = &mut *ptr3;
+
+            for f in state3.storage.list_folders().unwrap() {
+                assert!(
+                    !f.is_expanded,
+                    "Le dossier {} doit rester replié après redémarrage complet",
+                    f.name
+                );
+            }
+
+            // 8. Action globale : Tout déplier
+            state3.expand_all_folders();
+            for f in state3.storage.list_folders().unwrap() {
+                assert!(
+                    f.is_expanded,
+                    "Le dossier {} doit être déplié suite à expand_all",
+                    f.name
+                );
+            }
+
+            let _ = DestroyWindow(hwnd3);
+        }
+
+        // 9. Redémarrage après « Tout déplier » : tous les dossiers doivent rester dépliés
+        unsafe {
+            let hwnd4 = create_isolated_test_main_window(&db_path);
+            let ptr4 = GetWindowLongPtrW(hwnd4, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr4.is_null());
+            let state4 = &mut *ptr4;
+
+            for f in state4.storage.list_folders().unwrap() {
+                assert!(
+                    f.is_expanded,
+                    "Le dossier {} doit rester déplié après redémarrage complet",
+                    f.name
+                );
+            }
+
+            let _ = DestroyWindow(hwnd4);
+        }
+
         let _ = std::fs::remove_file(&db_path);
     }
 

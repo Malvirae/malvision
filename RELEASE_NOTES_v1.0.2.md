@@ -50,7 +50,7 @@ Cette version **1.0.2** apporte des am√©liorations ergonomiques majeures demand√
 
 | Fichier | Taille | Empreinte SHA-256 |
 | :--- | :--- | :--- |
-| **`Malvision.exe`** | 5 205 504 octets (~5.2 Mo) | `0478223ebbbf392a3aff00e651dc21938065a72a40cbeb57c7f42a28f48621e6` |
+| **`Malvision.exe`** | 5 207 040 octets (~5.2 Mo) | `8e3f4bd5549073876f2be59c787f01644245a5f86abee51e5e8bfc35dffa0d0f` |
 
 ---
 

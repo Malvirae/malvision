@@ -13,6 +13,7 @@ Toutes les évolutions notables du projet **Malvision** sont documentées dans c
   - Préservation intégrale des connexions, favoris et sessions RDP actives.
 - **Persistance individuelle de l'état développé / replié des dossiers** :
   - Mémorisation de l'état de chaque dossier par identifiant SQLite stable (`folder_id`), indépendant du nom ou de l'ordre d'affichage.
+  - Prise en charge universelle de la persistance quel que soit le mode d'interaction utilisateur : clic sur chevron ou icône de dossier (avec détection dynamique de la zone d'expansion à toute profondeur), double-clic sur toute la rangée utile (`treeview_wnd_proc`), navigation au clavier (`TVN_ITEMEXPANDEDW`), ou boutons d'outils globaux.
   - Restauration exacte des dossiers développés ou repliés à chaque redémarrage complet de Malvision.
   - Préservation des états lors des rafraîchissements de l'arborescence, des renommages, déplacements de connexions et changements de thème (Sombre, Clair, Système).
   - Découplage complet de la recherche : le dépliage temporaire pour afficher les résultats filtrés ne modifie pas les préférences enregistrées en base.
