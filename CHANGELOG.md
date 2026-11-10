@@ -16,24 +16,26 @@ Toutes les évolutions notables du projet **Malvision** sont documentées dans c
   - Contournement immédiat du mutex d'instance unique et des initialisations lourdes (ActiveX, SQLite, interface Win32) dès l'interception de l'argument `--apply-update`.
 - **Sécurité, Intégrité et Rollback automatique durcis** :
   - **Jeton d'authentification CSPRNG 256 bits** : génération d'octets cryptographiquement sûrs via `BCryptGenRandom(None, buf, BCRYPT_USE_SYSTEM_PREFERRED_RNG)` sans aucun fallback prévisible.
-  - **Protection intégrale et scellement HMAC du manifeste** : calcul d'un HMAC SHA-256 de l'ensemble des champs critiques (`manifest_hmac`) et comparaison en temps constant (`constant_time_compare`), interdisant toute modification non autorisée de la cible ou des arguments. Écriture atomique via fichier temporaire.
+  - **Secret non exposé sur le disque** : le jeton d'authentification secret (`auth_token`) n'est jamais stocké dans le fichier manifeste sur le disque ; il transite exclusivement par argument mémoire vers le processus auxiliaire éphémère.
+  - **Véritable HMAC-SHA-256 natif Windows CNG (RFC 2104 / FIPS 198-1)** : calcul d'un HMAC-SHA-256 conforme via `BCryptOpenAlgorithmProvider` avec `BCRYPT_ALG_HANDLE_HMAC_FLAG` sur l'ensemble des métadonnées critiques (`manifest_hmac`), vérifié en temps constant (`constant_time_compare`).
   - **Contrôle obligatoire du processus parent & Anti-recyclage de PID** : validation obligatoire du chemin d'image (`QueryFullProcessImageNameW`) rejetant toute erreur ou divergence, et vérification de l'horodatage exact de création du processus (`GetProcessTimes`), neutralisant toute exploitation d'un PID réutilisé.
   - **Règles de sécurité sur la cible** : restriction stricte aux fichiers `.exe` et interdiction absolue de cibler les répertoires système Windows (`SystemRoot`).
   - **Confirmation de santé explicite (Health Check)** : émission d'un signal de disponibilité explicite (événement Win32 `Local\Malvision_Health_<token>` et fichier drapeau) après initialisation complète de tous les composants critiques (COM/ActiveX, base de données, fenêtre principale).
-  - **Rollback automatique vérifié et résilient** : en cas de plantage, de fermeture prématurée ou de gel au démarrage du nouveau binaire, le processus enfant est terminé proprement pour libérer les verrous Windows, l'ancienne version (`Malvision.exe.bak`) est restaurée en place, son intégrité est vérifiée et l'application est relancée.
-  - **Récupération différée (`pending_recovery.json`)** : prise en charge d'une récupération différée au démarrage suivant si un verrou persistant empêchait la restauration immédiate.
+  - **Rollback automatique vérifié cryptographiquement** : en cas de plantage, de fermeture prématurée ou de gel au démarrage du nouveau binaire, le processus enfant est terminé pour libérer les verrous Windows, l'ancienne version (`Malvision.exe.bak`) est restaurée en place avec contrôle strict de l'empreinte SHA-256 originale attendue, et l'application est relancée.
+  - **Sécurisation absolue de la récupération différée (`pending_recovery.json`)** : validation contre l'exécutable courant, rejet des liens symboliques et des répertoires système, dérivation stricte du chemin de sauvegarde et vérification cryptographique avant toute opération sur les fichiers.
   - **Conservation du backup et nettoyage sécurisé** : le backup `.bak` est rigoureusement conservé jusqu'à la confirmation de santé du nouveau processus. Purge préventive sécurisée au démarrage normal.
 
 ### Testé
-- Suite de tests automatisés étendue à **87 tests (100 % passants)** :
+- Suite de tests automatisés étendue à **88 tests (100 % passants)** :
   - `test_bcrypt_gen_random_bytes` : génération aléatoire CSPRNG sans motif prévisible.
   - `test_constant_time_compare` : comparaison en temps constant insensible aux attaques par canal auxiliaire.
-  - `test_manifest_serialization_and_validation` : validation JSON et calcul HMAC du manifeste.
-  - `test_manifest_tampering_rejected` : rejet strict de toute altération de la cible, du hash ou des PID.
+  - `test_hmac_sha256_rfc4231_official_vectors` : validation avec les vecteurs de test officiels RFC 4231 Cas 1, 2 et 3.
+  - `test_update_manifest_hmac_and_serialization` : validation JSON et calcul HMAC-SHA-256 du manifeste avec secret hors JSON.
+  - `test_manifest_tampering_rejected` : rejet strict de toute altération de la cible, du hash, du hash original ou des PID.
   - `test_auth_token_expiration_logic` : contrôle de la fenêtre d'expiration de 5 minutes.
   - `test_target_exe_safety_rules` : validation de l'extension `.exe` et exclusion des dossiers système Windows.
-  - `test_perform_rollback_and_verify_success_and_failure` : restauration vérifiée du backup et gestion des erreurs sans fausse annonce de succès.
-  - `test_pending_recovery_persistence_and_cleanup` : persistance et finalisation de la récupération différée.
+  - `test_perform_rollback_and_verify_success_and_failure` : restauration vérifiée par SHA-256 du backup et gestion des erreurs.
+  - `test_pending_recovery_persistence_and_cleanup` et `test_pending_recovery_negative_scenarios_rejected` : validation stricte et rejet des directives altérées.
   - `test_health_token_registration_and_notification` : cycle d'enregistrement et d'émission du signal de santé.
   - `test_in_use_file_lock_reproduction_and_wait` : reproduction du verrouillage de fichier en cours d'exécution sous Windows et libération de handle.
 

@@ -11,11 +11,11 @@
 use std::ffi::c_void;
 use windows::Win32::Foundation::{HLOCAL, LocalFree};
 use windows::Win32::Security::Cryptography::{
-    BCRYPT_ALG_HANDLE, BCRYPT_HASH_HANDLE, BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS,
-    BCRYPT_SHA256_ALGORITHM, BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptCloseAlgorithmProvider,
-    BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash, BCryptGenRandom, BCryptHashData,
-    BCryptOpenAlgorithmProvider, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData,
-    CryptUnprotectData,
+    BCRYPT_ALG_HANDLE, BCRYPT_ALG_HANDLE_HMAC_FLAG, BCRYPT_HASH_HANDLE,
+    BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, BCRYPT_SHA256_ALGORITHM, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+    BCryptCloseAlgorithmProvider, BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash,
+    BCryptGenRandom, BCryptHashData, BCryptOpenAlgorithmProvider, CRYPT_INTEGER_BLOB,
+    CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
 };
 use windows_core::PCWSTR;
 
@@ -249,6 +249,61 @@ pub fn compute_file_sha256(path: &std::path::Path) -> Result<String, String> {
     compute_sha256(&data)
 }
 
+/// Calcule l'authentification de message HMAC-SHA-256 standard (RFC 2104 / FIPS 198-1)
+/// via l'API native Windows CNG (`BCrypt` avec `BCRYPT_ALG_HANDLE_HMAC_FLAG`).
+pub fn compute_hmac_sha256(key: &[u8], data: &[u8]) -> Result<String, String> {
+    unsafe {
+        let mut alg = BCRYPT_ALG_HANDLE::default();
+        let status = BCryptOpenAlgorithmProvider(
+            &mut alg,
+            BCRYPT_SHA256_ALGORITHM,
+            None,
+            BCRYPT_ALG_HANDLE_HMAC_FLAG,
+        );
+        if status.is_err() {
+            return Err(format!(
+                "BCryptOpenAlgorithmProvider(HMAC) failed: 0x{:08X}",
+                status.0
+            ));
+        }
+
+        let mut hash_handle = BCRYPT_HASH_HANDLE::default();
+        let status = BCryptCreateHash(
+            alg,
+            &mut hash_handle,
+            None,
+            if key.is_empty() { None } else { Some(key) },
+            0,
+        );
+        if status.is_err() {
+            let _ = BCryptCloseAlgorithmProvider(alg, 0);
+            return Err(format!("BCryptCreateHash(HMAC) failed: 0x{:08X}", status.0));
+        }
+
+        if !data.is_empty() {
+            let status = BCryptHashData(hash_handle, data, 0);
+            if status.is_err() {
+                let _ = BCryptDestroyHash(hash_handle);
+                let _ = BCryptCloseAlgorithmProvider(alg, 0);
+                return Err(format!("BCryptHashData(HMAC) failed: 0x{:08X}", status.0));
+            }
+        }
+
+        let mut mac = [0u8; 32];
+        let status = BCryptFinishHash(hash_handle, &mut mac, 0);
+        if status.is_err() {
+            let _ = BCryptDestroyHash(hash_handle);
+            let _ = BCryptCloseAlgorithmProvider(alg, 0);
+            return Err(format!("BCryptFinishHash(HMAC) failed: 0x{:08X}", status.0));
+        }
+
+        let _ = BCryptDestroyHash(hash_handle);
+        let _ = BCryptCloseAlgorithmProvider(alg, 0);
+
+        Ok(mac.iter().map(|b| format!("{b:02x}")).collect::<String>())
+    }
+}
+
 /// Génère des octets aléatoires cryptographiquement sécurisés via `BCryptGenRandom` (RNG système Windows).
 pub fn generate_crypto_random_bytes(buf: &mut [u8]) -> Result<(), String> {
     if buf.is_empty() {
@@ -352,5 +407,35 @@ mod tests {
         assert!(!constant_time_compare("abc123XYZ", "abc123XY"));
         assert!(!constant_time_compare("", "a"));
         assert!(constant_time_compare("", ""));
+    }
+
+    #[test]
+    fn test_hmac_sha256_rfc4231_official_vectors() {
+        // RFC 4231 Test Case 1
+        let key1 = [0x0bu8; 20];
+        let data1 = b"Hi There";
+        let hmac1 = compute_hmac_sha256(&key1, data1).expect("HMAC test 1");
+        assert_eq!(
+            hmac1, "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+            "Vecteur officiel RFC 4231 Cas 1"
+        );
+
+        // RFC 4231 Test Case 2
+        let key2 = b"Jefe";
+        let data2 = b"what do ya want for nothing?";
+        let hmac2 = compute_hmac_sha256(key2, data2).expect("HMAC test 2");
+        assert_eq!(
+            hmac2, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+            "Vecteur officiel RFC 4231 Cas 2"
+        );
+
+        // RFC 4231 Test Case 3
+        let key3 = [0xaau8; 20];
+        let data3 = [0xddu8; 50];
+        let hmac3 = compute_hmac_sha256(&key3, &data3).expect("HMAC test 3");
+        assert_eq!(
+            hmac3, "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe",
+            "Vecteur officiel RFC 4231 Cas 3"
+        );
     }
 }

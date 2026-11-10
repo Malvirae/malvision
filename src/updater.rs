@@ -1,6 +1,8 @@
 //! Vérification des mises à jour via GitHub Releases et téléchargement sécurisé des assets.
 
-use crate::security::{compute_file_sha256, constant_time_compare, generate_crypto_random_bytes};
+use crate::security::{
+    compute_file_sha256, compute_hmac_sha256, constant_time_compare, generate_crypto_random_bytes,
+};
 use std::fmt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
@@ -534,13 +536,15 @@ pub fn download_and_verify_asset(
 }
 
 /// Manifeste de mise à jour sécurisé stocké dans `%LOCALAPPDATA%\Malvision\updates\update_manifest.json`.
+/// Note de sécurité : le jeton d'authentification secret (`auth_token`) n'est JAMAIS stocké dans le manifeste
+/// sur le disque. Seul le code d'authentification HMAC-SHA-256 et les métadonnées de contrôle y sont consignés.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateManifest {
-    pub auth_token: String,
     pub manifest_hmac: String,
     pub parent_pid: u32,
     pub parent_creation_filetime: u64,
     pub target_exe_path: PathBuf,
+    pub original_target_sha256: String,
     pub new_exe_path: PathBuf,
     pub expected_sha256: String,
     pub created_at_epoch_secs: u64,
@@ -549,11 +553,11 @@ pub struct UpdateManifest {
 impl UpdateManifest {
     pub fn to_json(&self) -> String {
         let val = serde_json::json!({
-            "auth_token": self.auth_token,
             "manifest_hmac": self.manifest_hmac,
             "parent_pid": self.parent_pid,
             "parent_creation_filetime": self.parent_creation_filetime,
             "target_exe_path": self.target_exe_path.to_string_lossy(),
+            "original_target_sha256": self.original_target_sha256,
             "new_exe_path": self.new_exe_path.to_string_lossy(),
             "expected_sha256": self.expected_sha256,
             "created_at_epoch_secs": self.created_at_epoch_secs,
@@ -564,10 +568,6 @@ impl UpdateManifest {
     pub fn from_json(s: &str) -> Result<Self, String> {
         let v: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| format!("Manifeste de mise à jour JSON corrompu : {e}"))?;
-        let auth_token = v["auth_token"]
-            .as_str()
-            .ok_or("auth_token manquant")?
-            .to_string();
         let manifest_hmac = v["manifest_hmac"]
             .as_str()
             .ok_or("manifest_hmac manquant")?
@@ -579,6 +579,10 @@ impl UpdateManifest {
         let target_str = v["target_exe_path"]
             .as_str()
             .ok_or("target_exe_path manquant")?;
+        let original_target_sha256 = v["original_target_sha256"]
+            .as_str()
+            .ok_or("original_target_sha256 manquant")?
+            .to_string();
         let new_str = v["new_exe_path"].as_str().ok_or("new_exe_path manquant")?;
         let expected_sha256 = v["expected_sha256"]
             .as_str()
@@ -589,20 +593,20 @@ impl UpdateManifest {
             .ok_or("created_at_epoch_secs manquant")?;
 
         Ok(Self {
-            auth_token,
             manifest_hmac,
             parent_pid,
             parent_creation_filetime,
             target_exe_path: PathBuf::from(target_str),
+            original_target_sha256,
             new_exe_path: PathBuf::from(new_str),
             expected_sha256,
             created_at_epoch_secs,
         })
     }
 
-    /// Vérifie l'intégrité cryptographique absolue du manifeste en temps constant.
+    /// Vérifie l'intégrité cryptographique absolue du manifeste en temps constant via HMAC-SHA-256.
     pub fn verify_integrity(&self, token_arg: &str) -> bool {
-        if !constant_time_compare(&self.auth_token, token_arg) {
+        if token_arg.is_empty() {
             return false;
         }
         match compute_manifest_hmac(
@@ -610,6 +614,7 @@ impl UpdateManifest {
             self.parent_pid,
             self.parent_creation_filetime,
             &self.target_exe_path,
+            &self.original_target_sha256,
             &self.new_exe_path,
             &self.expected_sha256,
             self.created_at_epoch_secs,
@@ -620,23 +625,25 @@ impl UpdateManifest {
     }
 }
 
-/// Calcule l'empreinte d'intégrité cryptographique (HMAC) du manifeste.
+/// Calcule l'authentification de message cryptographique HMAC-SHA-256 (RFC 2104 / FIPS 198-1)
+/// du manifeste à l'aide de l'API cryptographique native Windows CNG.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_manifest_hmac(
     token: &str,
     parent_pid: u32,
     parent_creation_filetime: u64,
     target_exe_path: &Path,
+    original_target_sha256: &str,
     new_exe_path: &Path,
     expected_sha256: &str,
     created_at_epoch_secs: u64,
 ) -> Result<String, String> {
     let payload = format!(
-        "{token}|{parent_pid}|{parent_creation_filetime}|{}|{}|{}|{created_at_epoch_secs}",
+        "{parent_pid}|{parent_creation_filetime}|{}|{original_target_sha256}|{}|{expected_sha256}|{created_at_epoch_secs}",
         target_exe_path.to_string_lossy(),
-        new_exe_path.to_string_lossy(),
-        expected_sha256
+        new_exe_path.to_string_lossy()
     );
-    crate::security::compute_sha256(payload.as_bytes())
+    compute_hmac_sha256(token.as_bytes(), payload.as_bytes())
 }
 
 /// Informations de préparation de la mise à jour différée.
@@ -771,22 +778,25 @@ pub fn prepare_update_helper(
         .unwrap_or_default()
         .as_secs();
 
+    let original_target_sha256 = compute_file_sha256(&current_exe)?;
+
     let manifest_hmac = compute_manifest_hmac(
         &auth_token,
         parent_pid,
         parent_creation_filetime,
         &current_exe,
+        &original_target_sha256,
         new_exe_path,
         expected_sha256,
         now,
     )?;
 
     let manifest = UpdateManifest {
-        auth_token: auth_token.clone(),
         manifest_hmac,
         parent_pid,
         parent_creation_filetime,
         target_exe_path: current_exe.clone(),
+        original_target_sha256,
         new_exe_path: new_exe_path.to_path_buf(),
         expected_sha256: expected_sha256.to_string(),
         created_at_epoch_secs: now,
@@ -840,12 +850,33 @@ pub fn launch_helper_and_wait_ready(
     Err("Le processus auxiliaire de mise à jour n'a pas répondu dans le délai imparti.".to_string())
 }
 
-/// Restaure la sauvegarde .bak vers le chemin cible et vérifie obligatoirement son existence et sa validité.
-pub fn perform_rollback_and_verify(target: &Path, backup: &Path) -> Result<(), String> {
+/// Restaure la sauvegarde .bak vers le chemin cible et vérifie obligatoirement son existence, sa validité
+/// et la stricte conformité cryptographique du SHA-256 restauré avec l'empreinte originale attendue.
+pub fn perform_rollback_and_verify(
+    target: &Path,
+    backup: &Path,
+    expected_original_sha256: &str,
+) -> Result<(), String> {
     if !backup.exists() {
         return Err(format!(
             "Fichier de sauvegarde introuvable : {}",
             backup.display()
+        ));
+    }
+
+    // Vérifier l'absence de lien symbolique
+    if let Ok(meta) = std::fs::symlink_metadata(backup)
+        && meta.file_type().is_symlink()
+    {
+        return Err("Le fichier de sauvegarde est un lien symbolique non autorisé.".to_string());
+    }
+
+    // Contrôler l'intégrité de la sauvegarde avant restauration
+    let backup_hash = compute_file_sha256(backup)
+        .map_err(|e| format!("Impossible de vérifier l'empreinte de la sauvegarde : {e}"))?;
+    if !constant_time_compare(&backup_hash, expected_original_sha256) {
+        return Err(format!(
+            "L'empreinte de la sauvegarde ({backup_hash}) ne correspond pas à l'empreinte originale attendue ({expected_original_sha256})."
         ));
     }
 
@@ -872,16 +903,32 @@ pub fn perform_rollback_and_verify(target: &Path, backup: &Path) -> Result<(), S
         return Err("Le fichier cible restauré est manquant ou vide.".to_string());
     }
 
+    // Vérification cryptographique OBLIGATOIRE du binaire cible restauré
+    let restored_hash = compute_file_sha256(target)
+        .map_err(|e| format!("Impossible de vérifier le binaire restauré : {e}"))?;
+    if !constant_time_compare(&restored_hash, expected_original_sha256) {
+        return Err(format!(
+            "Sécurité : L'empreinte du fichier cible restauré ({restored_hash}) ne correspond pas à la version d'origine ({expected_original_sha256})."
+        ));
+    }
+
     Ok(())
 }
 
 /// Enregistre une directive de récupération différée dans `%LOCALAPPDATA%\Malvision\updates\pending_recovery.json`.
-pub fn record_pending_recovery(target: &Path, backup: &Path) {
+/// Note de sécurité : le chemin de backup n'est jamais consigné arbitrairement ; il sera obligatoirement dérivé
+/// du chemin de l'exécutable légitime lors de la reprise au redémarrage.
+pub fn record_pending_recovery(target: &Path, original_target_sha256: &str) {
     if let Ok(updates_dir) = get_updates_temp_dir() {
         let recovery_path = updates_dir.join("pending_recovery.json");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let val = serde_json::json!({
             "target_exe_path": target.to_string_lossy(),
-            "backup_exe_path": backup.to_string_lossy(),
+            "expected_backup_sha256": original_target_sha256,
+            "created_at_epoch_secs": now,
         });
         let _ = std::fs::write(&recovery_path, val.to_string());
     }
@@ -1104,15 +1151,16 @@ pub fn run_apply_update_mode(args: &[String]) {
             .unwrap_or(false);
 
     if !target_hash_ok {
-        // ROLLBACK immédiat avec vérification
-        let rollback_res = perform_rollback_and_verify(target, &backup);
+        // ROLLBACK immédiat avec vérification cryptographique complète
+        let rollback_res =
+            perform_rollback_and_verify(target, &backup, &manifest.original_target_sha256);
         if rollback_res.is_ok() {
             let _ = std::process::Command::new(target).spawn();
             show_native_error(
                 "L'intégrité de la mise à jour installée est invalide. L'ancienne version a été automatiquement restaurée.",
             );
         } else {
-            record_pending_recovery(target, &backup);
+            record_pending_recovery(target, &manifest.original_target_sha256);
             show_native_error(
                 "Échec critique : L'intégrité de la mise à jour est invalide et la restauration automatique immédiate a échoué.\n\nUne tentative de récupération aura lieu au prochain démarrage.",
             );
@@ -1121,17 +1169,17 @@ pub fn run_apply_update_mode(args: &[String]) {
     }
 
     // 10. Préparation de la surveillance de disponibilité explicite (Health Check)
-    let event_name = format!("Local\\Malvision_Health_{}\0", manifest.auth_token);
+    let event_name = format!("Local\\Malvision_Health_{token}\0");
     let event_w: Vec<u16> = event_name.encode_utf16().collect();
     let health_event = unsafe { CreateEventW(None, true, false, PCWSTR(event_w.as_ptr())) }
         .unwrap_or(HANDLE(std::ptr::null_mut()));
 
-    let health_flag = updates_dir.join(format!("health_{}.flag", manifest.auth_token));
+    let health_flag = updates_dir.join(format!("health_{token}.flag"));
     let _ = std::fs::remove_file(&health_flag);
 
     // Relance de la nouvelle version avec argument de confirmation de santé
     let mut cmd = std::process::Command::new(target);
-    cmd.arg("--health-check").arg(&manifest.auth_token);
+    cmd.arg("--health-check").arg(token);
 
     let child = match cmd.spawn() {
         Ok(c) => c,
@@ -1139,14 +1187,15 @@ pub fn run_apply_update_mode(args: &[String]) {
             if !health_event.is_invalid() {
                 let _ = unsafe { CloseHandle(health_event) };
             }
-            let rollback_res = perform_rollback_and_verify(target, &backup);
+            let rollback_res =
+                perform_rollback_and_verify(target, &backup, &manifest.original_target_sha256);
             if rollback_res.is_ok() {
                 let _ = std::process::Command::new(target).spawn();
                 show_native_error(&format!(
                     "Impossible de démarrer la nouvelle version ({e}). L'ancienne version a été automatiquement restaurée."
                 ));
             } else {
-                record_pending_recovery(target, &backup);
+                record_pending_recovery(target, &manifest.original_target_sha256);
                 show_native_error(&format!(
                     "Échec critique : Impossible de démarrer la nouvelle version ({e}) et la restauration automatique immédiate a échoué.\n\nUne tentative de récupération aura lieu au prochain démarrage."
                 ));
@@ -1210,15 +1259,16 @@ pub fn run_apply_update_mode(args: &[String]) {
         }
         std::thread::sleep(Duration::from_millis(200));
 
-        // B. Restaurer et vérifier la sauvegarde
-        let rollback_res = perform_rollback_and_verify(target, &backup);
+        // B. Restaurer et vérifier la sauvegarde avec validation d'empreinte
+        let rollback_res =
+            perform_rollback_and_verify(target, &backup, &manifest.original_target_sha256);
         if rollback_res.is_ok() {
             let _ = std::process::Command::new(target).spawn();
             show_native_error(
                 "La nouvelle version n'a pas pu s'initialiser correctement.\n\nL'ancienne version a été automatiquement et intégralement restaurée.",
             );
         } else {
-            record_pending_recovery(target, &backup);
+            record_pending_recovery(target, &manifest.original_target_sha256);
             show_native_error(
                 "Échec critique : La nouvelle version a échoué et la restauration immédiate de la sauvegarde n'a pas pu être finalisée.\n\nUne tentative de récupération aura lieu au prochain démarrage.",
             );
@@ -1267,7 +1317,13 @@ pub fn notify_startup_healthy() {
     }
 }
 
-/// Vérifie et applique une restauration différée si un rollback immédiat avait été bloqué par un verrou.
+/// Vérifie et applique une restauration différée hautement sécurisée si un rollback immédiat avait été bloqué par un verrou.
+/// Règles de sécurité strictes :
+/// 1. La cible doit correspondre strictement à l'exécutable Malvision en cours d'exécution.
+/// 2. Le chemin backup est strictement dérivé du binaire courant (.exe.bak) et n'est jamais lu comme un chemin arbitraire.
+/// 3. Rejet catégorique si la cible ou le backup se situe dans le répertoire Windows (SystemRoot) ou est un lien symbolique.
+/// 4. Vérification cryptographique préalable : l'empreinte SHA-256 du backup doit correspondre exactement à `expected_backup_sha256`.
+/// 5. En cas de doute ou d'anomalie, la directive est supprimée sans modification des fichiers du disque.
 pub fn check_and_apply_pending_recovery() {
     let Ok(updates_dir) = get_updates_temp_dir() else {
         return;
@@ -1277,22 +1333,128 @@ pub fn check_and_apply_pending_recovery() {
         return;
     }
 
-    if let Ok(content) = std::fs::read_to_string(&recovery_file)
-        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&content)
-        && let (Some(target_str), Some(backup_str)) =
-            (v["target_exe_path"].as_str(), v["backup_exe_path"].as_str())
-    {
-        let target = PathBuf::from(target_str);
-        let backup = PathBuf::from(backup_str);
-        if backup.exists() {
-            let _ = std::fs::remove_file(&target);
-            if std::fs::rename(&backup, &target).is_ok() {
-                let _ = std::fs::remove_file(&recovery_file);
-            }
-        } else {
-            let _ = std::fs::remove_file(&recovery_file);
+    let cleanup_recovery = || {
+        let _ = std::fs::remove_file(&recovery_file);
+    };
+
+    let content = match std::fs::read_to_string(&recovery_file) {
+        Ok(c) => c,
+        Err(_) => {
+            cleanup_recovery();
+            return;
+        }
+    };
+
+    let v: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(val) => val,
+        Err(_) => {
+            cleanup_recovery();
+            return;
+        }
+    };
+
+    let (Some(target_str), Some(expected_backup_sha256)) = (
+        v["target_exe_path"].as_str(),
+        v["expected_backup_sha256"].as_str(),
+    ) else {
+        cleanup_recovery();
+        return;
+    };
+
+    let current_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => {
+            cleanup_recovery();
+            return;
+        }
+    };
+
+    let target_path = PathBuf::from(target_str);
+
+    // 1. La cible dans la directive DOIT correspondre strictement à l'exécutable courant
+    if !is_same_file_path(&target_path, &current_exe) {
+        cleanup_recovery();
+        return;
+    }
+
+    // 2. Extension .exe obligatoire
+    let ext = current_exe
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if !ext.eq_ignore_ascii_case("exe") {
+        cleanup_recovery();
+        return;
+    }
+
+    // 3. Protection répertoire système Windows
+    if let Ok(windir) = std::env::var("SystemRoot") {
+        let win_path = PathBuf::from(windir);
+        if current_exe.starts_with(&win_path) {
+            cleanup_recovery();
+            return;
         }
     }
+
+    // 4. Protection contre les liens symboliques et jonctions
+    if let Ok(meta) = std::fs::symlink_metadata(&current_exe)
+        && meta.file_type().is_symlink()
+    {
+        cleanup_recovery();
+        return;
+    }
+
+    // 5. Dérivation stricte du chemin backup (jamais de chemin arbitraire externe)
+    let backup_path = current_exe.with_extension("exe.bak");
+    if !backup_path.exists() {
+        cleanup_recovery();
+        return;
+    }
+
+    if let Ok(meta) = std::fs::symlink_metadata(&backup_path)
+        && meta.file_type().is_symlink()
+    {
+        cleanup_recovery();
+        return;
+    }
+
+    // 6. Vérification cryptographique OBLIGATOIRE de la sauvegarde avant toute opération sur les fichiers
+    let actual_backup_sha256 = match compute_file_sha256(&backup_path) {
+        Ok(h) => h,
+        Err(_) => {
+            cleanup_recovery();
+            return;
+        }
+    };
+
+    if !constant_time_compare(&actual_backup_sha256, expected_backup_sha256) {
+        // Sauvegarde non authentique ou corrompue : refus strict sans altération du binaire
+        cleanup_recovery();
+        return;
+    }
+
+    // 7. Restauration avec boucle de réessai
+    let mut restored = false;
+    for _ in 0..15 {
+        let _ = std::fs::remove_file(&current_exe);
+        if std::fs::rename(&backup_path, &current_exe).is_ok() {
+            restored = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    if restored {
+        // Contrôle cryptographique final du binaire restauré
+        if let Ok(restored_sha256) = compute_file_sha256(&current_exe)
+            && constant_time_compare(&restored_sha256, expected_backup_sha256)
+        {
+            cleanup_recovery();
+            return;
+        }
+    }
+
+    cleanup_recovery();
 }
 
 /// Nettoie les fichiers résiduels d'une mise à jour précédente lors d'un démarrage normal.
@@ -1641,14 +1803,21 @@ mod tests {
     }
 
     #[test]
-    fn test_manifest_serialization_and_validation() {
-        let auth_token = generate_auth_token().expect("Génération CSPRNG du jeton");
+    fn test_update_manifest_hmac_and_serialization() {
+        let auth_token = generate_auth_token().expect("Génération auth_token cryptographique");
+        assert_eq!(
+            auth_token.len(),
+            64,
+            "Jeton SHA-256 / 256 bits (64 hex chars)"
+        );
+
         let parent_pid = std::process::id();
-        let parent_creation_filetime = 133456789012345678u64;
-        let target_exe_path =
-            PathBuf::from(r"C:\Users\Axel\AppData\Local\Programs\Malvision\Malvision.exe");
+        let parent_creation_filetime = 133500000000000000u64;
+        let target_exe_path = PathBuf::from(r"C:\Apps\Malvision\Malvision.exe");
+        let original_target_sha256 =
+            "aaaabbbbccccddddeeeeffff1111222233334444555566667777888899990000".to_string();
         let new_exe_path =
-            PathBuf::from(r"C:\Users\Axel\AppData\Local\Malvision\updates\Malvision_1.0.5.exe");
+            PathBuf::from(r"C:\Users\Axel\AppData\Local\Malvision\updates\new_version.exe");
         let expected_sha256 =
             "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".to_string();
         let created_at_epoch_secs = std::time::SystemTime::now()
@@ -1661,6 +1830,7 @@ mod tests {
             parent_pid,
             parent_creation_filetime,
             &target_exe_path,
+            &original_target_sha256,
             &new_exe_path,
             &expected_sha256,
             created_at_epoch_secs,
@@ -1668,23 +1838,26 @@ mod tests {
         .expect("Calcul HMAC du manifeste");
 
         let manifest = UpdateManifest {
-            auth_token: auth_token.clone(),
             manifest_hmac: manifest_hmac.clone(),
             parent_pid,
             parent_creation_filetime,
             target_exe_path: target_exe_path.clone(),
+            original_target_sha256: original_target_sha256.clone(),
             new_exe_path: new_exe_path.clone(),
             expected_sha256: expected_sha256.clone(),
             created_at_epoch_secs,
         };
 
-        // 1. Validation de l'intégrité nominale
+        // 1. Validation de l'intégrité nominale avec le bon jeton
         assert!(manifest.verify_integrity(&auth_token));
 
-        // 2. Sérialisation et désérialisation JSON
+        // 2. Sérialisation et désérialisation JSON (le jeton secret n'est PAS dans le JSON !)
         let json = manifest.to_json();
+        assert!(
+            !json.contains(&auth_token),
+            "Le jeton secret ne doit JAMAIS figurer dans le JSON"
+        );
         let parsed = UpdateManifest::from_json(&json).expect("Désérialisation valide");
-        assert_eq!(manifest.auth_token, parsed.auth_token);
         assert_eq!(manifest.manifest_hmac, parsed.manifest_hmac);
         assert_eq!(manifest.parent_pid, parsed.parent_pid);
         assert_eq!(
@@ -1692,17 +1865,22 @@ mod tests {
             parsed.parent_creation_filetime
         );
         assert_eq!(manifest.target_exe_path, parsed.target_exe_path);
+        assert_eq!(
+            manifest.original_target_sha256,
+            parsed.original_target_sha256
+        );
         assert_eq!(manifest.new_exe_path, parsed.new_exe_path);
         assert_eq!(manifest.expected_sha256, parsed.expected_sha256);
         assert_eq!(manifest.created_at_epoch_secs, parsed.created_at_epoch_secs);
         assert!(parsed.verify_integrity(&auth_token));
 
-        // 3. Rejet de jeton erroné
+        // 3. Rejet de jeton erroné ou vide
         assert!(!manifest.verify_integrity("wrong_token_1234567890abcdef"));
+        assert!(!manifest.verify_integrity(""));
 
         // 4. Rejet de JSON malformé ou tronqué
         assert!(UpdateManifest::from_json("{ corrupt json").is_err());
-        assert!(UpdateManifest::from_json(r#"{"auth_token": "abc"}"#).is_err());
+        assert!(UpdateManifest::from_json(r#"{"manifest_hmac": "abc"}"#).is_err());
     }
 
     #[test]
@@ -1711,6 +1889,8 @@ mod tests {
         let parent_pid = std::process::id();
         let parent_creation_filetime = 999888777666u64;
         let target_exe_path = PathBuf::from(r"C:\Users\Axel\Malvision.exe");
+        let original_target_sha256 =
+            "0000111122223333444455556666777788889999aaaabbbbccccddddeeeeffff".to_string();
         let new_exe_path = PathBuf::from(r"C:\Users\Axel\New.exe");
         let expected_sha256 =
             "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff".to_string();
@@ -1721,6 +1901,7 @@ mod tests {
             parent_pid,
             parent_creation_filetime,
             &target_exe_path,
+            &original_target_sha256,
             &new_exe_path,
             &expected_sha256,
             created_at_epoch_secs,
@@ -1728,11 +1909,11 @@ mod tests {
         .unwrap();
 
         let mut manifest = UpdateManifest {
-            auth_token: auth_token.clone(),
             manifest_hmac,
             parent_pid,
             parent_creation_filetime,
             target_exe_path,
+            original_target_sha256: original_target_sha256.clone(),
             new_exe_path,
             expected_sha256,
             created_at_epoch_secs,
@@ -1757,16 +1938,25 @@ mod tests {
             "Toute altération de expected_sha256 doit être rejetée"
         );
 
-        // Rétablissement puis altération 3 : Modification du PID parent
+        // Rétablissement puis altération 3 : Modification de original_target_sha256
         manifest.expected_sha256 =
             "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff".to_string();
+        manifest.original_target_sha256 =
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string();
+        assert!(
+            !manifest.verify_integrity(&auth_token),
+            "Toute altération de original_target_sha256 doit être rejetée"
+        );
+
+        // Rétablissement puis altération 4 : Modification du PID parent
+        manifest.original_target_sha256 = original_target_sha256;
         manifest.parent_pid = 1234;
         assert!(
             !manifest.verify_integrity(&auth_token),
             "Toute altération de parent_pid doit être rejetée"
         );
 
-        // Rétablissement puis altération 4 : Modification du timestamp de création
+        // Rétablissement puis altération 5 : Modification du timestamp de création
         manifest.parent_pid = parent_pid;
         manifest.parent_creation_filetime = 111222333u64;
         assert!(
@@ -1833,15 +2023,32 @@ mod tests {
 
         fs::write(&backup, orig_bytes).unwrap();
         fs::write(&target, bad_bytes).unwrap();
+        let expected_orig_sha256 = crate::security::compute_sha256(orig_bytes).unwrap();
 
-        // Rollback nominal : restaure backup -> target et vérifie
-        let res = perform_rollback_and_verify(&target, &backup);
-        assert!(res.is_ok(), "Le rollback doit réussir quand backup existe");
+        // Rollback nominal : restaure backup -> target et vérifie cryptographiquement
+        let res = perform_rollback_and_verify(&target, &backup, &expected_orig_sha256);
+        assert!(
+            res.is_ok(),
+            "Le rollback doit réussir quand backup existe et son hash correspond"
+        );
         assert_eq!(fs::read(&target).unwrap(), orig_bytes);
         assert!(!backup.exists());
 
-        // Deuxième appel sans backup : doit échouer explicitement sans fausse annonce
-        let res_no_bak = perform_rollback_and_verify(&target, &backup);
+        // Appel avec hash attendu non conforme : doit échouer immédiatement sans restaurer
+        fs::write(&backup, orig_bytes).unwrap();
+        let res_bad_hash = perform_rollback_and_verify(
+            &target,
+            &backup,
+            "bad_hash_000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert!(
+            res_bad_hash.is_err(),
+            "Le rollback avec hash divergent doit être refusé"
+        );
+
+        // Appel sans backup : doit échouer explicitement sans fausse annonce
+        let _ = fs::remove_file(&backup);
+        let res_no_bak = perform_rollback_and_verify(&target, &backup, &expected_orig_sha256);
         assert!(
             res_no_bak.is_err(),
             "Le rollback sans backup doit échouer explicitement"
@@ -1864,27 +2071,34 @@ mod tests {
         let orig_bytes = b"VALID_ORIGINAL_BYTES_FOR_RECOVERY";
         fs::write(&backup, orig_bytes).unwrap();
         fs::write(&target, b"BROKEN_TARGET").unwrap();
+        let expected_backup_sha256 = crate::security::compute_sha256(orig_bytes).unwrap();
 
         // Enregistrer la directive de récupération
         let rec_json = serde_json::json!({
             "target_exe_path": target.to_string_lossy(),
-            "backup_exe_path": backup.to_string_lossy(),
+            "expected_backup_sha256": expected_backup_sha256,
+            "created_at_epoch_secs": 1700000000u64,
         });
         fs::write(&recovery_file, rec_json.to_string()).unwrap();
         assert!(recovery_file.exists());
 
-        // Simuler check_and_apply_pending_recovery
+        // Simulation de validation stricte :
         if let Ok(content) = fs::read_to_string(&recovery_file)
             && let Ok(v) = serde_json::from_str::<serde_json::Value>(&content)
-            && let (Some(t_str), Some(b_str)) =
-                (v["target_exe_path"].as_str(), v["backup_exe_path"].as_str())
+            && let (Some(t_str), Some(exp_sha)) = (
+                v["target_exe_path"].as_str(),
+                v["expected_backup_sha256"].as_str(),
+            )
         {
             let t = PathBuf::from(t_str);
-            let b = PathBuf::from(b_str);
+            let b = t.with_extension("exe.bak"); // dérivé obligatoirement
             if b.exists() {
-                let _ = fs::remove_file(&t);
-                if fs::rename(&b, &t).is_ok() {
-                    let _ = fs::remove_file(&recovery_file);
+                let actual_hash = crate::security::compute_file_sha256(&b).unwrap();
+                if crate::security::constant_time_compare(&actual_hash, exp_sha) {
+                    let _ = fs::remove_file(&t);
+                    if fs::rename(&b, &t).is_ok() {
+                        let _ = fs::remove_file(&recovery_file);
+                    }
                 }
             }
         }
@@ -1901,6 +2115,57 @@ mod tests {
         );
 
         let _ = fs::remove_file(&target);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_pending_recovery_negative_scenarios_rejected() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("malvision_test_rec_neg_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let target = temp_dir.join("TargetApp.exe");
+        let backup = temp_dir.join("TargetApp.exe.bak");
+        let recovery_file = temp_dir.join("pending_recovery.json");
+
+        let orig_bytes = b"GOOD_BACKUP_BYTES";
+        let tampered_bytes = b"TAMPERED_BACKUP_BYTES";
+        let initial_target_bytes = b"CURRENT_TARGET_BYTES";
+
+        fs::write(&target, initial_target_bytes).unwrap();
+        fs::write(&backup, tampered_bytes).unwrap();
+        let expected_sha256 = crate::security::compute_sha256(orig_bytes).unwrap();
+
+        // SCÉNARIO 1 : Empreinte de backup corrompue / divergente
+        let rec_json = serde_json::json!({
+            "target_exe_path": target.to_string_lossy(),
+            "expected_backup_sha256": expected_sha256,
+            "created_at_epoch_secs": 1700000000u64,
+        });
+        fs::write(&recovery_file, rec_json.to_string()).unwrap();
+
+        let content = fs::read_to_string(&recovery_file).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let exp_sha = v["expected_backup_sha256"].as_str().unwrap();
+        let actual_hash = crate::security::compute_file_sha256(&backup).unwrap();
+
+        // Le contrôle doit refuser strictement l'opération
+        assert!(
+            !crate::security::constant_time_compare(&actual_hash, exp_sha),
+            "Le hash doit être détecté comme non conforme"
+        );
+        // La cible et le backup ne doivent pas être altérés
+        assert_eq!(fs::read(&target).unwrap(), initial_target_bytes);
+        assert_eq!(fs::read(&backup).unwrap(), tampered_bytes);
+
+        // SCÉNARIO 2 : Cible divergente (tentative de ciblage d'un autre fichier)
+        let other_exe = temp_dir.join("OtherApp.exe");
+        let fake_target = PathBuf::from(r"C:\Windows\System32\cmd.exe");
+        assert!(!is_same_file_path(&fake_target, &other_exe));
+
+        let _ = fs::remove_file(&target);
+        let _ = fs::remove_file(&backup);
+        let _ = fs::remove_file(&recovery_file);
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
