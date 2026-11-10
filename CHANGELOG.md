@@ -2,7 +2,27 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
-## [Jalon 3C] — Correctifs finaux avant V1.0.0 (Scan codes RDP SendKeys, thème barre de recherche et double-clic unifié)
+## [Jalon 3D] — Correctifs UX avant V1.0.0 (Champ de recherche sans résidu par recréation dynamique et double-clic sur toute la ligne)
+
+### Corrigé
+- **Champ de recherche sans artefact lors du basculement de thème (Sombre <-> Clair)** :
+  - Identification de la cause racine sur Windows 11 réel : les styles visuels Common Controls v6 et le gestionnaire DWM/UxTheme conservent un cache interne persistant de surface/bitmap d'arrière-plan associé au HWND du contrôle `EDIT`, rendant inopérants les rafraîchissements GDI seuls.
+  - Implémentation de `recreate_search_edit()` dans `apply_theme()` et lors de la prévisualisation dans la boîte de dialogue des Paramètres : destruction complète de l'ancien HWND et recréation instantanée du contrôle `EDIT` natif avec les pinceaux et couleurs du thème nouvellement résolu (`#FFFFFF` en thème clair, `#191C1F` en thème sombre).
+  - Préservation intégrale et transparente du texte saisi (`get_window_text` / `set_window_text`), de la plage de sélection de texte (`EM_GETSEL` / `EM_SETSEL`), de la police GDI, du texte indicatif (`EM_SETCUEBANNER`) et de l'état de focus (`GetFocus` / `SetFocus`).
+  - Alignement parfait du conteneur arrondi à bordure GDI et de l'icône de recherche, sans aucun redémarrage nécessaire.
+- **Double-clic interactif sur toute la largeur de ligne dans l'arborescence (TreeView)** :
+  - Implémentation de `tree_hit_test_full_row()` résolvant les limitations du `TVM_HITTEST` standard (qui retourne `NULL` lorsque le clic est situé dans l'espace vide à droite du libellé `TVHT_ONITEMRIGHT` ou sur l'indentation).
+  - Résolution directe via `hti.hItem` sur les indicateurs `TVHT_ONITEM`, `TVHT_ONITEMRIGHT` et `TVHT_ONITEMINDENT`, couplée à un sondage horizontal scanline le long de la coordonnée Y pour identifier avec certitude la rangée cliquée.
+  - Double-clic réactif et ergonomique sur toute la largeur de ligne utile pour les trois protocoles (`RDP`, `AnyDesk`, `RustDesk`), y compris dans les sous-dossiers, les favoris et les résultats filtrés de recherche.
+  - Préservation stricte du comportement natif des dossiers : un double-clic sur un dossier ou une racine renvoie `LRESULT(0)` pour déplier/replier l'arborescence ; les clics sur les boutons d'expansion `[+]`/`[-]` (`TVHT_ONITEMBUTTON`) sont transmis sans détournement.
+  - Amélioration coordonnée du clic droit contextuel (`show_tree_context_menu`) et de la détection de cible de glisser-déposer (`tree_hit_test_screen_or_client`) pour une ergonomie homogène sur toute la largeur du panneau.
+
+### Ajouté
+- Test unitaire et d'intégration `test_ui_search_edit_theming_and_ctlcolorstatic` enrichi validant la recréation avec nouveau HWND, la préservation du texte ("srv-prod-01") et de la sélection (4..8) en cycles Dark -> Light -> Dark.
+- Test unitaire et d'intégration `test_ui_unified_double_click_all_protocols_and_folders` enrichi testant `tree_hit_test_full_row` sur l'icône ($X=35$), le texte ($X=80$) et l'espace vide à droite de la rangée ($X=240$), ainsi que l'absence de faux positifs en espace vide sous les éléments ($Y=500$).
+- Captures réelles d'écran Release validant l'absence de tout résidu sombre en thème clair (`jalon3d_01_dark_initial.png`, `jalon3d_02_preview_light.png`, `jalon3d_03_applied_light.png`, `jalon3d_04_switched_back_dark.png`).
+
+
 
 ### Corrigé
 - **Combinaisons spéciales RDP — Correction définitive des scan codes SendKeys (`IMsRdpClientNonScriptable::SendKeys`)** :

@@ -2,12 +2,15 @@
 
 Application native **Windows 11 x64** de gestion de connexions distantes, écrite en **Rust** avec `windows-rs` (Win32 natif + COM/ActiveX + SQLite embarqué + DPAPI).
 
-## Vision et fonctionnalités (Jalons 1 à 3C)
+## Vision et fonctionnalités (Jalons 1 à 3D)
 
-- **Double-clic unifié pour tous les protocoles (Jalon 3C)** :
-  - Lancement immédiat et fluide de n'importe quelle connexion par double-clic dans l'arborescence (TreeView), qu'il s'agisse de sessions RDP (onglet intégré), d'AnyDesk (avec transmission DPAPI sur stdin si configuré) ou de RustDesk.
-  - Résolution par hit-test Win32 natif (`TVM_HITTEST`) indépendant de l'état de sélection antérieur.
-  - Le double-clic sur un dossier ou une racine assure son développement/repli sans lancer de fausse connexion.
+- **Double-clic sur toute la largeur de ligne pour tous les protocoles (Jalons 3C & 3D)** :
+  - Lancement immédiat et fluide de n'importe quelle connexion par double-clic sur l'icône, le libellé ou l'espace vide à droite du texte (`tree_hit_test_full_row`), pour les sessions RDP (onglet intégré), AnyDesk (avec transmission DPAPI sur stdin si configuré) et RustDesk.
+  - Résolution robuste par hit-test de rangée (`TVHT_ONITEM`, `TVHT_ONITEMRIGHT`, `TVHT_ONITEMINDENT` et sondage horizontal scanline) sans dépendre de l'état de sélection antérieur.
+  - Le double-clic sur un dossier ou une racine assure son développement/repli sans lancer de fausse connexion, et les boutons d'expansion `[+]`/`[-]` fonctionnent sans interférence.
+- **Thématisation dynamique sans résidu (Jalons 2C, 3C & 3D)** :
+  - Basculement instantané Sombre <-> Clair <-> Système sans redémarrage, y compris en prévisualisation directe dans le dialogue Paramètres.
+  - Champ de recherche reconstruit dynamiquement via `recreate_search_edit()` éliminant tout cache UxTheme/DWM persistant sur Windows 11 tout en préservant le texte, la sélection, le focus et le cue banner.
 - **Intégration externe native d'AnyDesk et RustDesk (Jalons 3, 3B et 3C)** :
   - **Gestion centralisée dans Paramètres > Applications externes** :
     - Chemins configurables vers `AnyDesk.exe` et `rustdesk.exe`.

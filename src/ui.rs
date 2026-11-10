@@ -65,10 +65,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND,
     WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_NOTIFY, WM_NULL, WM_PAINT, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_SETFOCUS, WM_SETFONT, WM_SETICON, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSCOMMAND,
-    WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
-    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU,
-    WS_TABSTOP, WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL,
+    WM_SETCURSOR, WM_SETFOCUS, WM_SETFONT, WM_SETICON, WM_SIZE, WM_SYSCOMMAND, WM_TIMER,
+    WNDCLASSEXW, WNDPROC, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_OVERLAPPED, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_THICKFRAME,
+    WS_VISIBLE, WS_VSCROLL,
 };
 use windows_core::{PCWSTR, w};
 
@@ -830,33 +830,119 @@ impl AppWindowState {
                     RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
                 );
             }
-            if !self.search_edit.is_invalid() {
-                let _ = SetWindowTheme(self.search_edit, w!(""), w!(""));
-                let _ = SendMessageW(
-                    self.search_edit,
-                    WM_THEMECHANGED,
-                    Some(WPARAM(0)),
-                    Some(LPARAM(0)),
-                );
-                let _ = SendMessageW(
-                    self.search_edit,
-                    WM_SYSCOLORCHANGE,
-                    Some(WPARAM(0)),
-                    Some(LPARAM(0)),
-                );
-                let _ = RedrawWindow(
-                    Some(self.search_edit),
-                    None,
-                    None,
-                    RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
-                );
-            }
+            self.recreate_search_edit();
             let _ = RedrawWindow(
                 Some(self.hwnd),
                 None,
                 None,
                 RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
             );
+        }
+    }
+
+    /// Recrée proprement le contrôle `EDIT` natif de recherche lors d'un basculement de thème
+    /// (Sombre <-> Clair).
+    ///
+    /// Cette recréation complète garantit l'élimination définitive de tout artefact visuel
+    /// ou résidu anthracite lié au cache interne de rendu de Windows 11 / UxTheme, tout en préservant
+    /// intégralement le texte saisi, la sélection de curseur et l'état de focus.
+    pub fn recreate_search_edit(&mut self) {
+        unsafe {
+            if self.hwnd.is_invalid() {
+                return;
+            }
+            let current_text =
+                if !self.search_edit.is_invalid() && IsWindow(Some(self.search_edit)).as_bool() {
+                    get_window_text(self.search_edit)
+                } else {
+                    self.search_query.clone()
+                };
+
+            let mut sel_start: u32 = 0;
+            let mut sel_end: u32 = 0;
+            let has_focus =
+                if !self.search_edit.is_invalid() && IsWindow(Some(self.search_edit)).as_bool() {
+                    let _ = SendMessageW(
+                        self.search_edit,
+                        EM_GETSEL,
+                        Some(WPARAM(&mut sel_start as *mut _ as usize)),
+                        Some(LPARAM(&mut sel_end as *mut _ as isize)),
+                    );
+                    GetFocus() == self.search_edit
+                } else {
+                    false
+                };
+
+            if !self.search_edit.is_invalid() && IsWindow(Some(self.search_edit)).as_bool() {
+                let _ = DestroyWindow(self.search_edit);
+                self.search_edit = HWND::default();
+            }
+
+            let sidebar_w = self.settings.sidebar_width;
+            let edit_x = 36;
+            let edit_y = 89;
+            let edit_w = (sidebar_w - 52).max(80);
+            let edit_h = 18;
+            let hinstance = GetModuleHandleW(None).unwrap_or_default();
+
+            let new_edit = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                WC_EDITW,
+                w!(""),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+                edit_x,
+                edit_y,
+                edit_w,
+                edit_h,
+                Some(self.hwnd),
+                Some(HMENU(IDC_SEARCH_EDIT as *mut _)),
+                Some(hinstance.into()),
+                None,
+            )
+            .unwrap_or_default();
+
+            if !new_edit.is_invalid() {
+                let _ = SetWindowTheme(new_edit, w!(""), w!(""));
+                let orig_proc = SetWindowLongPtrW(
+                    new_edit,
+                    GWLP_WNDPROC,
+                    search_edit_wnd_proc as *const () as isize,
+                );
+                let _ = SetPropW(
+                    new_edit,
+                    PROP_SEARCH_EDIT_ORIG_PROC,
+                    Some(HANDLE(orig_proc as *mut _)),
+                );
+
+                let _ = SendMessageW(
+                    new_edit,
+                    WM_SETFONT,
+                    Some(WPARAM(self.palette.font_ui.0 as usize)),
+                    Some(LPARAM(1)),
+                );
+                let cue = w!("Rechercher (nom, IP, utilisateur)...");
+                let _ = SendMessageW(
+                    new_edit,
+                    0x1501, // EM_SETCUEBANNER
+                    Some(WPARAM(1)),
+                    Some(LPARAM(cue.as_ptr() as isize)),
+                );
+
+                if !current_text.is_empty() {
+                    set_window_text(new_edit, &current_text);
+                    let _ = SendMessageW(
+                        new_edit,
+                        EM_SETSEL,
+                        Some(WPARAM(sel_start as usize)),
+                        Some(LPARAM(sel_end as isize)),
+                    );
+                }
+
+                if has_focus {
+                    let _ = SetFocus(Some(new_edit));
+                }
+            }
+            self.search_edit = new_edit;
         }
     }
 
@@ -3058,14 +3144,17 @@ impl AppWindowState {
         }
     }
 
-    fn tree_hit_test_screen_or_client(&self, main_x: i32, main_y: i32) -> Option<HTREEITEM> {
+    /// Détecte avec précision l'élément du TreeView présent sur la rangée spécifiée (`pt`),
+    /// y compris lorsque le double-clic ou le clic droit est situé dans l'espace vide à droite
+    /// du libellé (`TVHT_ONITEMRIGHT`) ou sur l'indentation (`TVHT_ONITEMINDENT`).
+    pub fn tree_hit_test_full_row(&self, pt: POINT) -> Option<(HTREEITEM, TVHITTESTINFO)> {
         unsafe {
-            let mut pt = POINT {
-                x: main_x,
-                y: main_y,
-            };
-            let _ = ClientToScreen(self.hwnd, &mut pt);
-            let _ = ScreenToClient(self.treeview, &mut pt);
+            let mut rc_client = RECT::default();
+            let _ = GetClientRect(self.treeview, &mut rc_client);
+            if pt.x < 0 || pt.x >= rc_client.right || pt.y < 0 || pt.y >= rc_client.bottom {
+                return None;
+            }
+
             let mut hti = TVHITTESTINFO {
                 pt,
                 ..Default::default()
@@ -3076,8 +3165,81 @@ impl AppWindowState {
                 Some(WPARAM(0)),
                 Some(LPARAM(&mut hti as *mut TVHITTESTINFO as isize)),
             );
-            let hitem = HTREEITEM(h.0);
-            if hitem.0 != 0 { Some(hitem) } else { None }
+
+            // Si le clic touche explicitement le bouton d'expansion [+] / [-],
+            // retourner immédiatement pour que l'appelant sache qu'il s'agit du bouton
+            if (hti.flags.0 & TVHT_ONITEMBUTTON.0) != 0 {
+                return Some((hti.hItem, hti));
+            }
+
+            // 1. Détection directe si SendMessageW retourne l'élément (ex: sur l'icône ou le libellé)
+            if h.0 != 0 {
+                return Some((HTREEITEM(h.0), hti));
+            }
+
+            // 2. Détection directe via hti.hItem si TVHT_ONITEM / TVHT_ONITEMRIGHT / TVHT_ONITEMINDENT
+            const TVHT_ONITEMRIGHT_VAL: u32 = 0x0020;
+            const TVHT_ONITEMINDENT_VAL: u32 = 0x0008;
+            const TVHT_ONITEM_VAL: u32 = 0x0046;
+            if hti.hItem.0 != 0
+                && (hti.flags.0 & (TVHT_ONITEM_VAL | TVHT_ONITEMRIGHT_VAL | TVHT_ONITEMINDENT_VAL))
+                    != 0
+            {
+                return Some((hti.hItem, hti));
+            }
+
+            // 3. Si le clic est situé plus à droite sur la même rangée ou sur l'indentation
+            // et que Windows n'a pas retourné l'item dans hti.hItem, sonder horizontalement
+            // le long de la même coordonnée Y (même rangée) pour identifier l'item visible.
+            const PROBE_X: [i32; 10] = [30, 45, 60, 80, 100, 120, 150, 180, 220, 260];
+            for probe_x in PROBE_X {
+                if probe_x >= rc_client.right {
+                    break;
+                }
+                let mut probe_hti = TVHITTESTINFO {
+                    pt: POINT {
+                        x: probe_x,
+                        y: pt.y,
+                    },
+                    ..Default::default()
+                };
+                let probe_h = SendMessageW(
+                    self.treeview,
+                    TVM_HITTEST,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(&mut probe_hti as *mut TVHITTESTINFO as isize)),
+                );
+                if probe_h.0 != 0 {
+                    return Some((HTREEITEM(probe_h.0), hti));
+                }
+                if probe_hti.hItem.0 != 0
+                    && (probe_hti.flags.0
+                        & (TVHT_ONITEM_VAL | TVHT_ONITEMRIGHT_VAL | TVHT_ONITEMINDENT_VAL))
+                        != 0
+                {
+                    return Some((probe_hti.hItem, hti));
+                }
+            }
+
+            None
+        }
+    }
+
+    fn tree_hit_test_screen_or_client(&self, main_x: i32, main_y: i32) -> Option<HTREEITEM> {
+        unsafe {
+            let mut pt = POINT {
+                x: main_x,
+                y: main_y,
+            };
+            let _ = ClientToScreen(self.hwnd, &mut pt);
+            let _ = ScreenToClient(self.treeview, &mut pt);
+            self.tree_hit_test_full_row(pt).and_then(|(item, hti)| {
+                if (hti.flags.0 & TVHT_ONITEMBUTTON.0) == 0 && item.0 != 0 {
+                    Some(item)
+                } else {
+                    None
+                }
+            })
         }
     }
 
@@ -3368,18 +3530,10 @@ impl AppWindowState {
 
             let mut client_pt = cursor;
             let _ = ScreenToClient(self.treeview, &mut client_pt);
-            let mut hti = TVHITTESTINFO {
-                pt: client_pt,
-                ..Default::default()
-            };
-            let h = SendMessageW(
-                self.treeview,
-                TVM_HITTEST,
-                Some(WPARAM(0)),
-                Some(LPARAM(&mut hti as *mut TVHITTESTINFO as isize)),
-            );
-            let hitem = HTREEITEM(h.0);
-            if hitem.0 != 0 {
+            if let Some((hitem, hti)) = self.tree_hit_test_full_row(client_pt)
+                && (hti.flags.0 & TVHT_ONITEMBUTTON.0) == 0
+                && hitem.0 != 0
+            {
                 let _ = SendMessageW(
                     self.treeview,
                     TVM_SELECTITEM,
@@ -6991,30 +7145,8 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                             let owner_ptr = GetWindowLongPtrW(state.owner, GWLP_USERDATA)
                                 as *mut AppWindowState;
                             if !owner_ptr.is_null() {
-                                (*owner_ptr).palette.rebuild_brushes();
-                                let _ = DwmSetWindowAttribute(
-                                    state.owner,
-                                    DWMWA_USE_IMMERSIVE_DARK_MODE,
-                                    &dark_mode as *const i32 as *const c_void,
-                                    std::mem::size_of::<i32>() as u32,
-                                );
-                                if !(*owner_ptr).treeview.is_invalid() {
-                                    let _ = SendMessageW(
-                                        (*owner_ptr).treeview,
-                                        TVM_SETBKCOLOR,
-                                        Some(WPARAM(0)),
-                                        Some(LPARAM(col_bg_sidebar() as isize)),
-                                    );
-                                    let _ = SendMessageW(
-                                        (*owner_ptr).treeview,
-                                        TVM_SETTEXTCOLOR,
-                                        Some(WPARAM(0)),
-                                        Some(LPARAM(col_text_primary() as isize)),
-                                    );
-                                    let _ = InvalidateRect(Some((*owner_ptr).treeview), None, true);
-                                }
-                                let _ = InvalidateRect(Some(state.owner), None, true);
-                                let _ = UpdateWindow(state.owner);
+                                (*owner_ptr).settings.theme_mode = mode;
+                                (*owner_ptr).apply_theme();
                             }
                         }
 
@@ -8396,39 +8528,33 @@ unsafe extern "system" fn main_wnd_proc(
                                 let mut pt = POINT::default();
                                 let _ = GetCursorPos(&mut pt);
                                 let _ = ScreenToClient((*ptr).treeview, &mut pt);
-                                let mut hti = TVHITTESTINFO {
-                                    pt,
-                                    ..Default::default()
-                                };
-                                let h = SendMessageW(
-                                    (*ptr).treeview,
-                                    TVM_HITTEST,
-                                    Some(WPARAM(0)),
-                                    Some(LPARAM(&mut hti as *mut TVHITTESTINFO as isize)),
-                                );
-                                let hitem = HTREEITEM(h.0);
-                                if hitem.0 != 0
-                                    && (hti.flags.0 & TVHT_ONITEMBUTTON.0) == 0
-                                    && let Some(kind) = (*ptr).node_kind_from_hitem(hitem)
-                                {
-                                    match kind {
-                                        TreeNodeKind::Connection(cid) => {
-                                            (*ptr).selected_node =
-                                                Some(TreeNodeKind::Connection(cid));
-                                            let _ = SendMessageW(
-                                                (*ptr).treeview,
-                                                TVM_SELECTITEM,
-                                                Some(WPARAM(TVGN_CARET as usize)),
-                                                Some(LPARAM(hitem.0)),
-                                            );
-                                            (*ptr).launch_connection_by_id(cid);
-                                            return LRESULT(1);
-                                        }
-                                        TreeNodeKind::Folder(_)
-                                        | TreeNodeKind::FavoritesRoot
-                                        | TreeNodeKind::ConnectionsRoot => {
-                                            // Laisser le contrôle TreeView développer/replier le dossier nativement
-                                            return LRESULT(0);
+                                if let Some((hitem, hti)) = (*ptr).tree_hit_test_full_row(pt) {
+                                    if (hti.flags.0 & TVHT_ONITEMBUTTON.0) != 0 {
+                                        // Clic direct sur le bouton [+] / [-], laisser le TreeView gérer nativement
+                                        return LRESULT(0);
+                                    }
+                                    if hitem.0 != 0
+                                        && let Some(kind) = (*ptr).node_kind_from_hitem(hitem)
+                                    {
+                                        match kind {
+                                            TreeNodeKind::Connection(cid) => {
+                                                (*ptr).selected_node =
+                                                    Some(TreeNodeKind::Connection(cid));
+                                                let _ = SendMessageW(
+                                                    (*ptr).treeview,
+                                                    TVM_SELECTITEM,
+                                                    Some(WPARAM(TVGN_CARET as usize)),
+                                                    Some(LPARAM(hitem.0)),
+                                                );
+                                                (*ptr).launch_connection_by_id(cid);
+                                                return LRESULT(1);
+                                            }
+                                            TreeNodeKind::Folder(_)
+                                            | TreeNodeKind::FavoritesRoot
+                                            | TreeNodeKind::ConnectionsRoot => {
+                                                // Laisser le contrôle TreeView développer/replier le dossier nativement
+                                                return LRESULT(0);
+                                            }
                                         }
                                     }
                                 }
@@ -9648,6 +9774,9 @@ mod tests {
 
     #[test]
     fn test_ui_rdp_session_menu_actions_and_external_app_launch_wiring() {
+        let _guard = WIN32_UI_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let unique_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -9734,6 +9863,9 @@ mod tests {
 
     #[test]
     fn test_ui_search_edit_theming_and_ctlcolorstatic() {
+        let _guard = WIN32_UI_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let db_path = create_temp_test_db_path("search_theme");
         let _ = std::fs::remove_file(&db_path);
 
@@ -9742,8 +9874,17 @@ mod tests {
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
             assert!(!ptr.is_null());
 
-            let search_edit = (*ptr).search_edit;
-            assert!(IsWindow(Some(search_edit)).as_bool());
+            let initial_search_edit = (*ptr).search_edit;
+            assert!(IsWindow(Some(initial_search_edit)).as_bool());
+
+            // Tester la saisie de texte et sélection avant changement de thème
+            set_window_text(initial_search_edit, "srv-prod-01");
+            let _ = SendMessageW(
+                initial_search_edit,
+                EM_SETSEL,
+                Some(WPARAM(4)),
+                Some(LPARAM(8)),
+            );
 
             let hdc = GetDC(Some(hwnd));
             assert!(!hdc.0.is_null());
@@ -9753,7 +9894,7 @@ mod tests {
                 hwnd,
                 WM_CTLCOLORSTATIC,
                 Some(WPARAM(hdc.0 as usize)),
-                Some(LPARAM(search_edit.0 as isize)),
+                Some(LPARAM(initial_search_edit.0 as isize)),
             );
             assert_eq!(
                 res_dark_static.0,
@@ -9765,7 +9906,7 @@ mod tests {
                 hwnd,
                 WM_CTLCOLOREDIT,
                 Some(WPARAM(hdc.0 as usize)),
-                Some(LPARAM(search_edit.0 as isize)),
+                Some(LPARAM(initial_search_edit.0 as isize)),
             );
             assert_eq!(
                 res_dark_edit.0,
@@ -9775,7 +9916,7 @@ mod tests {
 
             // Sous-classement : WM_ERASEBKGND direct sur search_edit doit retourner 1
             let res_erase_dark = SendMessageW(
-                search_edit,
+                initial_search_edit,
                 WM_ERASEBKGND,
                 Some(WPARAM(hdc.0 as usize)),
                 Some(LPARAM(0)),
@@ -9786,6 +9927,7 @@ mod tests {
             );
 
             // 2. Basculer en Light Theme (cycle Dark -> Light)
+            // Le contrôle EDIT natif doit être proprement recréé pour éliminer tout cache UxTheme
             (*ptr).settings.theme_mode = crate::settings::ThemeMode::Light;
             (*ptr).apply_theme();
             assert_eq!(
@@ -9793,11 +9935,31 @@ mod tests {
                 crate::settings::ResolvedTheme::Light
             );
 
+            let light_search_edit = (*ptr).search_edit;
+            assert!(IsWindow(Some(light_search_edit)).as_bool());
+            assert_ne!(
+                initial_search_edit, light_search_edit,
+                "Le contrôle search_edit doit être proprement recréé avec un nouvel HWND"
+            );
+
+            // Vérifier la préservation du texte et de la sélection
+            assert_eq!(get_window_text(light_search_edit), "srv-prod-01");
+            let mut sel_start: u32 = 0;
+            let mut sel_end: u32 = 0;
+            let _ = SendMessageW(
+                light_search_edit,
+                EM_GETSEL,
+                Some(WPARAM(&mut sel_start as *mut _ as usize)),
+                Some(LPARAM(&mut sel_end as *mut _ as isize)),
+            );
+            assert_eq!(sel_start, 4);
+            assert_eq!(sel_end, 8);
+
             let res_light = SendMessageW(
                 hwnd,
                 WM_CTLCOLORSTATIC,
                 Some(WPARAM(hdc.0 as usize)),
-                Some(LPARAM(search_edit.0 as isize)),
+                Some(LPARAM(light_search_edit.0 as isize)),
             );
             assert_eq!(
                 res_light.0,
@@ -9806,7 +9968,7 @@ mod tests {
             );
 
             let res_erase_light = SendMessageW(
-                search_edit,
+                light_search_edit,
                 WM_ERASEBKGND,
                 Some(WPARAM(hdc.0 as usize)),
                 Some(LPARAM(0)),
@@ -9821,11 +9983,19 @@ mod tests {
                 crate::settings::ResolvedTheme::Dark
             );
 
+            let dark_search_edit = (*ptr).search_edit;
+            assert!(IsWindow(Some(dark_search_edit)).as_bool());
+            assert_ne!(
+                light_search_edit, dark_search_edit,
+                "Le contrôle doit être de nouveau recréé pour le retour au thème sombre"
+            );
+            assert_eq!(get_window_text(dark_search_edit), "srv-prod-01");
+
             let res_dark_reapply = SendMessageW(
                 hwnd,
                 WM_CTLCOLORSTATIC,
                 Some(WPARAM(hdc.0 as usize)),
-                Some(LPARAM(search_edit.0 as isize)),
+                Some(LPARAM(dark_search_edit.0 as isize)),
             );
             assert_eq!(
                 res_dark_reapply.0,
@@ -9940,6 +10110,74 @@ mod tests {
                 root_item.0, 0,
                 "Le TreeView doit posséder au moins une racine"
             );
+
+            // 4. Développer toutes les racines pour rendre les connexions visibles
+            let _ = SendMessageW(
+                treeview,
+                TVM_EXPAND,
+                Some(WPARAM(TVE_EXPAND.0 as usize)),
+                Some(LPARAM(root_item.0)),
+            );
+
+            // Trouver un item visible dans le TreeView
+            let first_visible = SendMessageW(
+                treeview,
+                windows::Win32::UI::Controls::TVM_GETNEXTITEM,
+                Some(WPARAM(
+                    windows::Win32::UI::Controls::TVGN_FIRSTVISIBLE as usize,
+                )),
+                Some(LPARAM(0)),
+            );
+            assert_ne!(
+                first_visible.0, 0,
+                "Un premier élément visible doit exister"
+            );
+
+            // 5. Tester tree_hit_test_full_row :
+            // Obtenir la position Y de cet élément et tester sur l'icône, le libellé et l'espace vide à droite
+            let mut rc_item: [i32; 4] = [first_visible.0 as i32, 0, 0, 0];
+            let ok = SendMessageW(
+                treeview,
+                windows::Win32::UI::Controls::TVM_GETITEMRECT,
+                Some(WPARAM(0)), // fItemRect = FALSE -> rectangle de la ligne entière
+                Some(LPARAM(rc_item.as_mut_ptr() as isize)),
+            );
+            if ok.0 != 0 {
+                let row_y = (rc_item[1] + rc_item[3]) / 2;
+
+                // Clic sur l'icône (x = 35)
+                let hit_icon = (*ptr).tree_hit_test_full_row(POINT { x: 35, y: row_y });
+                assert!(
+                    hit_icon.is_some(),
+                    "Le clic sur l'icône doit détecter la rangée"
+                );
+
+                // Clic sur le texte (x = 80)
+                let hit_label = (*ptr).tree_hit_test_full_row(POINT { x: 80, y: row_y });
+                assert!(
+                    hit_label.is_some(),
+                    "Le clic sur le texte doit détecter la rangée"
+                );
+
+                // Clic dans l'espace vide à droite du texte (x = 240)
+                let hit_right = (*ptr).tree_hit_test_full_row(POINT { x: 240, y: row_y });
+                assert!(
+                    hit_right.is_some(),
+                    "Le clic à droite du texte sur la même ligne doit détecter exactement la même rangée"
+                );
+                assert_eq!(
+                    hit_label.unwrap().0,
+                    hit_right.unwrap().0,
+                    "Le libellé et l'espace droit doivent résoudre le même HTREEITEM"
+                );
+
+                // Clic dans l'espace vide sous tous les éléments (y = 500)
+                let hit_nowhere = (*ptr).tree_hit_test_full_row(POINT { x: 200, y: 500 });
+                assert!(
+                    hit_nowhere.is_none(),
+                    "Un clic en dehors des lignes visibles doit retourner None"
+                );
+            }
 
             let _ = DestroyWindow(hwnd);
         }
