@@ -5,10 +5,10 @@ use std::fmt;
 use std::path::Path;
 use windows::Win32::Networking::WinHttp::{
     INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_FLAG_SECURE,
-    WINHTTP_OPEN_REQUEST_FLAGS, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION,
-    WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
-    WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
-    WinHttpSendRequest, WinHttpSetTimeouts,
+    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_STATUS_CODE,
+    WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable,
+    WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
+    WinHttpSetTimeouts,
 };
 use windows_core::{PCWSTR, w};
 
@@ -183,10 +183,18 @@ pub fn extract_sha256_from_text(text: &str, target_filename: &str) -> Option<Str
     None
 }
 
-/// Télécharge une ressource HTTP/HTTPS via l'API Win32 native WinHTTP.
+/// Télécharge une ressource HTTPS via l'API Win32 native WinHTTP.
 pub fn winhttp_get(url: &str) -> Result<Vec<u8>, String> {
+    winhttp_get_with_depth(url, 0)
+}
+
+fn winhttp_get_with_depth(url: &str, depth: u32) -> Result<Vec<u8>, String> {
+    if depth > 5 {
+        return Err("Nombre excessif de redirections HTTP (boucle détectée).".to_string());
+    }
+
     unsafe {
-        let (host, port, path, is_https) = parse_url(url)?;
+        let (host, port, path) = parse_url(url)?;
 
         let user_agent = w!("Malvision/1.0.0 (Windows NT 10.0; Win64; x64)");
         let session = WinHttpOpen(
@@ -208,11 +216,7 @@ pub fn winhttp_get(url: &str) -> Result<Vec<u8>, String> {
         }
 
         let path_w: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-        let flags = if is_https {
-            WINHTTP_FLAG_SECURE
-        } else {
-            WINHTTP_OPEN_REQUEST_FLAGS(0)
-        };
+        let flags = WINHTTP_FLAG_SECURE;
 
         let request = WinHttpOpenRequest(
             connect,
@@ -266,7 +270,7 @@ pub fn winhttp_get(url: &str) -> Result<Vec<u8>, String> {
             &mut header_index,
         );
 
-        // Gestion des redirections HTTP (301, 302, 307, 308)
+        // Gestion des redirections HTTP (301, 302, 307, 308) avec validation stricte de sécurité HTTPS
         if (301..=308).contains(&status_code) {
             let mut redirect_url_buf = vec![0u16; 2048];
             let mut redirect_url_size = (redirect_url_buf.len() * 2) as u32;
@@ -289,7 +293,13 @@ pub fn winhttp_get(url: &str) -> Result<Vec<u8>, String> {
                         .trim_matches('\0')
                         .to_string();
                 if !redirect_url.is_empty() {
-                    return winhttp_get(&redirect_url);
+                    if !redirect_url.to_ascii_lowercase().starts_with("https://") {
+                        return Err(
+                            "Redirection vers un protocole non sécurisé (HTTP non chiffré) refusée."
+                                .to_string(),
+                        );
+                    }
+                    return winhttp_get_with_depth(&redirect_url, depth + 1);
                 }
             }
             return Err(format!(
@@ -338,14 +348,18 @@ pub fn winhttp_get(url: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-fn parse_url(url: &str) -> Result<(String, u16, String, bool), String> {
-    let (is_https, rest) = if let Some(stripped) = url.strip_prefix("https://") {
-        (true, stripped)
-    } else if let Some(stripped) = url.strip_prefix("http://") {
-        (false, stripped)
+fn parse_url(url: &str) -> Result<(String, u16, String), String> {
+    let rest = if let Some(stripped) = url.strip_prefix("https://") {
+        stripped
+    } else if url.starts_with("http://") {
+        return Err(
+            "Protocole non sécurisé rejeté : seules les connexions HTTPS chiffrées sont autorisées pour les mises à jour."
+                .to_string(),
+        );
     } else {
         return Err(
-            "Protocole d'URL non supporté (seuls http et https sont acceptés).".to_string(),
+            "Protocole d'URL non supporté (seules les connexions HTTPS sont acceptées)."
+                .to_string(),
         );
     };
 
@@ -362,17 +376,10 @@ fn parse_url(url: &str) -> Result<(String, u16, String, bool), String> {
                 .map_err(|_| "Port invalide dans l'URL.".to_string())?;
             (h, p)
         }
-        None => {
-            let port = if is_https {
-                INTERNET_DEFAULT_HTTPS_PORT
-            } else {
-                80
-            };
-            (host_port.to_string(), port)
-        }
+        None => (host_port.to_string(), INTERNET_DEFAULT_HTTPS_PORT),
     };
 
-    Ok((host, port, path.to_string(), is_https))
+    Ok((host, port, path.to_string()))
 }
 
 /// Vérifie la dernière release publique disponible sur le dépôt GitHub.
@@ -380,10 +387,27 @@ pub fn check_latest_release(repo: &str) -> Result<ReleaseInfo, String> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
     let body = winhttp_get(&url)?;
     let json_str = String::from_utf8(body).map_err(|e| format!("Réponse UTF-8 invalide : {e}"))?;
-    parse_release_json(&json_str)
+    let mut info = parse_release_json(&json_str)?;
+
+    // Si l'empreinte SHA-256 n'est pas présente dans les notes de version, tenter de la récupérer via SHA256SUMS.txt
+    if info.expected_exe_sha256.is_none()
+        && let Some(sums_asset) = &info.sha256_sums_asset
+        && let Ok(sums_bytes) = winhttp_get(&sums_asset.download_url)
+        && let Ok(sums_text) = String::from_utf8(sums_bytes)
+    {
+        info.expected_exe_sha256 = extract_sha256_from_text(&sums_text, "Malvision.exe");
+    }
+
+    Ok(info)
 }
 
 /// Écrit les octets téléchargés dans un fichier temporaire, vérifie l'intégrité SHA-256 et déplace atomiquement vers le chemin final.
+///
+/// Exigences de sécurité :
+/// - Vérification obligatoire de l'empreinte cryptographique SHA-256 de référence.
+/// - Aucun téléchargement sans empreinte officielle n'est accepté.
+/// - En cas d'échec de téléchargement ou d'empreinte altérée, le fichier temporaire est détruit
+///   et le fichier cible existant (le cas échéant) est conservé intact.
 pub fn write_and_verify_asset_bytes(
     data: &[u8],
     dest_path: &Path,
@@ -393,12 +417,54 @@ pub fn write_and_verify_asset_bytes(
         return Err("Le téléchargement a retourné un fichier vide (0 octet).".to_string());
     }
 
-    let temp_path = dest_path.with_extension("malvision_download_tmp");
+    // Empreinte SHA-256 obligatoire : aucun téléchargement sans empreinte officielle n'est accepté
+    let expected_hash = match expected_sha256 {
+        Some(h) if !h.trim().is_empty() => h.trim().to_ascii_lowercase(),
+        _ => {
+            return Err(
+                "Vérification d'intégrité impossible : aucune empreinte cryptographique SHA-256 officielle n'est fournie pour cet asset. Téléchargement refusé par mesure de sécurité."
+                    .to_string(),
+            );
+        }
+    };
+
+    let parent = dest_path.parent().unwrap_or_else(|| Path::new("."));
+    if !parent.as_os_str().is_empty() && !parent.exists() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Impossible de créer le dossier de destination '{}' : {e}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let file_stem = dest_path
+        .file_stem()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_else(|| "update".into());
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp_path = parent.join(format!(".{file_stem}_{pid}_{nanos}.tmp_download"));
+
     if temp_path.exists() {
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    // Écrire dans le fichier temporaire
+    // Structure Guard pour garantir le nettoyage automatique en cas d'erreur
+    struct TempCleanup<'a>(&'a Path);
+    impl Drop for TempCleanup<'_> {
+        fn drop(&mut self) {
+            if self.0.exists() {
+                let _ = std::fs::remove_file(self.0);
+            }
+        }
+    }
+    let cleanup = TempCleanup(&temp_path);
+
+    // 1. Écrire dans le fichier temporaire
     std::fs::write(&temp_path, data).map_err(|e| {
         format!(
             "Impossible d'écrire le fichier temporaire '{}' : {e}",
@@ -406,31 +472,20 @@ pub fn write_and_verify_asset_bytes(
         )
     })?;
 
-    // Vérifier l'empreinte SHA-256 si une valeur de référence est fournie
-    if let Some(expected_hash) = expected_sha256 {
-        let expected_clean = expected_hash.trim().to_ascii_lowercase();
-        if !expected_clean.is_empty() {
-            let computed = compute_file_sha256(&temp_path)?;
-            if computed.to_ascii_lowercase() != expected_clean {
-                let _ = std::fs::remove_file(&temp_path);
-                return Err(format!(
-                    "Échec de validation de l'intégrité SHA-256 !\n\nAttendu  : {expected_clean}\nCalculé  : {computed}\n\nLe fichier a été supprimé par sécurité."
-                ));
-            }
-        }
+    // 2. Vérification obligatoire et stricte de l'empreinte SHA-256
+    let computed = compute_file_sha256(&temp_path)?;
+    if computed.to_ascii_lowercase() != expected_hash {
+        // cleanup va supprimer temp_path automatiquement
+        return Err(format!(
+            "Échec de validation de l'intégrité SHA-256 !\n\nAttendu  : {expected_hash}\nCalculé  : {computed}\n\nLe fichier temporaire a été supprimé par sécurité. Le fichier de destination d'origine reste intact."
+        ));
     }
 
-    // Déplacement atomique vers la destination finale
-    if dest_path.exists() {
-        let _ = std::fs::remove_file(dest_path);
-    }
-    std::fs::rename(&temp_path, dest_path).map_err(|e| {
-        let _ = std::fs::remove_file(&temp_path);
-        format!(
-            "Impossible de finaliser l'installation vers '{}' : {e}",
-            dest_path.display()
-        )
-    })?;
+    // 3. Déplacement atomique vers la destination finale
+    crate::storage::atomic_replace_file(&temp_path, dest_path)?;
+
+    // Désactiver le nettoyage du fichier temporaire puisqu'il a été déplacé avec succès
+    std::mem::forget(cleanup);
 
     Ok(())
 }
@@ -528,7 +583,11 @@ mod tests {
     fn test_write_and_verify_asset_bytes_sha256_success_and_tamper_detection() {
         let base_dir = std::env::temp_dir();
         let pid = std::process::id();
-        let target_file = base_dir.join(format!("malvision_download_test_{pid}.exe"));
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let target_file = base_dir.join(format!("malvision_download_test_{pid}_{nanos}.exe"));
         let _ = std::fs::remove_file(&target_file);
 
         let data = b"MZ... Valid Fake Executable Payload for Malvision v1.0.1 ...";
@@ -543,23 +602,82 @@ mod tests {
         assert!(target_file.exists());
         assert_eq!(std::fs::read(&target_file).unwrap(), data);
 
-        // 2. Échec avec hash altéré
+        // 2. Rejet obligatoire si aucune empreinte SHA-256 n'est fournie (None ou vide)
+        let res_no_hash = write_and_verify_asset_bytes(data, &target_file, None);
+        assert!(
+            res_no_hash.is_err(),
+            "Tout téléchargement sans empreinte officielle doit être rejeté"
+        );
+        let res_empty_hash = write_and_verify_asset_bytes(data, &target_file, Some("   "));
+        assert!(
+            res_empty_hash.is_err(),
+            "Une empreinte vide doit être rejetée"
+        );
+
+        // 3. Échec avec hash altéré ET conservation intégrale du fichier existant
         let corrupt_hash = "0000000000000000000000000000000000000000000000000000000000000000";
-        let target_file2 = base_dir.join(format!("malvision_download_corrupt_{pid}.exe"));
+        let target_file2 = base_dir.join(format!("malvision_download_corrupt_{pid}_{nanos}.exe"));
         let _ = std::fs::remove_file(&target_file2);
+
+        // Créer un fichier existant préalable
+        std::fs::write(&target_file2, b"ANCIEN EXECUTABLE FONCTIONNEL").unwrap();
 
         let res_err = write_and_verify_asset_bytes(data, &target_file2, Some(corrupt_hash));
         assert!(res_err.is_err(), "Le hash altéré doit être rejeté");
-        assert!(
-            !target_file2.exists(),
-            "Le fichier cible ne doit pas être créé en cas de hash invalide"
+        // Le fichier cible existant doit être conservé intact
+        assert_eq!(
+            std::fs::read(&target_file2).unwrap(),
+            b"ANCIEN EXECUTABLE FONCTIONNEL",
+            "L'ancien exécutable doit être préservé en cas d'échec du hash"
         );
 
-        // 3. Échec avec payload vide
-        let res_empty = write_and_verify_asset_bytes(b"", &target_file2, None);
+        // 4. Échec avec payload vide
+        let res_empty = write_and_verify_asset_bytes(b"", &target_file, Some(&valid_hash));
         assert!(res_empty.is_err());
+
+        // 5. Validation de parse_url : rejet strict des URLs HTTP non sécurisées
+        assert!(parse_url("http://insecure-download.example.com/file.exe").is_err());
+        assert!(parse_url("ftp://ftp.example.com/file.exe").is_err());
+        assert!(parse_url("https://github.com/Malvirae/malvision/releases").is_ok());
 
         let _ = std::fs::remove_file(&target_file);
         let _ = std::fs::remove_file(&target_file2);
+    }
+
+    #[test]
+    fn test_parse_release_json_with_sha256sums_txt_asset() {
+        let json_without_body_hash = r#"{
+            "tag_name": "v1.0.1",
+            "name": "Malvision 1.0.1",
+            "draft": false,
+            "prerelease": false,
+            "body": "Notes de version sans hash explicite dans le texte",
+            "html_url": "https://github.com/Malvirae/malvision/releases/tag/v1.0.1",
+            "assets": [
+                {
+                    "name": "Malvision.exe",
+                    "browser_download_url": "https://github.com/Malvirae/malvision/releases/download/v1.0.1/Malvision.exe",
+                    "size": 5000000
+                },
+                {
+                    "name": "SHA256SUMS.txt",
+                    "browser_download_url": "https://github.com/Malvirae/malvision/releases/download/v1.0.1/SHA256SUMS.txt",
+                    "size": 100
+                }
+            ]
+        }"#;
+
+        let info = parse_release_json(json_without_body_hash).unwrap();
+        assert!(info.sha256_sums_asset.is_some());
+        assert_eq!(info.sha256_sums_asset.unwrap().name, "SHA256SUMS.txt");
+
+        // Simuler la lecture du fichier SHA256SUMS.txt
+        let sums_content =
+            "5d89be95c7c4ab5db2c4c7dc92875a759e6b08ca1856a49fd06667c09da2db25  Malvision.exe\n";
+        let extracted = extract_sha256_from_text(sums_content, "Malvision.exe");
+        assert_eq!(
+            extracted.as_deref(),
+            Some("5d89be95c7c4ab5db2c4c7dc92875a759e6b08ca1856a49fd06667c09da2db25")
+        );
     }
 }

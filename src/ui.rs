@@ -8219,7 +8219,7 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
 
                         let _ = SelectObject(hdc, state.font_small.into());
                         let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
-                        let legal_text = "Développé en Rust natif & Win32 • 100% portable • Aucune télémétrie • Chiffrement local DPAPI\nLicence MIT — Développé pour Malvision\nDépôt officiel : https://github.com/Malvirae/malvision";
+                        let legal_text = "Développé en Rust natif & Win32 • 100% portable • Aucune télémétrie • Chiffrement local DPAPI\nCopyright (c) 2026 Malvirae — Développé pour Malvision\nDépôt officiel : https://github.com/Malvirae/malvision";
                         draw_text_multiline(
                             hdc,
                             legal_text,
@@ -8597,6 +8597,7 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                     } else if id == IDC_SET_UPDATE_CHECK_NOW {
                         state.update_status_text =
                             "Recherche en cours sur GitHub Releases…".to_string();
+                        let _ = EnableWindow(state.btn_check_update, false);
                         let _ = InvalidateRect(Some(hwnd), None, false);
                         let _ = UpdateWindow(hwnd);
 
@@ -8609,6 +8610,7 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
 
                         match crate::updater::check_latest_release(crate::updater::GITHUB_REPO) {
                             Ok(info) => {
+                                let _ = EnableWindow(state.btn_check_update, true);
                                 if info.version > crate::updater::SemVer::CURRENT {
                                     state.update_status_text = format!(
                                         "Nouvelle version disponible : v{} !",
@@ -8643,6 +8645,7 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                                 }
                             }
                             Err(err) => {
+                                let _ = EnableWindow(state.btn_check_update, true);
                                 state.update_status_text = format!("Erreur : {err}");
                                 let _ = InvalidateRect(Some(hwnd), None, false);
                                 show_warning_dialog(
@@ -8657,43 +8660,71 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                     } else if id == IDC_SET_UPDATE_DOWNLOAD {
                         if let Some(info) = &state.latest_release
                             && let Some(asset) = &info.exe_asset
-                            && let Some(dest_path) = crate::external_apps::browse_for_save_file(
+                        {
+                            let expected_hash = info.expected_exe_sha256.as_deref();
+                            if expected_hash.is_none() || expected_hash.unwrap().trim().is_empty() {
+                                show_error_dialog(
+                                    hwnd,
+                                    "Vérification d'intégrité impossible",
+                                    "Aucune empreinte cryptographique SHA-256 officielle n'a été trouvée pour cette release (ni dans les notes de version, ni dans SHA256SUMS.txt).\n\nPar mesure de sécurité stricte, le téléchargement est bloqué.",
+                                );
+                                return LRESULT(0);
+                            }
+
+                            if let Some(dest_path) = crate::external_apps::browse_for_save_file(
                                 hwnd,
                                 "Enregistrer la mise à jour Malvision",
                                 "Malvision.exe",
                                 "exe",
                                 "Exécutable portable (*.exe)",
                                 "*.exe",
-                            )
-                        {
-                            let expected_hash = info.expected_exe_sha256.as_deref();
-                            match crate::updater::download_and_verify_asset(
-                                &asset.download_url,
-                                &dest_path,
-                                expected_hash,
                             ) {
-                                Ok(()) => {
-                                    let sha256 = crate::security::compute_file_sha256(&dest_path)
-                                        .unwrap_or_else(|_| "Vérifiée".to_string());
-                                    show_info_dialog(
-                                        hwnd,
-                                        "Téléchargement réussi",
-                                        &format!(
-                                            "La version v{} a été téléchargée et vérifiée avec succès !\n\nFichier enregistré :\n{}\n\nEmpreinte SHA-256 valide :\n{}\n\nProcédure :\n1. Fermez Malvision.\n2. Remplacez votre exécutable existant par ce nouveau fichier.\n3. Relancez l'application.",
-                                            info.version,
-                                            dest_path.display(),
-                                            sha256
-                                        ),
-                                    );
-                                }
-                                Err(err) => {
-                                    show_error_dialog(
-                                        hwnd,
-                                        "Échec du téléchargement",
-                                        &format!(
-                                            "Impossible de télécharger ou vérifier la mise à jour :\n{err}"
-                                        ),
-                                    );
+                                state.update_status_text =
+                                    "Téléchargement et vérification SHA-256 en cours..."
+                                        .to_string();
+                                let _ = EnableWindow(state.btn_download_update, false);
+                                let _ = InvalidateRect(Some(hwnd), None, false);
+                                let _ = UpdateWindow(hwnd);
+
+                                match crate::updater::download_and_verify_asset(
+                                    &asset.download_url,
+                                    &dest_path,
+                                    expected_hash,
+                                ) {
+                                    Ok(()) => {
+                                        let _ = EnableWindow(state.btn_download_update, true);
+                                        let sha256 =
+                                            crate::security::compute_file_sha256(&dest_path)
+                                                .unwrap_or_else(|_| "Vérifiée".to_string());
+                                        state.update_status_text = format!(
+                                            "Version v{} téléchargée et vérifiée avec succès !",
+                                            info.version
+                                        );
+                                        let _ = InvalidateRect(Some(hwnd), None, false);
+                                        show_info_dialog(
+                                            hwnd,
+                                            "Téléchargement réussi",
+                                            &format!(
+                                                "La version v{} a été téléchargée et vérifiée avec succès !\n\nFichier enregistré :\n{}\n\nEmpreinte SHA-256 valide :\n{}\n\nProcédure :\n1. Fermez Malvision.\n2. Remplacez votre exécutable existant par ce nouveau fichier.\n3. Relancez l'application.",
+                                                info.version,
+                                                dest_path.display(),
+                                                sha256
+                                            ),
+                                        );
+                                    }
+                                    Err(err) => {
+                                        let _ = EnableWindow(state.btn_download_update, true);
+                                        state.update_status_text =
+                                            format!("Échec du téléchargement : {err}");
+                                        let _ = InvalidateRect(Some(hwnd), None, false);
+                                        show_error_dialog(
+                                            hwnd,
+                                            "Échec du téléchargement",
+                                            &format!(
+                                                "Impossible de télécharger ou vérifier la mise à jour :\n{err}"
+                                            ),
+                                        );
+                                    }
                                 }
                             }
                         }

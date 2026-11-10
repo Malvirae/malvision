@@ -43,7 +43,7 @@ Il regroupe dans une interface unifiée et réactive vos connexions **RDP**, **A
 
 | Fichier | Taille | Empreinte SHA-256 |
 | :--- | :--- | :--- |
-| **`Malvision.exe`** | ~5.0 Mo | `5d89be95c7c4ab5db2c4c7dc92875a759e6b08ca1856a49fd06667c09da2db25` |
+| **`Malvision.exe`** | ~5.0 Mo | `ebb34180a524ae433a787e25d1411c5e392cf1c021c3272dab4dfeae847693de` |
 
 ---
 

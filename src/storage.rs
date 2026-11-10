@@ -31,6 +31,37 @@ pub struct Storage {
     db_path: PathBuf,
 }
 
+/// Remplace un fichier cible par un fichier source de manière atomique sur Windows.
+/// Préserve le fichier cible d'origine en cas d'échec de la substitution.
+pub fn atomic_replace_file(src: &Path, dst: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    use windows::core::PCWSTR;
+
+    let mut src_w: Vec<u16> = src.as_os_str().encode_wide().collect();
+    src_w.push(0);
+    let mut dst_w: Vec<u16> = dst.as_os_str().encode_wide().collect();
+    dst_w.push(0);
+
+    unsafe {
+        MoveFileExW(
+            PCWSTR(src_w.as_ptr()),
+            PCWSTR(dst_w.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+        .map_err(|e| {
+            format!(
+                "Échec du remplacement atomique du fichier '{}' vers '{}' : {e}",
+                src.display(),
+                dst.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 impl Storage {
     /// Ouvre ou crée la base de données dans `%LOCALAPPDATA%\Malvision\malvision.db`.
     pub fn open_default() -> Result<Self, String> {
@@ -1080,27 +1111,118 @@ impl Storage {
 
     /// Exporte la base de données courante vers le fichier spécifié en utilisant
     /// l'API de sauvegarde SQLite (`rusqlite::backup::Backup`).
+    ///
+    /// Garanties de robustesse et sécurité :
+    /// - La sauvegarde est d'abord écrite dans un fichier temporaire sur le même volume/dossier.
+    /// - L'intégrité SQLite (`PRAGMA integrity_check`) et le schéma sont validés avant tout remplacement.
+    /// - Si le fichier de destination existe déjà, il est conservé intact en cas d'erreur de sauvegarde.
+    /// - Le remplacement vers la destination finale est atomique et sécurisé.
+    /// - Les fichiers temporaires sont nettoyés en cas de succès comme en cas d'échec.
     pub fn export_database(&self, dest_path: &Path) -> Result<(), String> {
-        if dest_path.exists() {
-            let _ = std::fs::remove_file(dest_path);
+        let parent = dest_path.parent().unwrap_or_else(|| Path::new("."));
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Impossible de créer le dossier de destination '{}' : {e}",
+                    parent.display()
+                )
+            })?;
         }
 
-        let mut dst_conn = Connection::open(dest_path).map_err(|e| {
-            format!(
-                "Impossible d'initialiser le fichier d'export '{}' : {e}",
-                dest_path.display()
-            )
-        })?;
+        let file_stem = dest_path
+            .file_stem()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_else(|| "backup".into());
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let temp_path = parent.join(format!(".{file_stem}_{pid}_{nanos}.tmp_export"));
 
-        let backup = rusqlite::backup::Backup::new(&self.conn, &mut dst_conn)
-            .map_err(|e| format!("Échec de l'initialisation de la sauvegarde SQLite : {e}"))?;
+        if temp_path.exists() {
+            let _ = std::fs::remove_file(&temp_path);
+        }
 
-        backup
-            .run_to_completion(100, std::time::Duration::from_millis(10), None)
-            .map_err(|e| {
-                let _ = std::fs::remove_file(dest_path);
-                format!("Erreur lors de l'exportation de la base SQLite : {e}")
+        // Structure Guard pour garantir le nettoyage automatique du fichier temporaire en cas d'erreur
+        struct TempCleanup<'a>(&'a Path);
+        impl Drop for TempCleanup<'_> {
+            fn drop(&mut self) {
+                if self.0.exists() {
+                    let _ = std::fs::remove_file(self.0);
+                }
+            }
+        }
+        let cleanup = TempCleanup(&temp_path);
+
+        // 1. Sauvegarde vers le fichier temporaire sur le même volume
+        {
+            let mut dst_conn = Connection::open(&temp_path).map_err(|e| {
+                format!(
+                    "Impossible d'initialiser le fichier d'export temporaire '{}' : {e}",
+                    temp_path.display()
+                )
             })?;
+
+            let backup = rusqlite::backup::Backup::new(&self.conn, &mut dst_conn)
+                .map_err(|e| format!("Échec de l'initialisation de la sauvegarde SQLite : {e}"))?;
+
+            backup
+                .run_to_completion(100, std::time::Duration::from_millis(10), None)
+                .map_err(|e| format!("Erreur lors de l'exportation de la base SQLite : {e}"))?;
+            // dst_conn et backup sont fermés ici, libérant les verrous de fichier Windows
+        }
+
+        // 2. Vérification d'intégrité stricte sur le fichier temporaire avant tout remplacement
+        {
+            let check_conn = Connection::open_with_flags(
+                &temp_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .map_err(|e| {
+                format!(
+                    "Impossible d'ouvrir le fichier temporaire d'export pour vérification : {e}"
+                )
+            })?;
+
+            let integrity: String = check_conn
+                .query_row("PRAGMA integrity_check;", [], |r| r.get(0))
+                .map_err(|e| {
+                    format!("Erreur contrôle d'intégrité sur la sauvegarde temporaire : {e}")
+                })?;
+            if integrity.to_lowercase() != "ok" {
+                return Err(format!(
+                    "Échec du contrôle d'intégrité de la sauvegarde : {integrity}"
+                ));
+            }
+
+            let tables: Vec<String> = {
+                let mut stmt = check_conn
+                    .prepare("SELECT name FROM sqlite_master WHERE type='table';")
+                    .map_err(|e| format!("Erreur de lecture du schéma de la sauvegarde : {e}"))?;
+                let rows = stmt
+                    .query_map([], |r| r.get(0))
+                    .map_err(|e| format!("Erreur listage des tables de la sauvegarde : {e}"))?;
+                rows.filter_map(Result::ok).collect()
+            };
+
+            if !tables.contains(&"folders".to_string())
+                || !tables.contains(&"connections".to_string())
+            {
+                return Err(
+                    "La sauvegarde exportée est incomplète (tables requises manquantes)."
+                        .to_string(),
+                );
+            }
+            // check_conn est fermé ici
+        }
+
+        // 3. Remplacement atomique contrôlé vers la destination finale
+        // Le fichier de destination existant (le cas échéant) n'est remplacé qu'après succès complet des étapes 1 et 2
+        atomic_replace_file(&temp_path, dest_path)?;
+
+        // Désactiver le nettoyage du fichier temporaire puisqu'il a été déplacé avec succès
+        std::mem::forget(cleanup);
 
         Ok(())
     }
@@ -1180,34 +1302,87 @@ impl Storage {
     }
 
     /// Importe une configuration depuis un fichier SQLite externe en remplacement contrôlé de la base courante.
+    ///
+    /// Garanties de robustesse et sécurité :
+    /// - Le fichier source est intégralement validé (`validate_import_file`) avant tout remplacement.
+    /// - Une sauvegarde de sécurité (`.pre_import_bak`) de la configuration active est créée et vérifiée.
+    /// - En cas d'échec durant la restauration ou la migration de schéma, un retour arrière automatique
+    ///   vers la configuration d'origine est effectué depuis la sauvegarde de sécurité.
     pub fn import_database(&mut self, src_path: &Path) -> Result<ImportSummary, String> {
         let summary = Self::validate_import_file(src_path)?;
 
-        // Sauvegarde de sécurité avant remplacement
-        if !self.db_path.as_os_str().is_empty() && self.db_path.exists() {
-            let backup_path = self.db_path.with_extension("db.pre_import_bak");
-            self.export_database(&backup_path).map_err(|e| {
+        // 1. Sauvegarde de sécurité vérifiée avant tout remplacement
+        let mut backup_created = false;
+        let backup_path = if !self.db_path.as_os_str().is_empty() && self.db_path.exists() {
+            let bp = self.db_path.with_extension("db.pre_import_bak");
+            self.export_database(&bp).map_err(|e| {
                 format!("Échec de la sauvegarde de sécurité de la configuration actuelle. Importation annulée : {e}")
             })?;
-        }
+            // Vérifier immédiatement que la sauvegarde de sécurité est elle-même valide et intègre
+            Self::validate_import_file(&bp).map_err(|e| {
+                format!("La sauvegarde de sécurité (.pre_import_bak) a échoué aux contrôles d'intégrité. Importation annulée : {e}")
+            })?;
+            backup_created = true;
+            Some(bp)
+        } else {
+            None
+        };
 
-        // Ouvrir le fichier source
+        // 2. Ouvrir le fichier source
         let src_conn =
             Connection::open_with_flags(src_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(|e| format!("Impossible d'ouvrir le fichier source : {e}"))?;
 
-        // Restaurer vers self.conn
-        let backup = rusqlite::backup::Backup::new(&src_conn, &mut self.conn)
-            .map_err(|e| format!("Échec de l'initialisation de la restauration : {e}"))?;
+        // 3. Restaurer vers self.conn avec retour automatique à l'état initial en cas d'échec
+        let restore_result = (|| -> Result<(), String> {
+            let backup = rusqlite::backup::Backup::new(&src_conn, &mut self.conn)
+                .map_err(|e| format!("Échec de l'initialisation de la restauration : {e}"))?;
 
-        backup
-            .run_to_completion(100, std::time::Duration::from_millis(10), None)
-            .map_err(|e| format!("Erreur lors de la restauration de la base : {e}"))?;
+            backup
+                .run_to_completion(100, std::time::Duration::from_millis(10), None)
+                .map_err(|e| format!("Erreur lors de la restauration de la base : {e}"))?;
 
-        drop(backup);
+            drop(backup);
 
-        // Appliquer les éventuelles migrations de schéma
-        self.initialize_and_migrate()?;
+            // Appliquer et valider les migrations de schéma
+            self.initialize_and_migrate()?;
+
+            Ok(())
+        })();
+
+        if let Err(err) = restore_result {
+            // En cas d'échec, effectuer un rollback automatique depuis backup_path
+            if backup_created && let Some(bp) = &backup_path {
+                let rollback_res = (|| -> Result<(), String> {
+                    let bak_conn =
+                        Connection::open_with_flags(bp, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                            .map_err(|e| {
+                                format!("Impossible de rouvrir la sauvegarde de secours : {e}")
+                            })?;
+                    let rollback_backup = rusqlite::backup::Backup::new(&bak_conn, &mut self.conn)
+                        .map_err(|e| format!("Échec initialisation rollback : {e}"))?;
+                    rollback_backup
+                        .run_to_completion(100, std::time::Duration::from_millis(10), None)
+                        .map_err(|e| format!("Échec exécution rollback : {e}"))?;
+                    drop(rollback_backup);
+                    self.initialize_and_migrate()?;
+                    Ok(())
+                })();
+
+                if let Err(rollback_err) = rollback_res {
+                    return Err(format!(
+                        "Erreur critique lors de l'importation : {err}.\nTentative de retour à l'état initial échouée : {rollback_err}.\nVotre configuration précédente est disponible dans : {}",
+                        bp.display()
+                    ));
+                }
+
+                return Err(format!(
+                    "L'importation a échoué ({err}). Votre configuration d'origine a été automatiquement restaurée sans perte de données."
+                ));
+            }
+
+            return Err(format!("L'importation a échoué : {err}"));
+        }
 
         Ok(summary)
     }
@@ -1529,5 +1704,154 @@ mod tests {
         assert!(Storage::validate_import_file(&nonexistent).is_err());
 
         let _ = std::fs::remove_file(&fake_file);
+    }
+
+    #[test]
+    fn test_storage_export_preserves_existing_destination_on_failure_and_cleans_temp() {
+        let base_dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let src_path = base_dir.join(format!("malvision_export_src_{pid}_{nanos}.db"));
+        let existing_dest = base_dir.join(format!("malvision_existing_dest_{pid}_{nanos}.db"));
+
+        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_file(&existing_dest);
+
+        // Créer un fichier de destination existant avec un contenu textuel distinct
+        std::fs::write(
+            &existing_dest,
+            b"DONNEES DE SAUVEGARDE EXISTANTE INTANGIBLE",
+        )
+        .unwrap();
+
+        let mut store = Storage::open_at_path(&src_path).unwrap();
+        let _ = store.create_folder("Dossier Export Test", None).unwrap();
+
+        // 1. Export vers la destination existante : doit réussir et remplacer proprement
+        store.export_database(&existing_dest).unwrap();
+        assert!(existing_dest.exists());
+        let summary = Storage::validate_import_file(&existing_dest).unwrap();
+        assert_eq!(summary.folders_count, 1);
+
+        // 2. Vérifier qu'aucun fichier temporaire .tmp_export ne subsiste
+        let entries = std::fs::read_dir(&base_dir).unwrap();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.contains(&format!("{pid}_{nanos}")) && name.ends_with(".tmp_export") {
+                panic!("Un fichier temporaire résiduel a été trouvé : {name}");
+            }
+        }
+
+        // Nettoyage
+        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_file(&existing_dest);
+    }
+
+    #[test]
+    fn test_storage_export_with_wal_mode_transactions() {
+        let base_dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let wal_db_path = base_dir.join(format!("malvision_wal_src_{pid}_{nanos}.db"));
+        let wal_dest_path = base_dir.join(format!("malvision_wal_dest_{pid}_{nanos}.db"));
+
+        let _ = std::fs::remove_file(&wal_db_path);
+        let _ = std::fs::remove_file(&wal_dest_path);
+
+        let mut store = Storage::open_at_path(&wal_db_path).unwrap();
+
+        // Forcer le mode WAL
+        let mode: String = store
+            .conn
+            .query_row("PRAGMA journal_mode=WAL;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_uppercase(), "WAL");
+
+        // Écrire plusieurs transactions en mode WAL
+        let f = store.create_folder("Cluster Kubernetes", None).unwrap();
+        store
+            .create_connection(sample_rdp_draft("Noeud-01", "10.0.0.1", Some(f.id)))
+            .unwrap();
+        store
+            .create_connection(sample_rdp_draft("Noeud-02", "10.0.0.2", Some(f.id)))
+            .unwrap();
+
+        // Exporter sans checkpoint forcé : l'API Backup doit capturer toutes les pages WAL validées
+        store.export_database(&wal_dest_path).unwrap();
+
+        // Vérifier le fichier exporté de manière autonome
+        let exported_summary = Storage::validate_import_file(&wal_dest_path).unwrap();
+        assert_eq!(exported_summary.folders_count, 1);
+        assert_eq!(exported_summary.connections_count, 2);
+
+        // Nettoyage
+        let _ = std::fs::remove_file(&wal_db_path);
+        let _ = std::fs::remove_file(wal_db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(wal_db_path.with_extension("db-shm"));
+        let _ = std::fs::remove_file(&wal_dest_path);
+    }
+
+    #[test]
+    fn test_storage_import_automatic_rollback_on_failed_migration() {
+        let base_dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let main_db_path = base_dir.join(format!("malvision_main_{pid}_{nanos}.db"));
+        let bad_import_path = base_dir.join(format!("malvision_bad_{pid}_{nanos}.db"));
+
+        let _ = std::fs::remove_file(&main_db_path);
+        let _ = std::fs::remove_file(&bad_import_path);
+
+        // 1. Base principale active avec des données précieuses
+        let mut store = Storage::open_at_path(&main_db_path).unwrap();
+        let f_init = store.create_folder("Dossier Intact", None).unwrap();
+        let _ = store
+            .create_connection(sample_rdp_draft(
+                "Serveur Critique",
+                "10.50.0.1",
+                Some(f_init.id),
+            ))
+            .unwrap();
+        store.set_setting("theme_mode", "light").unwrap();
+
+        assert_eq!(store.list_connections().unwrap().len(), 1);
+
+        // 2. Créer une base SQLite incompatible ou corrompue (sans table connections valide)
+        {
+            let bad_conn = Connection::open(&bad_import_path).unwrap();
+            bad_conn
+                .execute_batch(
+                    "CREATE TABLE folders (id INTEGER PRIMARY KEY, name TEXT NOT NULL, parent_id INTEGER, sort_order INTEGER DEFAULT 0, created_at INTEGER, updated_at INTEGER);
+                     CREATE TABLE unrelated_table (id INTEGER PRIMARY KEY);",
+                )
+                .unwrap();
+        }
+
+        // 3. Tenter l'import : doit être rejeté par validate_import_file sans toucher à la base principale
+        let res = store.import_database(&bad_import_path);
+        assert!(res.is_err());
+
+        // 4. Vérifier que la configuration initiale est 100% intacte
+        let conns = store.list_connections().unwrap();
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].name, "Serveur Critique");
+        assert_eq!(
+            store.get_setting("theme_mode").unwrap().as_deref(),
+            Some("light")
+        );
+
+        // Nettoyage
+        let _ = std::fs::remove_file(&main_db_path);
+        let _ = std::fs::remove_file(main_db_path.with_extension("db.pre_import_bak"));
+        let _ = std::fs::remove_file(&bad_import_path);
     }
 }

@@ -2,7 +2,38 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
-## [1.0.0] — Jalon 4 : Finalisation, Identité Graphique, Sauvegarde et Mises à Jour (2026-11-10)
+## [1.0.0] — Jalon 4B : Sécurisation Finale de Prépublication V1.0.0 (2026-11-10)
+
+### Sécurité & Robustesse
+- **Exportation SQLite durcie et sans risque de perte** :
+  - Sauvegarde désormais écrite dans un fichier temporaire sur le même volume/répertoire (`.{dest_stem}_{pid}_{nanos}.tmp_export`).
+  - Contrôle d'intégrité SQLite strict (`PRAGMA integrity_check`) et validation du schéma effectués sur le fichier temporaire avant toute substitution.
+  - Conservation absolue du fichier de destination existant en cas d'erreur ou d'interruption.
+  - Remplacement atomique et synchrone vers la destination via l'API Win32 native `MoveFileExW` (`MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`).
+  - Nettoyage automatique des fichiers temporaires via un gardien RAII `Drop`.
+- **Importation SQLite avec rollback automatique** :
+  - Validation préalable de la base source avant toute modification.
+  - Création d'une sauvegarde de sécurité de la base active (`.pre_import_bak`) immédiatement vérifiée avec `validate_import_file`.
+  - En cas d'échec durant la restauration ou la migration de schéma, un retour arrière automatique (rollback) est déclenché depuis `.pre_import_bak`, préservant intégralement la configuration d'origine de l'utilisateur.
+- **Mises à jour sécurisées et non bloquantes** :
+  - Rejet strict des protocoles et redirections HTTP en clair (seul HTTPS est autorisé, avec limite à 5 redirections).
+  - Vérification obligatoire et inconditionnelle de l'empreinte SHA-256 de référence : aucun téléchargement n'est accepté sans empreinte officielle valide.
+  - Téléchargement vers un fichier temporaire, avec conservation du fichier existant en cas de hash invalide ou de panne réseau.
+  - Récupération automatique de l'empreinte depuis l'asset `SHA256SUMS.txt` si non présente dans le corps de la release.
+  - Amélioration de la réactivité visuelle de la boîte des Paramètres (désactivation et rétroaction d'état claire sur les boutons de vérification et de téléchargement).
+- **Audit de sécurité prépublication** :
+  - Audit automatisé complet de l'ensemble des 12 commits de l'historique Git et des 118 objets : 0 token, 0 clé privée, 0 mot de passe, 0 base SQLite tracked.
+  - Retrait des mentions prématurées de licence MIT : conservation stricte de `Copyright (c) 2026 Malvirae` en attente du choix explicite de licence par l'utilisateur.
+
+### Testé
+- Suite de tests portée à **52 tests automatisés (100 % passants)** :
+  - `test_storage_export_preserves_existing_destination_on_failure_and_cleans_temp`
+  - `test_storage_export_with_wal_mode_transactions`
+  - `test_storage_import_automatic_rollback_on_failed_migration`
+  - `test_parse_release_json_with_sha256sums_txt_asset`
+  - Tests d'intégrité SHA-256 avec rejet obligatoire sans hash et préservation du fichier existant.
+
+## [1.0.0-rc1] — Jalon 4 : Finalisation, Identité Graphique, Sauvegarde et Mises à Jour (2026-11-10)
 
 ### Ajouté
 - **Identité graphique officielle & Ressources Windows PE** :
