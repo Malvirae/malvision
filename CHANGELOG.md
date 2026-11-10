@@ -2,6 +2,36 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
+## [Jalon 3E] — Correction définitive du double-clic pleine largeur sur les lignes de connexion
+
+### Corrigé
+- **Résolution de la cause racine du double-clic dans l'espace vide à droite du libellé** :
+  - Identification de l'architecture interne des Common Controls Windows (`WC_TREEVIEWW`) : lorsque l'utilisateur double-clique dans l'espace vide à droite du libellé (`TVHT_ONITEMRIGHT`), la procédure de fenêtre native du TreeView intercepte `WM_LBUTTONDBLCLK`, constate que le point n'est ni sur l'icône ni sur le texte, et abandonne l'événement **sans émettre la notification `NM_DBLCLK`** à la fenêtre parente. Le parent ne recevait donc jamais le message.
+  - Mise en place d'un sous-classement Win32 dédié du TreeView (`treeview_wnd_proc` via `GWLP_WNDPROC` et propriété `MalvisionTreeViewOrigProc`) interceptant en amont le message `WM_LBUTTONDBLCLK` avant qu'il ne soit ignoré par le contrôle natif.
+  - Résolution déterministe de rangée sans sondage empirique (`tree_resolve_row_at_point`) :
+    - Vérification stricte des limites clientes (`GetClientRect`).
+    - Parcours des éléments visibles avec `TVGN_FIRSTVISIBLE` puis `TVGN_NEXTVISIBLE`.
+    - Récupération de la boîte englobante de chaque rangée via `TVM_GETITEMRECT` avec `fItemRect = FALSE` (ligne entière).
+    - Détection immédiate de l'élément dont la plage verticale `[rc_item.top, rc_item.bottom[` contient `pt.y`.
+    - Fonctionne sans aucune coordonnée X codée en dur, quelle que soit la longueur du texte (ex. connexion courte « A »), la largeur du panneau, la profondeur du sous-dossier ou la position horizontale du clic.
+  - Préservation des interactions natives :
+    - Clics sur les boutons d'expansion `[+]`/`[-]` (`TVHT_ONITEMBUTTON`) transmis directement à la procédure d'origine.
+    - Double-clic sur un dossier ou une racine : basculement immédiat de l'expansion via `TVM_EXPAND(TVE_TOGGLE)`.
+    - Double-clic sur une connexion (`RDP`, `AnyDesk`, `RustDesk`) : sélection visuelle `TVM_SELECTITEM(TVGN_CARET)` et exécution unique de `launch_connection_by_id`.
+    - Clics en dehors de toute rangée visible (espace vide sous la liste) : ignorés sans effet secondaire.
+  - Élimination garantie des doubles lancements :
+    - Le sous-classement consomme `WM_LBUTTONDBLCLK` en retournant `LRESULT(0)` sans appeler la procédure native, empêchant l'émission ultérieure de `NM_DBLCLK`.
+    - Protection complémentaire par anti-rebond (debounce 400 ms) dans `launch_connection_by_id` neutralisant tout message concurrent.
+
+### Ajouté
+- Test unitaire et d'intégration Win32 réel `test_ui_full_row_double_click_short_name_and_all_x_positions` (portant le total à 40 tests automatisés) :
+  - Connexion au libellé minimaliste « A » (protocole RustDesk) imbriquée dans une arborescence à sous-dossiers (`Parent Folder` -> `Sub Folder`).
+  - Validation du hit-test sur 5 positions horizontales distinctes : sur l'icône ($X=35$), sur le texte ($X=60$), juste après le texte ($X=90$), au centre de la zone vide ($X=\text{width}/2$) et à 10 pixels du bord droit du panneau ($X=\text{width}-10$).
+  - Validation de l'émission effective d'un message `WM_LBUTTONDBLCLK` à 10 pixels du bord droit déclenchant le lancement de la connexion et renseignant `status_override`.
+  - Validation de l'anti-rebond lors de double-clics successifs rapprochés.
+  - Validation du basculement d'expansion d'un dossier par double-clic tout à droite de sa ligne.
+  - Validation du retour `None` et de l'absence d'action en cas de clic dans l'espace vide sous la liste ($Y=\text{height}+50$).
+
 ## [Jalon 3D] — Correctifs UX avant V1.0.0 (Champ de recherche sans résidu par recréation dynamique et double-clic sur toute la ligne)
 
 ### Corrigé

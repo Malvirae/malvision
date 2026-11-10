@@ -31,11 +31,12 @@ use windows::Win32::UI::Controls::{
     CDRF_SKIPDEFAULT, DRAWITEMSTRUCT, HTREEITEM, MEASUREITEMSTRUCT, NM_CLICK, NM_CUSTOMDRAW,
     NM_DBLCLK, NM_RCLICK, NMHDR, NMTREEVIEWW, NMTVCUSTOMDRAW, ODS_FOCUS, ODS_SELECTED, ODT_BUTTON,
     ODT_COMBOBOX, SetWindowTheme, TV_FIRST, TVE_EXPAND, TVE_TOGGLE, TVGN_CARET, TVGN_DROPHILITE,
-    TVHITTESTINFO, TVHT_ONITEMBUTTON, TVI_LAST, TVI_ROOT, TVIF_HANDLE, TVIF_PARAM, TVIF_STATE,
-    TVIF_TEXT, TVINSERTSTRUCTW, TVIS_EXPANDED, TVITEMEXW, TVITEMW, TVM_DELETEITEM, TVM_EXPAND,
-    TVM_GETITEMW, TVM_HITTEST, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETBKCOLOR, TVM_SETTEXTCOLOR,
-    TVN_BEGINDRAGW, TVN_ITEMEXPANDEDW, TVN_SELCHANGEDW, TVS_FULLROWSELECT, TVS_HASBUTTONS,
-    TVS_SHOWSELALWAYS, WC_BUTTONW, WC_COMBOBOXW, WC_EDITW, WC_TREEVIEWW, WM_MOUSELEAVE,
+    TVGN_FIRSTVISIBLE, TVGN_NEXTVISIBLE, TVHITTESTINFO, TVHT_ONITEMBUTTON, TVI_LAST, TVI_ROOT,
+    TVIF_HANDLE, TVIF_PARAM, TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW, TVIS_EXPANDED, TVITEMEXW,
+    TVITEMW, TVM_DELETEITEM, TVM_EXPAND, TVM_GETITEMRECT, TVM_GETITEMW, TVM_GETNEXTITEM,
+    TVM_HITTEST, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETBKCOLOR, TVM_SETTEXTCOLOR, TVN_BEGINDRAGW,
+    TVN_ITEMEXPANDEDW, TVN_SELCHANGEDW, TVS_FULLROWSELECT, TVS_HASBUTTONS, TVS_SHOWSELALWAYS,
+    WC_BUTTONW, WC_COMBOBOXW, WC_EDITW, WC_TREEVIEWW, WM_MOUSELEAVE,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -579,6 +580,7 @@ pub struct AppWindowState {
     is_hidden_in_tray: bool,
     exit_requested: bool,
     wm_taskbar_created: u32,
+    last_launch_debounce: Option<(i64, std::time::Instant)>,
 }
 
 impl AppWindowState {
@@ -728,6 +730,18 @@ impl AppWindowState {
             .unwrap_or_default();
 
             if !treeview.is_invalid() {
+                // Sous-classer pour intercepter WM_LBUTTONDBLCLK sur toute la largeur utile de ligne
+                let orig_proc = SetWindowLongPtrW(
+                    treeview,
+                    GWLP_WNDPROC,
+                    treeview_wnd_proc as *const () as isize,
+                );
+                let _ = SetPropW(
+                    treeview,
+                    PROP_TREEVIEW_ORIG_PROC,
+                    Some(HANDLE(orig_proc as *mut _)),
+                );
+
                 let _ = SendMessageW(
                     treeview,
                     WM_SETFONT,
@@ -783,6 +797,7 @@ impl AppWindowState {
                 is_hidden_in_tray: false,
                 exit_requested: false,
                 wm_taskbar_created,
+                last_launch_debounce: None,
             };
 
             if !cfg!(test) {
@@ -3144,10 +3159,10 @@ impl AppWindowState {
         }
     }
 
-    /// Détecte avec précision l'élément du TreeView présent sur la rangée spécifiée (`pt`),
-    /// y compris lorsque le double-clic ou le clic droit est situé dans l'espace vide à droite
-    /// du libellé (`TVHT_ONITEMRIGHT`) ou sur l'indentation (`TVHT_ONITEMINDENT`).
-    pub fn tree_hit_test_full_row(&self, pt: POINT) -> Option<(HTREEITEM, TVHITTESTINFO)> {
+    /// Détecte de façon déterministe l'élément du TreeView présent sur la rangée spécifiée (`pt`),
+    /// quelle que soit la longueur du texte, le niveau d'indentation ou la position horizontale du clic
+    /// (icône, libellé, ou espace vide à droite jusqu'au bord du panneau).
+    pub fn tree_resolve_row_at_point(&self, pt: POINT) -> Option<(HTREEITEM, TVHITTESTINFO)> {
         unsafe {
             let mut rc_client = RECT::default();
             let _ = GetClientRect(self.treeview, &mut rc_client);
@@ -3188,41 +3203,55 @@ impl AppWindowState {
                 return Some((hti.hItem, hti));
             }
 
-            // 3. Si le clic est situé plus à droite sur la même rangée ou sur l'indentation
-            // et que Windows n'a pas retourné l'item dans hti.hItem, sonder horizontalement
-            // le long de la même coordonnée Y (même rangée) pour identifier l'item visible.
-            const PROBE_X: [i32; 10] = [30, 45, 60, 80, 100, 120, 150, 180, 220, 260];
-            for probe_x in PROBE_X {
-                if probe_x >= rc_client.right {
-                    break;
-                }
-                let mut probe_hti = TVHITTESTINFO {
-                    pt: POINT {
-                        x: probe_x,
-                        y: pt.y,
-                    },
-                    ..Default::default()
-                };
-                let probe_h = SendMessageW(
+            // 3. Résolution déterministe par parcours des éléments visibles (TVGN_FIRSTVISIBLE / TVGN_NEXTVISIBLE)
+            // et vérification de la plage verticale de chaque rangée via TVM_GETITEMRECT (fItemRect = FALSE).
+            let mut current = HTREEITEM(
+                SendMessageW(
                     self.treeview,
-                    TVM_HITTEST,
-                    Some(WPARAM(0)),
-                    Some(LPARAM(&mut probe_hti as *mut TVHITTESTINFO as isize)),
+                    TVM_GETNEXTITEM,
+                    Some(WPARAM(TVGN_FIRSTVISIBLE as usize)),
+                    Some(LPARAM(0)),
+                )
+                .0,
+            );
+
+            while current.0 != 0 {
+                let mut rc_item = RECT::default();
+                *(&mut rc_item as *mut RECT as *mut isize) = current.0;
+                let ok = SendMessageW(
+                    self.treeview,
+                    TVM_GETITEMRECT,
+                    Some(WPARAM(0)), // FALSE = rectangle de toute la ligne
+                    Some(LPARAM(&mut rc_item as *mut RECT as isize)),
                 );
-                if probe_h.0 != 0 {
-                    return Some((HTREEITEM(probe_h.0), hti));
+                if ok.0 != 0 && rc_item.bottom > rc_item.top {
+                    if rc_item.top >= rc_client.bottom {
+                        break;
+                    }
+                    if pt.y >= rc_item.top && pt.y < rc_item.bottom {
+                        hti.hItem = current;
+                        hti.flags.0 |= TVHT_ONITEMRIGHT_VAL;
+                        return Some((current, hti));
+                    }
                 }
-                if probe_hti.hItem.0 != 0
-                    && (probe_hti.flags.0
-                        & (TVHT_ONITEM_VAL | TVHT_ONITEMRIGHT_VAL | TVHT_ONITEMINDENT_VAL))
-                        != 0
-                {
-                    return Some((probe_hti.hItem, hti));
-                }
+                current = HTREEITEM(
+                    SendMessageW(
+                        self.treeview,
+                        TVM_GETNEXTITEM,
+                        Some(WPARAM(TVGN_NEXTVISIBLE as usize)),
+                        Some(LPARAM(current.0)),
+                    )
+                    .0,
+                );
             }
 
             None
         }
+    }
+
+    /// Alias rétrocompatible pour tree_resolve_row_at_point
+    pub fn tree_hit_test_full_row(&self, pt: POINT) -> Option<(HTREEITEM, TVHITTESTINFO)> {
+        self.tree_resolve_row_at_point(pt)
     }
 
     fn tree_hit_test_screen_or_client(&self, main_x: i32, main_y: i32) -> Option<HTREEITEM> {
@@ -3303,6 +3332,16 @@ impl AppWindowState {
     // =========================================================================
 
     pub fn launch_connection_by_id(&mut self, connection_id: i64) {
+        // Anti-rebond (debounce) : si la même connexion a été demandée il y a moins de 400 ms,
+        // ignorer l'événement redondant pour éviter tout double lancement (ex. messages concurrents)
+        if let Some((last_id, last_time)) = self.last_launch_debounce
+            && last_id == connection_id
+            && last_time.elapsed().as_millis() < 400
+        {
+            return;
+        }
+        self.last_launch_debounce = Some((connection_id, std::time::Instant::now()));
+
         let conn = match self.storage.get_connection(connection_id) {
             Ok(Some(c)) => c,
             Ok(None) => {
@@ -4313,6 +4352,100 @@ unsafe extern "system" fn search_edit_wnd_proc(
             }
             windows::Win32::UI::WindowsAndMessaging::WM_NCDESTROY => {
                 let _ = RemovePropW(hwnd, PROP_SEARCH_EDIT_ORIG_PROC);
+                if let Some(proc) = orig_proc {
+                    CallWindowProcW(Some(proc), hwnd, msg, wparam, lparam)
+                } else {
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                }
+            }
+            _ => {
+                if let Some(proc) = orig_proc {
+                    CallWindowProcW(Some(proc), hwnd, msg, wparam, lparam)
+                } else {
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                }
+            }
+        }
+    }
+}
+
+const PROP_TREEVIEW_ORIG_PROC: PCWSTR = w!("MalvisionTreeViewOrigProc");
+
+/// Sous-classement du contrôle TreeView (`WC_TREEVIEWW`) pour intercepter directement `WM_LBUTTONDBLCLK`.
+/// Par conception, Windows Common Controls n'émet pas `NM_DBLCLK` au parent lorsque le double-clic se produit
+/// dans l'espace vide à droite du libellé (`TVHT_ONITEMRIGHT`). Ce sous-classement garantit
+/// que le double-clic sur toute la largeur utile de la ligne déclenche la connexion ou bascule le dossier.
+unsafe extern "system" fn treeview_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        let orig_handle = GetPropW(hwnd, PROP_TREEVIEW_ORIG_PROC);
+        let orig_proc: WNDPROC = if !orig_handle.0.is_null() {
+            std::mem::transmute::<*mut c_void, WNDPROC>(orig_handle.0)
+        } else {
+            None
+        };
+
+        match msg {
+            WM_LBUTTONDBLCLK => {
+                let parent = GetParent(hwnd).unwrap_or_default();
+                let ptr = if !parent.is_invalid() {
+                    GetWindowLongPtrW(parent, GWLP_USERDATA) as *mut AppWindowState
+                } else {
+                    std::ptr::null_mut()
+                };
+
+                if !ptr.is_null() {
+                    let pt = POINT {
+                        x: (lparam.0 & 0xFFFF) as i16 as i32,
+                        y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+                    };
+
+                    if let Some((hitem, hti)) = (*ptr).tree_resolve_row_at_point(pt)
+                        && (hti.flags.0 & TVHT_ONITEMBUTTON.0) == 0
+                        && hitem.0 != 0
+                        && let Some(kind) = (*ptr).node_kind_from_hitem(hitem)
+                    {
+                        match kind {
+                            TreeNodeKind::Connection(cid) => {
+                                (*ptr).selected_node = Some(TreeNodeKind::Connection(cid));
+                                let _ = SendMessageW(
+                                    hwnd,
+                                    TVM_SELECTITEM,
+                                    Some(WPARAM(TVGN_CARET as usize)),
+                                    Some(LPARAM(hitem.0)),
+                                );
+                                (*ptr).launch_connection_by_id(cid);
+                                // Consommer le message : évite le comportement natif par défaut et élimine tout double lancement
+                                return LRESULT(0);
+                            }
+                            TreeNodeKind::Folder(_)
+                            | TreeNodeKind::FavoritesRoot
+                            | TreeNodeKind::ConnectionsRoot => {
+                                // Développer ou replier le dossier directement
+                                let _ = SendMessageW(
+                                    hwnd,
+                                    TVM_EXPAND,
+                                    Some(WPARAM(TVE_TOGGLE.0 as usize)),
+                                    Some(LPARAM(hitem.0)),
+                                );
+                                return LRESULT(0);
+                            }
+                        }
+                    }
+                }
+
+                if let Some(proc) = orig_proc {
+                    CallWindowProcW(Some(proc), hwnd, msg, wparam, lparam)
+                } else {
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                }
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_NCDESTROY => {
+                let _ = RemovePropW(hwnd, PROP_TREEVIEW_ORIG_PROC);
                 if let Some(proc) = orig_proc {
                     CallWindowProcW(Some(proc), hwnd, msg, wparam, lparam)
                 } else {
@@ -8528,7 +8661,7 @@ unsafe extern "system" fn main_wnd_proc(
                                 let mut pt = POINT::default();
                                 let _ = GetCursorPos(&mut pt);
                                 let _ = ScreenToClient((*ptr).treeview, &mut pt);
-                                if let Some((hitem, hti)) = (*ptr).tree_hit_test_full_row(pt) {
+                                if let Some((hitem, hti)) = (*ptr).tree_resolve_row_at_point(pt) {
                                     if (hti.flags.0 & TVHT_ONITEMBUTTON.0) != 0 {
                                         // Clic direct sur le bouton [+] / [-], laisser le TreeView gérer nativement
                                         return LRESULT(0);
@@ -10178,6 +10311,302 @@ mod tests {
                     "Un clic en dehors des lignes visibles doit retourner None"
                 );
             }
+
+            let _ = DestroyWindow(hwnd);
+        }
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_ui_full_row_double_click_short_name_and_all_x_positions() {
+        let _guard = WIN32_UI_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db_path = create_temp_test_db_path("short_name_dblclk");
+        let _ = std::fs::remove_file(&db_path);
+
+        unsafe {
+            let hwnd = create_isolated_test_main_window(&db_path);
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+
+            let mut store = Storage::open_at_path(&db_path).unwrap();
+
+            // 1. Créer une arborescence avec plusieurs niveaux d'indentation (Dossier Parent -> Sous-dossier)
+            let parent_folder = store.create_folder("Parent Folder", None).unwrap();
+            let sub_folder = store
+                .create_folder("Sub Folder", Some(parent_folder.id))
+                .unwrap();
+
+            // 2. Créer une connexion au nom minimaliste « A » dans le sous-dossier indenté
+            let short_draft = ConnectionDraft {
+                name: "A".to_string(),
+                protocol: Protocol::RustDesk,
+                host: "99887766".to_string(),
+                port: 0,
+                username: String::new(),
+                domain: String::new(),
+                folder_id: Some(sub_folder.id),
+                is_favorite: false,
+                description: String::new(),
+                password: SecretString::new(String::new()),
+                save_password: false,
+                keep_existing_password: false,
+                dynamic_resolution: false,
+                redirect_clipboard: false,
+            };
+            let short_conn = store.create_connection(short_draft).unwrap();
+
+            // Rafraîchir le TreeView et développer toute la hiérarchie pour rendre « A » visible
+            (*ptr).rebuild_treeview();
+
+            let treeview = (*ptr).treeview;
+            let root_item = SendMessageW(
+                treeview,
+                TVM_GETNEXTITEM,
+                Some(WPARAM(windows::Win32::UI::Controls::TVGN_ROOT as usize)),
+                Some(LPARAM(0)),
+            );
+            assert_ne!(root_item.0, 0);
+
+            // Développer les dossiers
+            let mut curr = root_item;
+            while curr.0 != 0 {
+                let _ = SendMessageW(
+                    treeview,
+                    TVM_EXPAND,
+                    Some(WPARAM(TVE_EXPAND.0 as usize)),
+                    Some(LPARAM(curr.0)),
+                );
+                curr = SendMessageW(
+                    treeview,
+                    TVM_GETNEXTITEM,
+                    Some(WPARAM(TVGN_NEXTVISIBLE as usize)),
+                    Some(LPARAM(curr.0)),
+                );
+            }
+
+            // Développer récursivement encore une fois pour s'assurer que le sous-dossier est ouvert
+            let mut scan = SendMessageW(
+                treeview,
+                TVM_GETNEXTITEM,
+                Some(WPARAM(TVGN_FIRSTVISIBLE as usize)),
+                Some(LPARAM(0)),
+            );
+            while scan.0 != 0 {
+                let _ = SendMessageW(
+                    treeview,
+                    TVM_EXPAND,
+                    Some(WPARAM(TVE_EXPAND.0 as usize)),
+                    Some(LPARAM(scan.0)),
+                );
+                scan = SendMessageW(
+                    treeview,
+                    TVM_GETNEXTITEM,
+                    Some(WPARAM(TVGN_NEXTVISIBLE as usize)),
+                    Some(LPARAM(scan.0)),
+                );
+            }
+
+            // 3. Localiser l'élément HTREEITEM de la connexion courte « A »
+            let mut target_item = HTREEITEM(0);
+            let mut walk = SendMessageW(
+                treeview,
+                TVM_GETNEXTITEM,
+                Some(WPARAM(TVGN_FIRSTVISIBLE as usize)),
+                Some(LPARAM(0)),
+            );
+            while walk.0 != 0 {
+                if let Some(TreeNodeKind::Connection(cid)) =
+                    (*ptr).node_kind_from_hitem(HTREEITEM(walk.0))
+                    && cid == short_conn.id
+                {
+                    target_item = HTREEITEM(walk.0);
+                    break;
+                }
+                walk = SendMessageW(
+                    treeview,
+                    TVM_GETNEXTITEM,
+                    Some(WPARAM(TVGN_NEXTVISIBLE as usize)),
+                    Some(LPARAM(walk.0)),
+                );
+            }
+            assert_ne!(
+                target_item.0, 0,
+                "La connexion courte « A » doit être visible dans le TreeView"
+            );
+
+            // 4. Obtenir les dimensions de la rangée de la connexion « A » et les limites clientes
+            let mut rc_item = RECT::default();
+            *(&mut rc_item as *mut RECT as *mut isize) = target_item.0;
+            let ok = SendMessageW(
+                treeview,
+                TVM_GETITEMRECT,
+                Some(WPARAM(0)), // fItemRect = FALSE -> pleine largeur
+                Some(LPARAM(&mut rc_item as *mut RECT as isize)),
+            );
+            assert_ne!(ok.0, 0, "TVM_GETITEMRECT doit réussir");
+            let row_y = (rc_item.top + rc_item.bottom) / 2;
+
+            let mut rc_client = RECT::default();
+            let _ = GetClientRect(treeview, &mut rc_client);
+            assert!(
+                rc_client.right > 100,
+                "La zone cliente du TreeView doit avoir une largeur suffisante"
+            );
+
+            // 5. Tester la détection sur toutes les positions horizontales spécifiées :
+            // - Sur l'icône (X ≈ 35)
+            // - Sur le texte (X ≈ 60)
+            // - Juste après le texte (X ≈ 90)
+            // - Au centre de la zone vide (X ≈ rc_client.right / 2)
+            // - À 10 pixels du bord droit du panneau (X = rc_client.right - 10)
+            let test_x_positions = [35, 60, 90, rc_client.right / 2, rc_client.right - 10];
+
+            for x in test_x_positions {
+                let hit = (*ptr).tree_resolve_row_at_point(POINT { x, y: row_y });
+                assert!(
+                    hit.is_some(),
+                    "tree_resolve_row_at_point doit détecter la rangée pour X = {}",
+                    x
+                );
+                let (resolved_item, _) = hit.unwrap();
+                assert_eq!(
+                    resolved_item.0, target_item.0,
+                    "La position X = {} doit résoudre exactement l'élément de la connexion « A »",
+                    x
+                );
+            }
+
+            // 6. Vérifier qu'un véritable événement souris Win32 WM_LBUTTONDBLCLK envoyé au TreeView
+            // à 10 pixels du bord droit déclenche réellement launch_connection_by_id
+            (*ptr).status_override = None;
+            (*ptr).last_launch_debounce = None;
+
+            let click_x = rc_client.right - 10;
+            let lparam_val = (((row_y as u32) & 0xFFFF) << 16) | ((click_x as u32) & 0xFFFF);
+            let res = SendMessageW(
+                treeview,
+                WM_LBUTTONDBLCLK,
+                Some(WPARAM(0)),
+                Some(LPARAM(lparam_val as isize)),
+            );
+            assert_eq!(
+                res.0, 0,
+                "treeview_wnd_proc doit consommer le message (LRESULT(0))"
+            );
+            assert!(
+                (*ptr).status_override.is_some(),
+                "Le double-clic tout à droite de la ligne (X = {}) doit déclencher launch_connection_by_id",
+                click_x
+            );
+            assert_eq!(
+                (*ptr).selected_node,
+                Some(TreeNodeKind::Connection(short_conn.id)),
+                "La connexion « A » doit être sélectionnée"
+            );
+
+            // 7. Vérifier l'anti-rebond (debounce) : un second double-clic immédiat ne re-déclenche pas
+            let prev_time = (*ptr).last_launch_debounce.as_ref().map(|(_, t)| *t);
+            let _ = SendMessageW(
+                treeview,
+                WM_LBUTTONDBLCLK,
+                Some(WPARAM(0)),
+                Some(LPARAM(lparam_val as isize)),
+            );
+            let new_time = (*ptr).last_launch_debounce.as_ref().map(|(_, t)| *t);
+            assert_eq!(
+                prev_time, new_time,
+                "L'anti-rebond doit ignorer un double-clic concurrent dans les 400ms"
+            );
+
+            // 8. Tester le double-clic dans l'espace vide sous les éléments
+            let hit_below = (*ptr).tree_resolve_row_at_point(POINT {
+                x: rc_client.right / 2,
+                y: rc_client.bottom + 50,
+            });
+            assert!(
+                hit_below.is_none(),
+                "Un double-clic sous les éléments doit renvoyer None"
+            );
+
+            // 9. Tester le double-clic sur un dossier dans son espace vide à droite : doit basculer son expansion
+            let mut folder_item = HTREEITEM(0);
+            let mut walk_f = SendMessageW(
+                treeview,
+                TVM_GETNEXTITEM,
+                Some(WPARAM(TVGN_FIRSTVISIBLE as usize)),
+                Some(LPARAM(0)),
+            );
+            while walk_f.0 != 0 {
+                if let Some(TreeNodeKind::Folder(fid)) =
+                    (*ptr).node_kind_from_hitem(HTREEITEM(walk_f.0))
+                    && fid == sub_folder.id
+                {
+                    folder_item = HTREEITEM(walk_f.0);
+                    break;
+                }
+                walk_f = SendMessageW(
+                    treeview,
+                    TVM_GETNEXTITEM,
+                    Some(WPARAM(TVGN_NEXTVISIBLE as usize)),
+                    Some(LPARAM(walk_f.0)),
+                );
+            }
+            assert_ne!(folder_item.0, 0);
+
+            let mut rc_f = RECT::default();
+            *(&mut rc_f as *mut RECT as *mut isize) = folder_item.0;
+            let ok_f = SendMessageW(
+                treeview,
+                TVM_GETITEMRECT,
+                Some(WPARAM(0)),
+                Some(LPARAM(&mut rc_f as *mut RECT as isize)),
+            );
+            assert_ne!(ok_f.0, 0);
+            let f_y = (rc_f.top + rc_f.bottom) / 2;
+            let f_click_x = rc_client.right - 10;
+            let f_lparam = (((f_y as u32) & 0xFFFF) << 16) | ((f_click_x as u32) & 0xFFFF);
+
+            let mut item_state = TVITEMW {
+                mask: TVIF_STATE,
+                hItem: folder_item,
+                stateMask: TVIS_EXPANDED,
+                ..Default::default()
+            };
+            let _ = SendMessageW(
+                treeview,
+                TVM_GETITEMW,
+                Some(WPARAM(0)),
+                Some(LPARAM(&mut item_state as *mut TVITEMW as isize)),
+            );
+            let initial_expanded = (item_state.state.0 & TVIS_EXPANDED.0) != 0;
+
+            let res_f = SendMessageW(
+                treeview,
+                WM_LBUTTONDBLCLK,
+                Some(WPARAM(0)),
+                Some(LPARAM(f_lparam as isize)),
+            );
+            assert_eq!(res_f.0, 0);
+
+            let mut new_item_state = TVITEMW {
+                mask: TVIF_STATE,
+                hItem: folder_item,
+                stateMask: TVIS_EXPANDED,
+                ..Default::default()
+            };
+            let _ = SendMessageW(
+                treeview,
+                TVM_GETITEMW,
+                Some(WPARAM(0)),
+                Some(LPARAM(&mut new_item_state as *mut TVITEMW as isize)),
+            );
+            let toggled_expanded = (new_item_state.state.0 & TVIS_EXPANDED.0) != 0;
+            assert_ne!(
+                initial_expanded, toggled_expanded,
+                "Le double-clic tout à droite sur la ligne d'un dossier doit basculer son expansion"
+            );
 
             let _ = DestroyWindow(hwnd);
         }
