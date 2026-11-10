@@ -30,10 +30,18 @@ fn main() {
         return;
     }
 
-    // 1. Nettoyage préventif des fichiers résiduels d'une éventuelle mise à jour précédente (.bak, helper)
+    // Réception du jeton de santé si Malvision a été relancé post-mise à jour
+    if args.len() >= 3 && args[1] == "--health-check" {
+        updater::set_pending_health_token(args[2].clone());
+    }
+
+    // 1. Appliquer une éventuelle restauration différée si le rollback précédent était bloqué
+    updater::check_and_apply_pending_recovery();
+
+    // 2. Nettoyage préventif des fichiers résiduels d'une éventuelle mise à jour précédente (.bak, helper)
     updater::cleanup_leftover_update_files();
 
-    // 2. Contrôle d'instance unique pour la session Windows interactive
+    // 3. Contrôle d'instance unique pour la session Windows interactive
     // Si une instance de Malvision est déjà active (visible ou minimisée dans le System Tray),
     // elle est immédiatement réactivée et restaurée, et le processus secondaire quitte.
     let _instance_guard = if !cfg!(test) {

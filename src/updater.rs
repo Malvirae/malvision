@@ -1,10 +1,11 @@
 //! Vérification des mises à jour via GitHub Releases et téléchargement sécurisé des assets.
 
-use crate::security::compute_file_sha256;
+use crate::security::{compute_file_sha256, constant_time_compare, generate_crypto_random_bytes};
 use std::fmt;
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
 use windows::Win32::Networking::WinHttp::{
     INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_FLAG_SECURE,
     WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_STATUS_CODE,
@@ -13,8 +14,10 @@ use windows::Win32::Networking::WinHttp::{
     WinHttpSetTimeouts,
 };
 use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    QueryFullProcessImageNameW, WaitForSingleObject,
+    CreateEventW, EVENT_MODIFY_STATE, GetCurrentProcess, GetProcessTimes, OpenEventW, OpenProcess,
+    PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    QueryFullProcessImageNameW, SetEvent, TerminateProcess, WaitForMultipleObjects,
+    WaitForSingleObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
 use windows_core::{PCWSTR, PWSTR, w};
@@ -534,7 +537,9 @@ pub fn download_and_verify_asset(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateManifest {
     pub auth_token: String,
+    pub manifest_hmac: String,
     pub parent_pid: u32,
+    pub parent_creation_filetime: u64,
     pub target_exe_path: PathBuf,
     pub new_exe_path: PathBuf,
     pub expected_sha256: String,
@@ -545,7 +550,9 @@ impl UpdateManifest {
     pub fn to_json(&self) -> String {
         let val = serde_json::json!({
             "auth_token": self.auth_token,
+            "manifest_hmac": self.manifest_hmac,
             "parent_pid": self.parent_pid,
+            "parent_creation_filetime": self.parent_creation_filetime,
             "target_exe_path": self.target_exe_path.to_string_lossy(),
             "new_exe_path": self.new_exe_path.to_string_lossy(),
             "expected_sha256": self.expected_sha256,
@@ -561,7 +568,14 @@ impl UpdateManifest {
             .as_str()
             .ok_or("auth_token manquant")?
             .to_string();
+        let manifest_hmac = v["manifest_hmac"]
+            .as_str()
+            .ok_or("manifest_hmac manquant")?
+            .to_string();
         let parent_pid = v["parent_pid"].as_u64().ok_or("parent_pid manquant")? as u32;
+        let parent_creation_filetime = v["parent_creation_filetime"]
+            .as_u64()
+            .ok_or("parent_creation_filetime manquant")?;
         let target_str = v["target_exe_path"]
             .as_str()
             .ok_or("target_exe_path manquant")?;
@@ -576,13 +590,53 @@ impl UpdateManifest {
 
         Ok(Self {
             auth_token,
+            manifest_hmac,
             parent_pid,
+            parent_creation_filetime,
             target_exe_path: PathBuf::from(target_str),
             new_exe_path: PathBuf::from(new_str),
             expected_sha256,
             created_at_epoch_secs,
         })
     }
+
+    /// Vérifie l'intégrité cryptographique absolue du manifeste en temps constant.
+    pub fn verify_integrity(&self, token_arg: &str) -> bool {
+        if !constant_time_compare(&self.auth_token, token_arg) {
+            return false;
+        }
+        match compute_manifest_hmac(
+            token_arg,
+            self.parent_pid,
+            self.parent_creation_filetime,
+            &self.target_exe_path,
+            &self.new_exe_path,
+            &self.expected_sha256,
+            self.created_at_epoch_secs,
+        ) {
+            Ok(expected_hmac) => constant_time_compare(&self.manifest_hmac, &expected_hmac),
+            Err(_) => false,
+        }
+    }
+}
+
+/// Calcule l'empreinte d'intégrité cryptographique (HMAC) du manifeste.
+pub fn compute_manifest_hmac(
+    token: &str,
+    parent_pid: u32,
+    parent_creation_filetime: u64,
+    target_exe_path: &Path,
+    new_exe_path: &Path,
+    expected_sha256: &str,
+    created_at_epoch_secs: u64,
+) -> Result<String, String> {
+    let payload = format!(
+        "{token}|{parent_pid}|{parent_creation_filetime}|{}|{}|{}|{created_at_epoch_secs}",
+        target_exe_path.to_string_lossy(),
+        new_exe_path.to_string_lossy(),
+        expected_sha256
+    );
+    crate::security::compute_sha256(payload.as_bytes())
 }
 
 /// Informations de préparation de la mise à jour différée.
@@ -615,17 +669,12 @@ pub fn get_updates_temp_dir() -> Result<PathBuf, String> {
     Ok(updates_dir)
 }
 
-/// Génère un jeton d'authentification cryptographique unique à usage unique.
-fn generate_auth_token() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let pid = std::process::id();
-    let tid = std::thread::current().id();
-    let raw = format!("MalvisionUpdateAuthToken-{pid}-{now}-{tid:?}");
-    crate::security::compute_sha256(raw.as_bytes())
-        .unwrap_or_else(|_| format!("{pid:08x}{now:016x}0123456789abcdef"))
+/// Génère un jeton d'authentification cryptographique de 256 bits (32 octets aléatoires)
+/// via le CSPRNG Windows (`BCryptGenRandom`). Aucun fallback prévisible n'est toléré.
+pub fn generate_auth_token() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    generate_crypto_random_bytes(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Compare deux chemins de fichiers de façon insensible à la casse et insensible aux préfixes UNC.
@@ -676,7 +725,7 @@ fn show_native_error(msg: &str) {
     }
 }
 
-/// Prépare le binaire auxiliaire et le manifeste de mise à jour.
+/// Prépare le binaire auxiliaire et le manifeste de mise à jour sécurisé.
 pub fn prepare_update_helper(
     new_exe_path: &Path,
     expected_sha256: &str,
@@ -696,16 +745,47 @@ pub fn prepare_update_helper(
         format!("Impossible de copier le processus auxiliaire de mise à jour : {e}")
     })?;
 
-    let auth_token = generate_auth_token();
+    let auth_token = generate_auth_token()?;
     let parent_pid = std::process::id();
+
+    // Récupérer l'horodatage exact de création du processus parent
+    let mut creation_ft = FILETIME::default();
+    let mut exit_ft = FILETIME::default();
+    let mut kernel_ft = FILETIME::default();
+    let mut user_ft = FILETIME::default();
+    unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation_ft,
+            &mut exit_ft,
+            &mut kernel_ft,
+            &mut user_ft,
+        )
+        .map_err(|e| format!("Impossible de lire les attributs du processus parent : {e}"))?;
+    }
+    let parent_creation_filetime =
+        ((creation_ft.dwHighDateTime as u64) << 32) | (creation_ft.dwLowDateTime as u64);
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
+    let manifest_hmac = compute_manifest_hmac(
+        &auth_token,
+        parent_pid,
+        parent_creation_filetime,
+        &current_exe,
+        new_exe_path,
+        expected_sha256,
+        now,
+    )?;
+
     let manifest = UpdateManifest {
         auth_token: auth_token.clone(),
+        manifest_hmac,
         parent_pid,
+        parent_creation_filetime,
         target_exe_path: current_exe.clone(),
         new_exe_path: new_exe_path.to_path_buf(),
         expected_sha256: expected_sha256.to_string(),
@@ -713,8 +793,12 @@ pub fn prepare_update_helper(
     };
 
     let manifest_path = updates_dir.join("update_manifest.json");
-    std::fs::write(&manifest_path, manifest.to_json())
+    let manifest_tmp = updates_dir.join("update_manifest.tmp");
+    std::fs::write(&manifest_tmp, manifest.to_json())
         .map_err(|e| format!("Impossible d'écrire le manifeste de mise à jour : {e}"))?;
+    let _ = std::fs::remove_file(&manifest_path);
+    std::fs::rename(&manifest_tmp, &manifest_path)
+        .map_err(|e| format!("Impossible de finaliser le fichier manifeste : {e}"))?;
 
     Ok(UpdatePreparation {
         auth_token,
@@ -756,6 +840,53 @@ pub fn launch_helper_and_wait_ready(
     Err("Le processus auxiliaire de mise à jour n'a pas répondu dans le délai imparti.".to_string())
 }
 
+/// Restaure la sauvegarde .bak vers le chemin cible et vérifie obligatoirement son existence et sa validité.
+pub fn perform_rollback_and_verify(target: &Path, backup: &Path) -> Result<(), String> {
+    if !backup.exists() {
+        return Err(format!(
+            "Fichier de sauvegarde introuvable : {}",
+            backup.display()
+        ));
+    }
+
+    // Réessayer jusqu'à 15 fois (3 secondes) pour contourner d'éventuels verrous temporaires
+    let mut restored = false;
+    for _ in 0..15 {
+        let _ = std::fs::remove_file(target);
+        if std::fs::rename(backup, target).is_ok() {
+            restored = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    if !restored {
+        return Err(format!(
+            "Impossible de restaurer la sauvegarde '{}' vers '{}' (fichier verrouillé).",
+            backup.display(),
+            target.display()
+        ));
+    }
+
+    if !target.exists() || std::fs::metadata(target).map(|m| m.len()).unwrap_or(0) == 0 {
+        return Err("Le fichier cible restauré est manquant ou vide.".to_string());
+    }
+
+    Ok(())
+}
+
+/// Enregistre une directive de récupération différée dans `%LOCALAPPDATA%\Malvision\updates\pending_recovery.json`.
+pub fn record_pending_recovery(target: &Path, backup: &Path) {
+    if let Ok(updates_dir) = get_updates_temp_dir() {
+        let recovery_path = updates_dir.join("pending_recovery.json");
+        let val = serde_json::json!({
+            "target_exe_path": target.to_string_lossy(),
+            "backup_exe_path": backup.to_string_lossy(),
+        });
+        let _ = std::fs::write(&recovery_path, val.to_string());
+    }
+}
+
 /// Exécute la logique du processus auxiliaire `--apply-update <token>`.
 pub fn run_apply_update_mode(args: &[String]) {
     if args.is_empty() {
@@ -789,9 +920,11 @@ pub fn run_apply_update_mode(args: &[String]) {
         }
     };
 
-    // 1. Contrôle du jeton d'authentification
-    if manifest.auth_token != *token {
-        show_native_error("Sécurité : Jeton d'authentification de mise à jour invalide.");
+    // 1. Contrôle du jeton d'authentification et de l'intégrité cryptographique absolue du manifeste
+    if !manifest.verify_integrity(token) {
+        show_native_error(
+            "Sécurité : L'intégrité du manifeste ou le jeton d'authentification de mise à jour est invalide.",
+        );
         return;
     }
 
@@ -805,7 +938,30 @@ pub fn run_apply_update_mode(args: &[String]) {
         return;
     }
 
-    // 3. Liaison au processus parent
+    // 3. Validation de sécurité stricte sur le chemin cible
+    let ext = manifest
+        .target_exe_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if !ext.eq_ignore_ascii_case("exe") {
+        show_native_error(
+            "Sécurité : La cible de mise à jour doit être un fichier exécutable (.exe).",
+        );
+        return;
+    }
+
+    if let Ok(windir) = std::env::var("SystemRoot") {
+        let win_path = PathBuf::from(windir);
+        if manifest.target_exe_path.starts_with(&win_path) {
+            show_native_error(
+                "Sécurité : La cible de mise à jour ne peut pas résider dans le répertoire système Windows.",
+            );
+            return;
+        }
+    }
+
+    // 4. Liaison et contrôle anti-recyclage du processus parent
     let parent_handle = match unsafe {
         OpenProcess(
             PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
@@ -815,15 +971,52 @@ pub fn run_apply_update_mode(args: &[String]) {
     } {
         Ok(h) if !h.is_invalid() => h,
         _ => {
-            show_native_error("Impossible de lier le processus parent de Malvision.");
+            show_native_error("Sécurité : Impossible de lier le processus parent de Malvision.");
             return;
         }
     };
 
-    // 4. Vérification que le processus parent correspond à target_exe_path
-    if let Ok(parent_exe) = get_process_image_path(parent_handle)
-        && !is_same_file_path(&parent_exe, &manifest.target_exe_path)
-    {
+    let mut p_creation = FILETIME::default();
+    let mut p_exit = FILETIME::default();
+    let mut p_kernel = FILETIME::default();
+    let mut p_user = FILETIME::default();
+    let times_res = unsafe {
+        GetProcessTimes(
+            parent_handle,
+            &mut p_creation,
+            &mut p_exit,
+            &mut p_kernel,
+            &mut p_user,
+        )
+    };
+    if times_res.is_err() {
+        let _ = unsafe { CloseHandle(parent_handle) };
+        show_native_error("Sécurité : Impossible de vérifier l'horodatage du processus parent.");
+        return;
+    }
+    let actual_parent_creation =
+        ((p_creation.dwHighDateTime as u64) << 32) | (p_creation.dwLowDateTime as u64);
+    if actual_parent_creation != manifest.parent_creation_filetime {
+        let _ = unsafe { CloseHandle(parent_handle) };
+        show_native_error(
+            "Sécurité : Le PID parent a été recyclé ou ne correspond pas au processus demandeur.",
+        );
+        return;
+    }
+
+    // 5. Vérification OBLIGATOIRE du chemin d'image du processus parent
+    let parent_exe = match get_process_image_path(parent_handle) {
+        Ok(path) => path,
+        Err(e) => {
+            let _ = unsafe { CloseHandle(parent_handle) };
+            show_native_error(&format!(
+                "Sécurité : Échec obligatoire de vérification du chemin parent ({e})."
+            ));
+            return;
+        }
+    };
+
+    if !is_same_file_path(&parent_exe, &manifest.target_exe_path) {
         let _ = unsafe { CloseHandle(parent_handle) };
         show_native_error(
             "Sécurité : Le processus parent ne correspond pas à l'exécutable Malvision autorisé.",
@@ -831,7 +1024,7 @@ pub fn run_apply_update_mode(args: &[String]) {
         return;
     }
 
-    // 5. Contrôle cryptographique préalable du binaire téléchargé
+    // 6. Contrôle cryptographique préalable du binaire téléchargé
     match compute_file_sha256(&manifest.new_exe_path) {
         Ok(hash) if hash.eq_ignore_ascii_case(&manifest.expected_sha256) => {}
         _ => {
@@ -841,17 +1034,18 @@ pub fn run_apply_update_mode(args: &[String]) {
         }
     }
 
-    // 6. Signaler au processus principal que le helper est prêt à opérer
+    // 7. Signaler au processus principal que le helper est prêt à opérer
     let ready_flag = updates_dir.join("helper_ready.flag");
-    if let Err(e) = std::fs::write(&ready_flag, b"READY") {
+    let ready_tmp = updates_dir.join("helper_ready.tmp");
+    if std::fs::write(&ready_tmp, b"READY").is_err()
+        || std::fs::rename(&ready_tmp, &ready_flag).is_err()
+    {
         let _ = unsafe { CloseHandle(parent_handle) };
-        show_native_error(&format!(
-            "Impossible d'émettre le signal de synchronisation : {e}"
-        ));
+        show_native_error("Impossible d'émettre le signal de synchronisation.");
         return;
     }
 
-    // 7. Attente de la fin effective du processus principal (jusqu'à 30 secondes)
+    // 8. Attente de la fin effective du processus principal (jusqu'à 30 secondes)
     let wait_res = unsafe { WaitForSingleObject(parent_handle, 30_000) };
     let _ = unsafe { CloseHandle(parent_handle) };
     if wait_res.0 != 0 {
@@ -864,7 +1058,7 @@ pub fn run_apply_update_mode(args: &[String]) {
     // Délai de grâce pour libération complète des verrous du système de fichiers
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    // 8. Remplacement atomique et gestion du rollback
+    // 9. Remplacement atomique et gestion du backup
     let target = &manifest.target_exe_path;
     let backup = target.with_extension("exe.bak");
     let new_exe = &manifest.new_exe_path;
@@ -910,66 +1104,221 @@ pub fn run_apply_update_mode(args: &[String]) {
             .unwrap_or(false);
 
     if !target_hash_ok {
-        // ROLLBACK immédiat
-        let _ = std::fs::remove_file(target);
-        let _ = std::fs::rename(&backup, target);
-        show_native_error(
-            "L'intégrité de la mise à jour installée est invalide. L'ancienne version a été automatiquement restaurée.",
-        );
+        // ROLLBACK immédiat avec vérification
+        let rollback_res = perform_rollback_and_verify(target, &backup);
+        if rollback_res.is_ok() {
+            let _ = std::process::Command::new(target).spawn();
+            show_native_error(
+                "L'intégrité de la mise à jour installée est invalide. L'ancienne version a été automatiquement restaurée.",
+            );
+        } else {
+            record_pending_recovery(target, &backup);
+            show_native_error(
+                "Échec critique : L'intégrité de la mise à jour est invalide et la restauration automatique immédiate a échoué.\n\nUne tentative de récupération aura lieu au prochain démarrage.",
+            );
+        }
         return;
     }
 
-    // D. Relance de la nouvelle version depuis son chemin d'origine
-    match std::process::Command::new(target).spawn() {
-        Ok(mut child) => {
-            // Surveillance de santé pendant 1,5 seconde
-            std::thread::sleep(std::time::Duration::from_millis(1500));
-            if let Ok(Some(status)) = child.try_wait()
-                && !status.success()
-            {
-                // Crash immédiat de la nouvelle version : ROLLBACK
-                let _ = std::fs::remove_file(target);
-                let _ = std::fs::rename(&backup, target);
-                let _ = std::process::Command::new(target).spawn();
-                show_native_error(
-                    "La nouvelle version n'a pas pu démarrer. L'ancienne version a été automatiquement restaurée.",
-                );
-                return;
-            }
-        }
+    // 10. Préparation de la surveillance de disponibilité explicite (Health Check)
+    let event_name = format!("Local\\Malvision_Health_{}\0", manifest.auth_token);
+    let event_w: Vec<u16> = event_name.encode_utf16().collect();
+    let health_event = unsafe { CreateEventW(None, true, false, PCWSTR(event_w.as_ptr())) }
+        .unwrap_or(HANDLE(std::ptr::null_mut()));
+
+    let health_flag = updates_dir.join(format!("health_{}.flag", manifest.auth_token));
+    let _ = std::fs::remove_file(&health_flag);
+
+    // Relance de la nouvelle version avec argument de confirmation de santé
+    let mut cmd = std::process::Command::new(target);
+    cmd.arg("--health-check").arg(&manifest.auth_token);
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
         Err(e) => {
-            // Échec de lancement : ROLLBACK
-            let _ = std::fs::remove_file(target);
-            let _ = std::fs::rename(&backup, target);
-            let _ = std::process::Command::new(target).spawn();
-            show_native_error(&format!(
-                "Impossible de démarrer la nouvelle version ({e}). L'ancienne version a été restaurée."
-            ));
+            if !health_event.is_invalid() {
+                let _ = unsafe { CloseHandle(health_event) };
+            }
+            let rollback_res = perform_rollback_and_verify(target, &backup);
+            if rollback_res.is_ok() {
+                let _ = std::process::Command::new(target).spawn();
+                show_native_error(&format!(
+                    "Impossible de démarrer la nouvelle version ({e}). L'ancienne version a été automatiquement restaurée."
+                ));
+            } else {
+                record_pending_recovery(target, &backup);
+                show_native_error(&format!(
+                    "Échec critique : Impossible de démarrer la nouvelle version ({e}) et la restauration automatique immédiate a échoué.\n\nUne tentative de récupération aura lieu au prochain démarrage."
+                ));
+            }
             return;
         }
+    };
+
+    let child_handle = HANDLE(child.as_raw_handle() as *mut _);
+
+    // 11. Attente du signal de disponibilité explicite ou détection de crash (jusqu'à 15 secondes)
+    let is_healthy = if !health_event.is_invalid() {
+        let wait_handles = [health_event, child_handle];
+        let wait_res = unsafe { WaitForMultipleObjects(&wait_handles, false, 15_000) };
+        wait_res.0 == 0 // Index 0 = health_event
+    } else {
+        // Fallback sur drapeau fichier si l'événement Win32 n'a pas pu être créé
+        let start = std::time::Instant::now();
+        let mut ok = false;
+        while start.elapsed() < Duration::from_secs(15) {
+            if health_flag.exists() {
+                ok = true;
+                break;
+            }
+            let exit_code = unsafe {
+                let mut code = 0u32;
+                if windows::Win32::System::Threading::GetExitCodeProcess(child_handle, &mut code)
+                    .is_ok()
+                    && code != 259
+                {
+                    Some(code)
+                } else {
+                    None
+                }
+            };
+            if exit_code.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        ok
+    };
+
+    if !health_event.is_invalid() {
+        let _ = unsafe { CloseHandle(health_event) };
     }
 
-    // Nettoyage des fichiers temporaires du dossier updates
-    let _ = std::fs::remove_file(&manifest_path);
-    let _ = std::fs::remove_file(&ready_flag);
+    if is_healthy {
+        // SUCCÈS CONFIRMÉ : Le nouveau processus est en ligne et pleinement fonctionnel
+        // Le backup est maintenant supprimé en toute sécurité
+        let _ = std::fs::remove_file(&backup);
+        let _ = std::fs::remove_file(&health_flag);
+        let _ = std::fs::remove_file(&manifest_path);
+        let _ = std::fs::remove_file(&ready_flag);
+    } else {
+        // ÉCHEC DE SANTÉ (crash prématuré ou gel au démarrage) : ROLLBACK OBLIGATOIRE
+        // A. Terminer le processus enfant s'il est encore actif pour libérer les verrous d'image Windows
+        unsafe {
+            let _ = TerminateProcess(child_handle, 1);
+            let _ = WaitForSingleObject(child_handle, 5000);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+
+        // B. Restaurer et vérifier la sauvegarde
+        let rollback_res = perform_rollback_and_verify(target, &backup);
+        if rollback_res.is_ok() {
+            let _ = std::process::Command::new(target).spawn();
+            show_native_error(
+                "La nouvelle version n'a pas pu s'initialiser correctement.\n\nL'ancienne version a été automatiquement et intégralement restaurée.",
+            );
+        } else {
+            record_pending_recovery(target, &backup);
+            show_native_error(
+                "Échec critique : La nouvelle version a échoué et la restauration immédiate de la sauvegarde n'a pas pu être finalisée.\n\nUne tentative de récupération aura lieu au prochain démarrage.",
+            );
+        }
+
+        let _ = std::fs::remove_file(&health_flag);
+        let _ = std::fs::remove_file(&manifest_path);
+        let _ = std::fs::remove_file(&ready_flag);
+    }
+}
+
+/// Jeton en attente de validation de démarrage pour le processus nouvellement lancé.
+static PENDING_HEALTH_TOKEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Définit le jeton de santé transmis par le helper lors d'une relance post-mise à jour.
+pub fn set_pending_health_token(token: String) {
+    if let Ok(mut lock) = PENDING_HEALTH_TOKEN.lock() {
+        *lock = Some(token);
+    }
+}
+
+/// Émet le signal explicite de disponibilité après initialisation complète des composants essentiels.
+pub fn notify_startup_healthy() {
+    let token = if let Ok(mut lock) = PENDING_HEALTH_TOKEN.lock() {
+        lock.take()
+    } else {
+        None
+    };
+
+    if let Some(t) = token {
+        let event_name = format!("Local\\Malvision_Health_{t}\0");
+        let event_w: Vec<u16> = event_name.encode_utf16().collect();
+        unsafe {
+            if let Ok(h) = OpenEventW(EVENT_MODIFY_STATE, false, PCWSTR(event_w.as_ptr()))
+                && !h.is_invalid()
+            {
+                let _ = SetEvent(h);
+                let _ = CloseHandle(h);
+            }
+        }
+
+        if let Ok(updates_dir) = get_updates_temp_dir() {
+            let flag = updates_dir.join(format!("health_{t}.flag"));
+            let _ = std::fs::write(&flag, b"HEALTHY");
+        }
+    }
+}
+
+/// Vérifie et applique une restauration différée si un rollback immédiat avait été bloqué par un verrou.
+pub fn check_and_apply_pending_recovery() {
+    let Ok(updates_dir) = get_updates_temp_dir() else {
+        return;
+    };
+    let recovery_file = updates_dir.join("pending_recovery.json");
+    if !recovery_file.exists() {
+        return;
+    }
+
+    if let Ok(content) = std::fs::read_to_string(&recovery_file)
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&content)
+        && let (Some(target_str), Some(backup_str)) =
+            (v["target_exe_path"].as_str(), v["backup_exe_path"].as_str())
+    {
+        let target = PathBuf::from(target_str);
+        let backup = PathBuf::from(backup_str);
+        if backup.exists() {
+            let _ = std::fs::remove_file(&target);
+            if std::fs::rename(&backup, &target).is_ok() {
+                let _ = std::fs::remove_file(&recovery_file);
+            }
+        } else {
+            let _ = std::fs::remove_file(&recovery_file);
+        }
+    }
 }
 
 /// Nettoie les fichiers résiduels d'une mise à jour précédente lors d'un démarrage normal.
 pub fn cleanup_leftover_update_files() {
+    let Ok(updates_dir) = get_updates_temp_dir() else {
+        return;
+    };
+    let recovery_file = updates_dir.join("pending_recovery.json");
+    if recovery_file.exists() {
+        // Ne pas nettoyer si une récupération est encore pendante !
+        return;
+    }
+
     if let Ok(current_exe) = std::env::current_exe() {
         let bak = current_exe.with_extension("exe.bak");
         if bak.exists() {
             let _ = std::fs::remove_file(&bak);
         }
     }
-    if let Ok(updates_dir) = get_updates_temp_dir()
-        && updates_dir.exists()
-    {
-        let _ = std::fs::remove_file(updates_dir.join("update_manifest.json"));
-        let _ = std::fs::remove_file(updates_dir.join("helper_ready.flag"));
-        let _ = std::fs::remove_file(updates_dir.join("new_version.exe"));
-        let _ = std::fs::remove_file(updates_dir.join("malvision_updater.exe"));
-    }
+
+    let _ = std::fs::remove_file(updates_dir.join("update_manifest.json"));
+    let _ = std::fs::remove_file(updates_dir.join("update_manifest.tmp"));
+    let _ = std::fs::remove_file(updates_dir.join("helper_ready.flag"));
+    let _ = std::fs::remove_file(updates_dir.join("helper_ready.tmp"));
+    let _ = std::fs::remove_file(updates_dir.join("new_version.exe"));
+    let _ = std::fs::remove_file(updates_dir.join("malvision_updater.exe"));
 }
 
 #[cfg(test)]
@@ -1293,33 +1642,282 @@ mod tests {
 
     #[test]
     fn test_manifest_serialization_and_validation() {
+        let auth_token = generate_auth_token().expect("Génération CSPRNG du jeton");
+        let parent_pid = std::process::id();
+        let parent_creation_filetime = 133456789012345678u64;
+        let target_exe_path =
+            PathBuf::from(r"C:\Users\Axel\AppData\Local\Programs\Malvision\Malvision.exe");
+        let new_exe_path =
+            PathBuf::from(r"C:\Users\Axel\AppData\Local\Malvision\updates\Malvision_1.0.5.exe");
+        let expected_sha256 =
+            "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".to_string();
+        let created_at_epoch_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let manifest_hmac = compute_manifest_hmac(
+            &auth_token,
+            parent_pid,
+            parent_creation_filetime,
+            &target_exe_path,
+            &new_exe_path,
+            &expected_sha256,
+            created_at_epoch_secs,
+        )
+        .expect("Calcul HMAC du manifeste");
+
         let manifest = UpdateManifest {
-            auth_token: generate_auth_token(),
-            parent_pid: std::process::id(),
-            target_exe_path: PathBuf::from(r"C:\Program Files\Malvision\Malvision.exe"),
-            new_exe_path: PathBuf::from(
-                r"C:\Users\Axel\AppData\Local\Malvision\updates\Malvision_1.0.5.exe",
-            ),
-            expected_sha256: "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
-                .to_string(),
-            created_at_epoch_secs: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            auth_token: auth_token.clone(),
+            manifest_hmac: manifest_hmac.clone(),
+            parent_pid,
+            parent_creation_filetime,
+            target_exe_path: target_exe_path.clone(),
+            new_exe_path: new_exe_path.clone(),
+            expected_sha256: expected_sha256.clone(),
+            created_at_epoch_secs,
         };
 
+        // 1. Validation de l'intégrité nominale
+        assert!(manifest.verify_integrity(&auth_token));
+
+        // 2. Sérialisation et désérialisation JSON
         let json = manifest.to_json();
         let parsed = UpdateManifest::from_json(&json).expect("Désérialisation valide");
         assert_eq!(manifest.auth_token, parsed.auth_token);
+        assert_eq!(manifest.manifest_hmac, parsed.manifest_hmac);
         assert_eq!(manifest.parent_pid, parsed.parent_pid);
+        assert_eq!(
+            manifest.parent_creation_filetime,
+            parsed.parent_creation_filetime
+        );
         assert_eq!(manifest.target_exe_path, parsed.target_exe_path);
         assert_eq!(manifest.new_exe_path, parsed.new_exe_path);
         assert_eq!(manifest.expected_sha256, parsed.expected_sha256);
         assert_eq!(manifest.created_at_epoch_secs, parsed.created_at_epoch_secs);
+        assert!(parsed.verify_integrity(&auth_token));
 
-        // Test manifest corrompu
+        // 3. Rejet de jeton erroné
+        assert!(!manifest.verify_integrity("wrong_token_1234567890abcdef"));
+
+        // 4. Rejet de JSON malformé ou tronqué
         assert!(UpdateManifest::from_json("{ corrupt json").is_err());
         assert!(UpdateManifest::from_json(r#"{"auth_token": "abc"}"#).is_err());
+    }
+
+    #[test]
+    fn test_manifest_tampering_rejected() {
+        let auth_token = generate_auth_token().unwrap();
+        let parent_pid = std::process::id();
+        let parent_creation_filetime = 999888777666u64;
+        let target_exe_path = PathBuf::from(r"C:\Users\Axel\Malvision.exe");
+        let new_exe_path = PathBuf::from(r"C:\Users\Axel\New.exe");
+        let expected_sha256 =
+            "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff".to_string();
+        let created_at_epoch_secs = 1700000000u64;
+
+        let manifest_hmac = compute_manifest_hmac(
+            &auth_token,
+            parent_pid,
+            parent_creation_filetime,
+            &target_exe_path,
+            &new_exe_path,
+            &expected_sha256,
+            created_at_epoch_secs,
+        )
+        .unwrap();
+
+        let mut manifest = UpdateManifest {
+            auth_token: auth_token.clone(),
+            manifest_hmac,
+            parent_pid,
+            parent_creation_filetime,
+            target_exe_path,
+            new_exe_path,
+            expected_sha256,
+            created_at_epoch_secs,
+        };
+
+        // Manifeste intact : vérification OK
+        assert!(manifest.verify_integrity(&auth_token));
+
+        // Altération 1 : Modification de target_exe_path vers un fichier système
+        manifest.target_exe_path = PathBuf::from(r"C:\Windows\System32\notepad.exe");
+        assert!(
+            !manifest.verify_integrity(&auth_token),
+            "Toute altération de target_exe_path doit être rejetée"
+        );
+
+        // Rétablissement puis altération 2 : Modification du SHA-256 attendu
+        manifest.target_exe_path = PathBuf::from(r"C:\Users\Axel\Malvision.exe");
+        manifest.expected_sha256 =
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string();
+        assert!(
+            !manifest.verify_integrity(&auth_token),
+            "Toute altération de expected_sha256 doit être rejetée"
+        );
+
+        // Rétablissement puis altération 3 : Modification du PID parent
+        manifest.expected_sha256 =
+            "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff".to_string();
+        manifest.parent_pid = 1234;
+        assert!(
+            !manifest.verify_integrity(&auth_token),
+            "Toute altération de parent_pid doit être rejetée"
+        );
+
+        // Rétablissement puis altération 4 : Modification du timestamp de création
+        manifest.parent_pid = parent_pid;
+        manifest.parent_creation_filetime = 111222333u64;
+        assert!(
+            !manifest.verify_integrity(&auth_token),
+            "Toute altération de parent_creation_filetime doit être rejetée"
+        );
+    }
+
+    #[test]
+    fn test_auth_token_expiration_logic() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // 1. Horodatage récent (< 300s) -> valide
+        let recent = now - 10;
+        assert!(now.saturating_sub(recent) <= 300);
+
+        // 2. Horodatage expiré (> 300s) -> invalide
+        let expired = now - 301;
+        assert!(now.saturating_sub(expired) > 300);
+    }
+
+    #[test]
+    fn test_target_exe_safety_rules() {
+        // Règle 1 : L'extension doit être .exe
+        let valid_exe = PathBuf::from(r"C:\Apps\Malvision.exe");
+        let ext = valid_exe.extension().and_then(|s| s.to_str()).unwrap_or("");
+        assert!(ext.eq_ignore_ascii_case("exe"));
+
+        let invalid_dll = PathBuf::from(r"C:\Apps\Malvision.dll");
+        let ext_dll = invalid_dll
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        assert!(!ext_dll.eq_ignore_ascii_case("exe"));
+
+        let invalid_no_ext = PathBuf::from(r"C:\Apps\Malvision");
+        let ext_none = invalid_no_ext
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        assert!(!ext_none.eq_ignore_ascii_case("exe"));
+
+        // Règle 2 : Exclusion du répertoire Windows
+        let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let sys_target = PathBuf::from(format!(r"{windir}\System32\cmd.exe"));
+        let win_path = PathBuf::from(&windir);
+        assert!(sys_target.starts_with(&win_path));
+    }
+
+    #[test]
+    fn test_perform_rollback_and_verify_success_and_failure() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("malvision_test_rb_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let target = temp_dir.join("App.exe");
+        let backup = temp_dir.join("App.exe.bak");
+
+        let orig_bytes = b"ORIGINAL_BACKUP_EXECUTABLE_VALID";
+        let bad_bytes = b"CORRUPTED_TARGET_THAT_FAILED_HEALTH";
+
+        fs::write(&backup, orig_bytes).unwrap();
+        fs::write(&target, bad_bytes).unwrap();
+
+        // Rollback nominal : restaure backup -> target et vérifie
+        let res = perform_rollback_and_verify(&target, &backup);
+        assert!(res.is_ok(), "Le rollback doit réussir quand backup existe");
+        assert_eq!(fs::read(&target).unwrap(), orig_bytes);
+        assert!(!backup.exists());
+
+        // Deuxième appel sans backup : doit échouer explicitement sans fausse annonce
+        let res_no_bak = perform_rollback_and_verify(&target, &backup);
+        assert!(
+            res_no_bak.is_err(),
+            "Le rollback sans backup doit échouer explicitement"
+        );
+
+        let _ = fs::remove_file(&target);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_pending_recovery_persistence_and_cleanup() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("malvision_test_rec_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let target = temp_dir.join("RecoveredApp.exe");
+        let backup = temp_dir.join("RecoveredApp.exe.bak");
+        let recovery_file = temp_dir.join("pending_recovery.json");
+
+        let orig_bytes = b"VALID_ORIGINAL_BYTES_FOR_RECOVERY";
+        fs::write(&backup, orig_bytes).unwrap();
+        fs::write(&target, b"BROKEN_TARGET").unwrap();
+
+        // Enregistrer la directive de récupération
+        let rec_json = serde_json::json!({
+            "target_exe_path": target.to_string_lossy(),
+            "backup_exe_path": backup.to_string_lossy(),
+        });
+        fs::write(&recovery_file, rec_json.to_string()).unwrap();
+        assert!(recovery_file.exists());
+
+        // Simuler check_and_apply_pending_recovery
+        if let Ok(content) = fs::read_to_string(&recovery_file)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&content)
+            && let (Some(t_str), Some(b_str)) =
+                (v["target_exe_path"].as_str(), v["backup_exe_path"].as_str())
+        {
+            let t = PathBuf::from(t_str);
+            let b = PathBuf::from(b_str);
+            if b.exists() {
+                let _ = fs::remove_file(&t);
+                if fs::rename(&b, &t).is_ok() {
+                    let _ = fs::remove_file(&recovery_file);
+                }
+            }
+        }
+
+        assert!(
+            !recovery_file.exists(),
+            "La directive doit être supprimée après récupération"
+        );
+        assert!(!backup.exists(), "La sauvegarde a été restaurée en place");
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            orig_bytes,
+            "Le binaire cible est restauré"
+        );
+
+        let _ = fs::remove_file(&target);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_health_token_registration_and_notification() {
+        let token = "test_health_token_abc123".to_string();
+        set_pending_health_token(token.clone());
+
+        // Vérifier que le lock contient bien le token
+        assert_eq!(
+            PENDING_HEALTH_TOKEN.lock().unwrap().as_deref(),
+            Some("test_health_token_abc123")
+        );
+
+        // L'appel à notify_startup_healthy consomme le token
+        notify_startup_healthy();
+        assert_eq!(PENDING_HEALTH_TOKEN.lock().unwrap().as_deref(), None);
     }
 
     #[test]

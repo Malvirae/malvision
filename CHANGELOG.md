@@ -14,22 +14,28 @@ Toutes les évolutions notables du projet **Malvision** sont documentées dans c
   - Maintien rigoureux du principe d'un seul fichier exécutable portable distribué (`Malvision.exe`), sans installateur externe (InnoSetup, MSI, etc.), sans service d'arrière-plan permanent et sans tâche planifiée Windows.
   - Utilisation de `Malvision.exe` lui-même comme processus relais éphémère exécuté depuis `%LOCALAPPDATA%\Malvision\updates\malvision_updater.exe` avec le commutateur interne `--apply-update <auth_token>`.
   - Contournement immédiat du mutex d'instance unique et des initialisations lourdes (ActiveX, SQLite, interface Win32) dès l'interception de l'argument `--apply-update`.
-- **Sécurité, Intégrité et Rollback automatique** :
-  - **Jeton d'authentification unique (auth_token)** : généré de manière cryptographique et transmis au helper, vérifié contre un manifeste horodaté stocké dans `%LOCALAPPDATA%\Malvision\updates\update_manifest.json` avec expiration stricte (5 minutes).
-  - **Validation de la cible et du processus parent** : contrôle du PID parent et validation du chemin de l'image exécutable via `QueryFullProcessImageNameW`, empêchant tout déclenchement non sollicité ou détournement de processus.
-  - **Attente active de libération** : surveillance de la terminaison du processus parent via `WaitForSingleObject` sur le handle de processus `SYNCHRONIZE`, garantissant la libération complète du verrou d'image par le noyau Windows.
-  - **Remplacement atomique avec sauvegarde de secours** : renommage préalable de l'exécutable actif vers `Malvision.exe.bak`, déplacement du nouveau binaire vers son emplacement cible, et re-vérification immédiate du SHA-256 du fichier final.
-  - **Rollback automatique** : en cas d'erreur de remplacement, d'incohérence d'empreinte SHA-256 ou d'échec de démarrage de la nouvelle version dans les 1,5 seconde, la version précédente (`Malvision.exe.bak`) est automatiquement restaurée en place.
-  - **Protection des sessions distantes** : détection des sessions RDP actives avec boîte de dialogue d'avertissement et confirmation explicite avant toute fermeture de l'application. Les processus externes AnyDesk et RustDesk ne sont jamais interrompus.
-  - **Nettoyage automatique des résidus** : purge transparente des fichiers `.bak` et du dossier de mise à jour au démarrage normal de Malvision (`cleanup_leftover_update_files`).
+- **Sécurité, Intégrité et Rollback automatique durcis** :
+  - **Jeton d'authentification CSPRNG 256 bits** : génération d'octets cryptographiquement sûrs via `BCryptGenRandom(None, buf, BCRYPT_USE_SYSTEM_PREFERRED_RNG)` sans aucun fallback prévisible.
+  - **Protection intégrale et scellement HMAC du manifeste** : calcul d'un HMAC SHA-256 de l'ensemble des champs critiques (`manifest_hmac`) et comparaison en temps constant (`constant_time_compare`), interdisant toute modification non autorisée de la cible ou des arguments. Écriture atomique via fichier temporaire.
+  - **Contrôle obligatoire du processus parent & Anti-recyclage de PID** : validation obligatoire du chemin d'image (`QueryFullProcessImageNameW`) rejetant toute erreur ou divergence, et vérification de l'horodatage exact de création du processus (`GetProcessTimes`), neutralisant toute exploitation d'un PID réutilisé.
+  - **Règles de sécurité sur la cible** : restriction stricte aux fichiers `.exe` et interdiction absolue de cibler les répertoires système Windows (`SystemRoot`).
+  - **Confirmation de santé explicite (Health Check)** : émission d'un signal de disponibilité explicite (événement Win32 `Local\Malvision_Health_<token>` et fichier drapeau) après initialisation complète de tous les composants critiques (COM/ActiveX, base de données, fenêtre principale).
+  - **Rollback automatique vérifié et résilient** : en cas de plantage, de fermeture prématurée ou de gel au démarrage du nouveau binaire, le processus enfant est terminé proprement pour libérer les verrous Windows, l'ancienne version (`Malvision.exe.bak`) est restaurée en place, son intégrité est vérifiée et l'application est relancée.
+  - **Récupération différée (`pending_recovery.json`)** : prise en charge d'une récupération différée au démarrage suivant si un verrou persistant empêchait la restauration immédiate.
+  - **Conservation du backup et nettoyage sécurisé** : le backup `.bak` est rigoureusement conservé jusqu'à la confirmation de santé du nouveau processus. Purge préventive sécurisée au démarrage normal.
 
 ### Testé
-- Suite de tests automatisés étendue à **79 tests (100 % passants)** :
-  - `test_manifest_serialization_and_validation` : validation complète du format JSON du manifeste, des champs obligatoires et de la détection de corruptions.
-  - `test_atomic_replacement_and_rollback_on_hash_mismatch` : test d'intégration simulant le renommage en `.bak`, la détection d'une altération de hash et la restauration automatique du binaire d'origine.
-  - `test_cleanup_leftover_update_files` : test de détection et purge des résidus `.bak` et fichiers temporaires de mise à jour.
-  - `test_in_use_file_lock_reproduction_and_wait` : reproduction du verrouillage de fichier en cours d'exécution sous Windows (reproduction de l'erreur `0x80070005`) et validation du remplacement immédiat dès la libération du handle.
-  - Mise à jour de la matrice de versions SemVer (`test_semver_comparison_matrix_for_v104` et `test_current_semver_matches_cargo_pkg_version`).
+- Suite de tests automatisés étendue à **87 tests (100 % passants)** :
+  - `test_bcrypt_gen_random_bytes` : génération aléatoire CSPRNG sans motif prévisible.
+  - `test_constant_time_compare` : comparaison en temps constant insensible aux attaques par canal auxiliaire.
+  - `test_manifest_serialization_and_validation` : validation JSON et calcul HMAC du manifeste.
+  - `test_manifest_tampering_rejected` : rejet strict de toute altération de la cible, du hash ou des PID.
+  - `test_auth_token_expiration_logic` : contrôle de la fenêtre d'expiration de 5 minutes.
+  - `test_target_exe_safety_rules` : validation de l'extension `.exe` et exclusion des dossiers système Windows.
+  - `test_perform_rollback_and_verify_success_and_failure` : restauration vérifiée du backup et gestion des erreurs sans fausse annonce de succès.
+  - `test_pending_recovery_persistence_and_cleanup` : persistance et finalisation de la récupération différée.
+  - `test_health_token_registration_and_notification` : cycle d'enregistrement et d'émission du signal de santé.
+  - `test_in_use_file_lock_reproduction_and_wait` : reproduction du verrouillage de fichier en cours d'exécution sous Windows et libération de handle.
 
 ## [1.0.3] — Correctif de comparaison des versions GitHub (2026-11-10)
 

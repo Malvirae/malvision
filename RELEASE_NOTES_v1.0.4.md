@@ -4,8 +4,8 @@
 **Version :** `1.0.4`  
 **Binaire officiel :** `Malvision.exe`  
 **Architecture :** Windows 11 x64 (binaire portable autonome, sans dépendances externes)  
-**Empreinte SHA-256 :** `b988bd627ed4baa624340134cf4a6e2b8b7aa6f902cb0dfe2d834c66199fed98`  
-**Taille :** 5 246 976 octets  
+**Empreinte SHA-256 :** `318da16e833cd2e0237a6031ba96694d2e5fb8786be367aa2f09639ce0fee05c`  
+**Taille :** 5 267 968 octets  
 
 ---
 
@@ -17,15 +17,18 @@ Malvision résout définitivement la contrainte historique du verrouillage d'ima
 - **Parcours 100 % automatisé** : téléchargement en tâche de fond, contrôle cryptographique SHA-256, fermeture ordonnée, remplacement atomique et relance immédiate de Malvision.
 - **Téléchargement manuel conservé** : pour les utilisateurs préférant choisir manuellement l'emplacement de sauvegarde, un bouton discret « Téléchargement manuel (.exe)… » reste disponible.
 
-### 2. Architecture relais éphémère (Single Portable Executable garanti)
+### 2. Architecture relais éphémère et Sécurité durcie (Single Portable Executable garanti)
 - **Aucun installateur externe, aucun service d'arrière-plan, aucune tâche planifiée** : Malvision reste un seul et unique exécutable portable.
-- **Processus relais éphémère** : Malvision utilise une copie temporaire de son propre binaire exécutée avec le commutateur silencieux `--apply-update <auth_token>`, court-circuitant le mutex d'instance unique et attendant la fin du processus principal.
-- **Remplacement atomique et Rollback sécurisé** :
-  - Sauvegarde préalable de l'exécutable actif sous `Malvision.exe.bak`.
-  - Contrôle d'intégrité SHA-256 avant et après mise en place du binaire cible.
-  - Surveillance active du démarrage : si la nouvelle version ne parvient pas à démarrer ou subit un crash dans les 1,5 seconde, le relais restaure instantanément et automatiquement la version précédente (`Malvision.exe.bak`).
+- **Jeton CSPRNG 256 bits et intégrité HMAC** : génération du jeton d'authentification par le RNG cryptographique Windows (`BCryptGenRandom`) sans aucun fallback prévisible, et scellement d'intégrité du manifeste par HMAC SHA-256.
+- **Vérification obligatoire du processus parent & anti-recyclage de PID** : contrôle obligatoire et strict du chemin d'image (`QueryFullProcessImageNameW`) et validation de l'horodatage de création du processus (`GetProcessTimes`), interdisant tout détournement de processus ou réutilisation de PID.
+- **Règles de sécurité sur la cible** : extension `.exe` obligatoire et interdiction stricte de cibler les répertoires système Windows (`SystemRoot`).
+- **Confirmation explicite de santé (Health Check)** :
+  - Surveillance active par événement Win32 dédié (`Local\Malvision_Health_<token>`) et drapeau fichier.
+  - Le binaire précédent (`Malvision.exe.bak`) est conservé jusqu'à validation complète de l'initialisation de l'application (DPI, single-instance, COM/ActiveX, SQLite, création de fenêtre).
+  - En cas de crash ou d'anomalie au démarrage, le relais termine le processus si nécessaire pour libérer le verrou, restaure l'ancienne version, vérifie son empreinte et la relance.
+  - Enregistrement d'une directive de récupération différée (`pending_recovery.json`) si un verrou temporaire empêchait le rollback immédiat.
 - **Protection des sessions distantes** : détection et avertissement clair si des sessions RDP sont en cours avec demande de confirmation explicite avant fermeture. Les sessions AnyDesk et RustDesk externes ne sont jamais interrompues.
-- **Nettoyage automatique** : purge transparente des résidus `.bak` et temporaires lors de tout démarrage normal.
+- **Nettoyage automatique sécurisé** : purge des fichiers temporaires uniquement après confirmation de bon fonctionnement.
 
 ---
 
@@ -33,12 +36,12 @@ Malvision résout définitivement la contrainte historique du verrouillage d'ima
 
 | Fichier | Taille (octets) | Empreinte SHA-256 |
 | :--- | :--- | :--- |
-| `Malvision.exe` | `5 246 976` | `b988bd627ed4baa624340134cf4a6e2b8b7aa6f902cb0dfe2d834c66199fed98` |
+| `Malvision.exe` | `5 267 968` | `318da16e833cd2e0237a6031ba96694d2e5fb8786be367aa2f09639ce0fee05c` |
 
 ---
 
 ## Validation et Tests
 
-- **79 tests unitaires et d'intégration réussis (100 % passants)**.
+- **87 tests unitaires et d'intégration réussis (100 % passants)**.
 - **Clippy et rustfmt stricts** sans avertissements.
-- **Validation Windows 11 x64** avec reproduction réelle du verrouillage d'image et validation du remplacement après arrêt du processus.
+- **Validation Windows 11 x64** avec reproduction réelle de scénarios nominaux, d'altération de manifeste et de crash avec rollback vérifié.

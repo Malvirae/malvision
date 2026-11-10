@@ -11790,6 +11790,9 @@ pub fn run_app() -> Result<(), String> {
             let _ = UpdateWindow(hwnd);
         }
 
+        // Émission du signal de disponibilité explicite post-démarrage (Health Check)
+        crate::updater::notify_startup_healthy();
+
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).into() {
             let mut handled = false;

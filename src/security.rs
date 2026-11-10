@@ -12,9 +12,10 @@ use std::ffi::c_void;
 use windows::Win32::Foundation::{HLOCAL, LocalFree};
 use windows::Win32::Security::Cryptography::{
     BCRYPT_ALG_HANDLE, BCRYPT_HASH_HANDLE, BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS,
-    BCRYPT_SHA256_ALGORITHM, BCryptCloseAlgorithmProvider, BCryptCreateHash, BCryptDestroyHash,
-    BCryptFinishHash, BCryptHashData, BCryptOpenAlgorithmProvider, CRYPT_INTEGER_BLOB,
-    CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
+    BCRYPT_SHA256_ALGORITHM, BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptCloseAlgorithmProvider,
+    BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash, BCryptGenRandom, BCryptHashData,
+    BCryptOpenAlgorithmProvider, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData,
+    CryptUnprotectData,
 };
 use windows_core::PCWSTR;
 
@@ -248,6 +249,31 @@ pub fn compute_file_sha256(path: &std::path::Path) -> Result<String, String> {
     compute_sha256(&data)
 }
 
+/// Génère des octets aléatoires cryptographiquement sécurisés via `BCryptGenRandom` (RNG système Windows).
+pub fn generate_crypto_random_bytes(buf: &mut [u8]) -> Result<(), String> {
+    if buf.is_empty() {
+        return Ok(());
+    }
+    let status = unsafe { BCryptGenRandom(None, buf, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+    status
+        .ok()
+        .map_err(|e| format!("BCryptGenRandom a échoué (NTSTATUS {status:?}) : {e}"))
+}
+
+/// Compare deux chaînes en temps constant pour éviter les attaques par canal auxiliaire (timing attacks).
+pub fn constant_time_compare(a: &str, b: &str) -> bool {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    if a_bytes.len() != b_bytes.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a_bytes.iter().zip(b_bytes.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +332,25 @@ mod tests {
         assert!(encrypted.is_empty());
         let decrypted = decrypt_secret(&encrypted).unwrap();
         assert!(decrypted.is_empty());
+    }
+
+    #[test]
+    fn test_bcrypt_gen_random_bytes() {
+        let mut b1 = [0u8; 32];
+        let mut b2 = [0u8; 32];
+        generate_crypto_random_bytes(&mut b1).expect("Génération aléatoire b1");
+        generate_crypto_random_bytes(&mut b2).expect("Génération aléatoire b2");
+        assert_ne!(b1, [0u8; 32]);
+        assert_ne!(b2, [0u8; 32]);
+        assert_ne!(b1, b2, "Deux tirages CSPRNG doivent différer");
+    }
+
+    #[test]
+    fn test_constant_time_compare() {
+        assert!(constant_time_compare("abc123XYZ", "abc123XYZ"));
+        assert!(!constant_time_compare("abc123XYZ", "abc123XYz"));
+        assert!(!constant_time_compare("abc123XYZ", "abc123XY"));
+        assert!(!constant_time_compare("", "a"));
+        assert!(constant_time_compare("", ""));
     }
 }
