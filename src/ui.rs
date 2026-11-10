@@ -58,22 +58,22 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ES_PASSWORD, GWL_STYLE, GWLP_USERDATA, GWLP_WNDPROC, GetClientRect, GetCursorPos, GetDlgCtrlID,
     GetMessageW, GetParent, GetPropW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, HICON, HMENU, ICON_BIG, ICON_SMALL, ICONINFO, IDC_ARROW,
-    IDC_HAND, IDC_SIZEWE, IDYES, IMAGE_ICON, IsChild, IsIconic, IsWindow, IsWindowVisible,
-    KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MB_ICONERROR, MB_ICONINFORMATION,
-    MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO, MF_SEPARATOR, MF_STRING, MINMAXINFO, MSG,
-    MessageBoxW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
-    RegisterWindowMessageW, RemovePropW, SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON,
-    SM_CYSCREEN, SM_CYSMICON, SW_HIDE, SW_RESTORE, SW_SHOW, SendMessageW, SetCursor,
-    SetForegroundWindow, SetPropW, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
-    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_TOPALIGN, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_CREATE, WM_CTLCOLORBTN,
-    WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_NOTIFY, WM_NULL, WM_PAINT, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_SETFOCUS, WM_SETFONT, WM_SETICON, WM_SIZE, WM_SYSCOMMAND, WM_TIMER,
-    WNDCLASSEXW, WNDPROC, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU,
-    WS_TABSTOP, WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL,
+    IDC_HAND, IDC_SIZEWE, IDNO, IDRETRY, IDYES, IMAGE_ICON, IsChild, IsIconic, IsWindow,
+    IsWindowVisible, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MB_ICONERROR,
+    MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_RETRYCANCEL, MB_YESNO,
+    MB_YESNOCANCEL, MF_SEPARATOR, MF_STRING, MINMAXINFO, MSG, MessageBoxW, MoveWindow,
+    PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, RemovePropW,
+    SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SW_HIDE, SW_RESTORE,
+    SW_SHOW, SendMessageW, SetCursor, SetForegroundWindow, SetPropW, SetTimer, SetWindowLongPtrW,
+    SetWindowTextW, ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_TOPALIGN, TrackPopupMenu,
+    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU,
+    WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NOTIFY, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SETFONT, WM_SETICON,
+    WM_SIZE, WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL,
 };
 use windows_core::{PCWSTR, w};
 
@@ -807,6 +807,8 @@ pub struct AppWindowState {
     exit_requested: bool,
     wm_taskbar_created: u32,
     last_launch_debounce: Option<(i64, std::time::Instant)>,
+    pub dashboard_scroll_y: i32,
+    pub dashboard_content_height: i32,
 }
 
 impl AppWindowState {
@@ -1052,6 +1054,8 @@ impl AppWindowState {
                 exit_requested: false,
                 wm_taskbar_created,
                 last_launch_debounce: None,
+                dashboard_scroll_y: 0,
+                dashboard_content_height: 0,
             };
 
             if !cfg!(test) {
@@ -1635,8 +1639,29 @@ impl AppWindowState {
         handle_to_select: &mut Option<HTREEITEM>,
         visited: &mut Vec<i64>,
     ) {
+        // 1. Les connexions directes apparaissent TOUJOURS AVANT les sous-dossiers, classées alphabétiquement (insensible à la casse)
+        if let Some(conns) = conns_by_folder.get(&parent_folder_id) {
+            let mut sorted_conns = conns.clone();
+            sorted_conns.sort_by_key(|a| a.name.to_lowercase());
+            for conn in sorted_conns {
+                let label = format!("{} {}", conn.protocol.badge_prefix(), conn.name);
+                let h_conn = self.insert_tree_item(
+                    parent_hitem,
+                    &label,
+                    TreeNodeKind::Connection(conn.id),
+                    false,
+                );
+                if previous_selection == Some(TreeNodeKind::Connection(conn.id)) {
+                    *handle_to_select = Some(h_conn);
+                }
+            }
+        }
+
+        // 2. Ensuite les sous-dossiers directs, classés alphabétiquement (insensible à la casse), avec récursion
         if let Some(subfolders) = folders_by_parent.get(&parent_folder_id) {
-            for folder in subfolders {
+            let mut sorted_folders = subfolders.clone();
+            sorted_folders.sort_by_key(|a| a.name.to_lowercase());
+            for folder in sorted_folders {
                 if visited.contains(&folder.id) {
                     continue;
                 }
@@ -1662,21 +1687,6 @@ impl AppWindowState {
                     handle_to_select,
                     visited,
                 );
-            }
-        }
-
-        if let Some(conns) = conns_by_folder.get(&parent_folder_id) {
-            for conn in conns {
-                let label = format!("{} {}", conn.protocol.badge_prefix(), conn.name);
-                let h_conn = self.insert_tree_item(
-                    parent_hitem,
-                    &label,
-                    TreeNodeKind::Connection(conn.id),
-                    false,
-                );
-                if previous_selection == Some(TreeNodeKind::Connection(conn.id)) {
-                    *handle_to_select = Some(h_conn);
-                }
             }
         }
     }
@@ -2522,7 +2532,18 @@ impl AppWindowState {
     unsafe fn paint_home_dashboard(&mut self, hdc: HDC, area: RECT) {
         unsafe {
             let pad_x = 32;
-            let mut y = area.top + 26;
+
+            // Restreindre le tracé à la zone d'accueil
+            let hrgn = windows::Win32::Graphics::Gdi::CreateRectRgn(
+                area.left,
+                area.top,
+                area.right,
+                area.bottom,
+            );
+            let _ = windows::Win32::Graphics::Gdi::SelectClipRgn(hdc, Some(hrgn));
+
+            let mut y = area.top + 26 - self.dashboard_scroll_y;
+            let start_y = y;
 
             // En-tête d'accueil
             let _ = SelectObject(hdc, self.palette.font_title.into());
@@ -2581,10 +2602,12 @@ impl AppWindowState {
                 self.palette.font_ui_bold,
                 COL_TEXT_ON_ACCENT,
             );
-            self.hit_zones.push(HitZone {
-                rect: btn_new_conn,
-                zone: InteractiveZone::HomeQuickNewConnection,
-            });
+            if btn_new_conn.bottom >= area.top && btn_new_conn.top <= area.bottom {
+                self.hit_zones.push(HitZone {
+                    rect: btn_new_conn,
+                    zone: InteractiveZone::HomeQuickNewConnection,
+                });
+            }
 
             let hover_nf = self.hovered_zone == Some(InteractiveZone::HomeQuickNewFolder);
             draw_rounded_button(
@@ -2600,54 +2623,43 @@ impl AppWindowState {
                 self.palette.font_ui,
                 col_text_primary(),
             );
-            self.hit_zones.push(HitZone {
-                rect: btn_new_fold,
-                zone: InteractiveZone::HomeQuickNewFolder,
-            });
+            if btn_new_fold.bottom >= area.top && btn_new_fold.top <= area.bottom {
+                self.hit_zones.push(HitZone {
+                    rect: btn_new_fold,
+                    zone: InteractiveZone::HomeQuickNewFolder,
+                });
+            }
 
             y += 50;
 
-            // Section 1 : Connexions favorites
+            let all_folders = self.storage.list_folders().unwrap_or_default();
             let all_conns = self.storage.list_connections().unwrap_or_default();
+
+            // Section 1 : Connexions favorites
             let favorites: Vec<&ConnectionItem> =
                 all_conns.iter().filter(|c| c.is_favorite).take(6).collect();
 
-            draw_icon_star(hdc, area.left + pad_x, y + 4, 0x0041B8FF);
-            let _ = SelectObject(hdc, self.palette.font_subtitle.into());
-            let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
-            draw_text_line(
-                hdc,
-                "Connexions favorites",
-                RECT {
-                    left: area.left + pad_x + 22,
-                    top: y,
-                    right: area.right - pad_x,
-                    bottom: y + 24,
-                },
-            );
-            y += 30;
-
-            if favorites.is_empty() {
-                let _ = SelectObject(hdc, self.palette.font_ui.into());
-                let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
+            if !favorites.is_empty() {
+                draw_icon_star(hdc, area.left + pad_x, y + 4, 0x0041B8FF);
+                let _ = SelectObject(hdc, self.palette.font_subtitle.into());
+                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                 draw_text_line(
                     hdc,
-                    "Aucune connexion marquée en favori. Cochez « Favori » lors de la création ou via le clic droit.",
+                    "Connexions favorites",
                     RECT {
-                        left: area.left + pad_x,
+                        left: area.left + pad_x + 22,
                         top: y,
                         right: area.right - pad_x,
                         bottom: y + 24,
                     },
                 );
-                y += 38;
-            } else {
+                y += 30;
                 y = self.paint_connection_cards_grid(hdc, area, pad_x, y, &favorites);
-                y += 18;
+                y += 20;
             }
 
-            // Section 2 : Connexions récemment utilisées (selon préférences utilisateur)
-            if self.settings.show_recent_connections && y + 90 < area.bottom {
+            // Section 2 : Connexions récemment utilisées (Cas A : activées / Cas B : masquées sans vide)
+            if self.settings.show_recent_connections {
                 let max_rec = self.settings.max_recent_connections.clamp(1, 50);
                 let recents = self
                     .storage
@@ -2688,10 +2700,63 @@ impl AppWindowState {
                             bottom: y + 24,
                         },
                     );
+                    y += 34;
                 } else {
-                    let _ = self.paint_connection_cards_grid(hdc, area, pad_x, y, &recent_refs);
+                    y = self.paint_connection_cards_grid(hdc, area, pad_x, y, &recent_refs);
+                    y += 20;
                 }
             }
+
+            // Section 3 : Toutes les connexions (Nouvelle section demandée dans le Jalon V1.0.1)
+            draw_icon_layers(hdc, area.left + pad_x, y + 4, col_accent());
+            let _ = SelectObject(hdc, self.palette.font_subtitle.into());
+            let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+            draw_text_line(
+                hdc,
+                "Toutes les connexions",
+                RECT {
+                    left: area.left + pad_x + 22,
+                    top: y,
+                    right: area.right - pad_x,
+                    bottom: y + 24,
+                },
+            );
+            y += 30;
+
+            if all_conns.is_empty() {
+                let _ = SelectObject(hdc, self.palette.font_ui.into());
+                let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
+                draw_text_line(
+                    hdc,
+                    "Aucune connexion enregistrée. Cliquez sur « + Nouvelle connexion » ci-dessus pour ajouter un serveur.",
+                    RECT {
+                        left: area.left + pad_x,
+                        top: y,
+                        right: area.right - pad_x,
+                        bottom: y + 24,
+                    },
+                );
+                y += 38;
+            } else {
+                let ordered_conns =
+                    crate::models::collect_tree_ordered_connections(&all_folders, &all_conns);
+                y = self.paint_compact_connections_grid(
+                    hdc,
+                    area,
+                    pad_x,
+                    y,
+                    &ordered_conns,
+                    &all_folders,
+                );
+                y += 24;
+            }
+
+            // Hauteur totale du contenu pour le calcul du défilement fluide
+            self.dashboard_content_height = (y + 40) - start_y;
+
+            // Rétablissement de la région de découpage
+            let _ = windows::Win32::Graphics::Gdi::SelectClipRgn(hdc, None);
+            let _ = windows::Win32::Graphics::Gdi::DeleteObject(hrgn.into());
         }
     }
 
@@ -2722,9 +2787,6 @@ impl AppWindowState {
             for conn in items {
                 let x = area.left + pad_x + col * (card_w + gap);
                 let y = start_y + row * (card_h + gap);
-                if y + card_h > area.bottom - 10 {
-                    break;
-                }
 
                 let card_rc = RECT {
                     left: x,
@@ -2733,116 +2795,266 @@ impl AppWindowState {
                     bottom: y + card_h,
                 };
 
-                let is_hover = self.hovered_zone == Some(InteractiveZone::HomeCardConnect(conn.id));
-                draw_rounded_box(
-                    hdc,
-                    card_rc,
-                    if is_hover {
-                        col_bg_hover()
+                if card_rc.bottom >= area.top && card_rc.top <= area.bottom {
+                    let is_hover =
+                        self.hovered_zone == Some(InteractiveZone::HomeCardConnect(conn.id));
+                    draw_rounded_box(
+                        hdc,
+                        card_rc,
+                        if is_hover {
+                            col_bg_hover()
+                        } else {
+                            col_bg_surface()
+                        },
+                        if is_hover { col_accent() } else { col_border() },
+                    );
+
+                    // Badge protocole
+                    let proto_color = match conn.protocol {
+                        Protocol::Rdp => col_accent(),
+                        Protocol::AnyDesk => 0x003B46D9, // Rouge AnyDesk discret
+                        Protocol::RustDesk => 0x00B5721E, // Bleu-vert RustDesk
+                    };
+                    draw_filled_badge(
+                        hdc,
+                        RECT {
+                            left: card_rc.left + 12,
+                            top: card_rc.top + 12,
+                            right: card_rc.left + 62,
+                            bottom: card_rc.top + 30,
+                        },
+                        proto_color,
+                        conn.protocol.display_name(),
+                        self.palette.font_small,
+                    );
+
+                    // Nom de la connexion
+                    let _ = SelectObject(hdc, self.palette.font_ui_bold.into());
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    draw_text_line(
+                        hdc,
+                        &conn.name,
+                        RECT {
+                            left: card_rc.left + 70,
+                            top: card_rc.top + 10,
+                            right: card_rc.right - 74,
+                            bottom: card_rc.top + 32,
+                        },
+                    );
+
+                    // Sous-texte : hôte:port + utilisateur
+                    let _ = SelectObject(hdc, self.palette.font_small.into());
+                    let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
+                    let user_info = if conn.username.is_empty() {
+                        conn.endpoint_label()
+                    } else if conn.domain.is_empty() {
+                        format!("{}  •  {}", conn.endpoint_label(), conn.username)
                     } else {
-                        col_bg_surface()
-                    },
-                    if is_hover { col_accent() } else { col_border() },
-                );
+                        format!(
+                            "{}  •  {}\\{}",
+                            conn.endpoint_label(),
+                            conn.domain,
+                            conn.username
+                        )
+                    };
+                    draw_text_line(
+                        hdc,
+                        &user_info,
+                        RECT {
+                            left: card_rc.left + 12,
+                            top: card_rc.top + 42,
+                            right: card_rc.right - 12,
+                            bottom: card_rc.bottom - 10,
+                        },
+                    );
 
-                // Badge protocole
-                let proto_color = match conn.protocol {
-                    Protocol::Rdp => col_accent(),
-                    Protocol::AnyDesk => 0x003B46D9, // Rouge AnyDesk discret
-                    Protocol::RustDesk => 0x00B5721E, // Bleu-vert RustDesk
-                };
-                draw_filled_badge(
-                    hdc,
-                    RECT {
-                        left: card_rc.left + 12,
-                        top: card_rc.top + 12,
-                        right: card_rc.left + 62,
-                        bottom: card_rc.top + 30,
-                    },
-                    proto_color,
-                    conn.protocol.display_name(),
-                    self.palette.font_small,
-                );
-
-                // Nom de la connexion
-                let _ = SelectObject(hdc, self.palette.font_ui_bold.into());
-                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
-                draw_text_line(
-                    hdc,
-                    &conn.name,
-                    RECT {
-                        left: card_rc.left + 70,
+                    // Bouton sobre "Modifier" sur la carte
+                    let edit_rc = RECT {
+                        left: card_rc.right - 68,
                         top: card_rc.top + 10,
-                        right: card_rc.right - 74,
+                        right: card_rc.right - 10,
                         bottom: card_rc.top + 32,
-                    },
-                );
+                    };
+                    let is_edit_hover =
+                        self.hovered_zone == Some(InteractiveZone::HomeCardEdit(conn.id));
+                    draw_rounded_button(
+                        hdc,
+                        edit_rc,
+                        if is_edit_hover {
+                            col_bg_deep()
+                        } else {
+                            col_bg_surface()
+                        },
+                        if is_edit_hover {
+                            col_accent()
+                        } else {
+                            col_border()
+                        },
+                        "Modifier",
+                        self.palette.font_small,
+                        if is_edit_hover {
+                            col_text_primary()
+                        } else {
+                            col_text_muted()
+                        },
+                    );
 
-                // Sous-texte : hôte:port + utilisateur
-                let _ = SelectObject(hdc, self.palette.font_small.into());
-                let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
-                let user_info = if conn.username.is_empty() {
-                    conn.endpoint_label()
-                } else if conn.domain.is_empty() {
-                    format!("{}  •  {}", conn.endpoint_label(), conn.username)
-                } else {
-                    format!(
-                        "{}  •  {}\\{}",
-                        conn.endpoint_label(),
-                        conn.domain,
-                        conn.username
-                    )
+                    self.hit_zones.push(HitZone {
+                        rect: edit_rc,
+                        zone: InteractiveZone::HomeCardEdit(conn.id),
+                    });
+                    self.hit_zones.push(HitZone {
+                        rect: card_rc,
+                        zone: InteractiveZone::HomeCardConnect(conn.id),
+                    });
+                }
+
+                col += 1;
+                if col >= cols {
+                    col = 0;
+                    row += 1;
+                }
+            }
+
+            let total_rows = items.len().div_ceil(cols as usize) as i32;
+            start_y + total_rows * (card_h + gap)
+        }
+    }
+
+    unsafe fn paint_compact_connections_grid(
+        &mut self,
+        hdc: HDC,
+        area: RECT,
+        pad_x: i32,
+        start_y: i32,
+        items: &[ConnectionItem],
+        folders: &[Folder],
+    ) -> i32 {
+        unsafe {
+            let avail_w = (area.right - area.left - pad_x * 2).max(300);
+            let cols = if avail_w >= 1050 {
+                4
+            } else if avail_w >= 750 {
+                3
+            } else if avail_w >= 480 {
+                2
+            } else {
+                1
+            };
+            let gap = 10;
+            let card_w = (avail_w - gap * (cols - 1)) / cols;
+            let card_h = 56;
+
+            let mut folder_map = HashMap::new();
+            for f in folders {
+                folder_map.insert(f.id, (f.name.clone(), f.parent_id));
+            }
+
+            let mut row = 0;
+            let mut col = 0;
+
+            for conn in items {
+                let x = area.left + pad_x + col * (card_w + gap);
+                let y = start_y + row * (card_h + gap);
+
+                let card_rc = RECT {
+                    left: x,
+                    top: y,
+                    right: x + card_w,
+                    bottom: y + card_h,
                 };
-                draw_text_line(
-                    hdc,
-                    &user_info,
-                    RECT {
-                        left: card_rc.left + 12,
-                        top: card_rc.top + 42,
-                        right: card_rc.right - 12,
-                        bottom: card_rc.bottom - 10,
-                    },
-                );
 
-                // Bouton sobre "Modifier" sur la carte
-                let edit_rc = RECT {
-                    left: card_rc.right - 68,
-                    top: card_rc.top + 10,
-                    right: card_rc.right - 10,
-                    bottom: card_rc.top + 32,
-                };
-                let is_edit_hover =
-                    self.hovered_zone == Some(InteractiveZone::HomeCardEdit(conn.id));
-                draw_rounded_button(
-                    hdc,
-                    edit_rc,
-                    if is_edit_hover {
-                        col_bg_deep()
-                    } else {
-                        col_bg_surface()
-                    },
-                    if is_edit_hover {
-                        col_accent()
-                    } else {
-                        col_border()
-                    },
-                    "Modifier",
-                    self.palette.font_small,
-                    if is_edit_hover {
-                        col_text_primary()
-                    } else {
-                        col_text_muted()
-                    },
-                );
+                if card_rc.bottom >= area.top && card_rc.top <= area.bottom {
+                    let is_hover =
+                        self.hovered_zone == Some(InteractiveZone::HomeCardConnect(conn.id));
+                    draw_rounded_box(
+                        hdc,
+                        card_rc,
+                        if is_hover {
+                            col_bg_hover()
+                        } else {
+                            col_bg_surface()
+                        },
+                        if is_hover { col_accent() } else { col_border() },
+                    );
 
-                self.hit_zones.push(HitZone {
-                    rect: edit_rc,
-                    zone: InteractiveZone::HomeCardEdit(conn.id),
-                });
-                self.hit_zones.push(HitZone {
-                    rect: card_rc,
-                    zone: InteractiveZone::HomeCardConnect(conn.id),
-                });
+                    let proto_color = match conn.protocol {
+                        Protocol::Rdp => col_accent(),
+                        Protocol::AnyDesk => 0x003B46D9,
+                        Protocol::RustDesk => 0x00B5721E,
+                    };
+                    draw_filled_badge(
+                        hdc,
+                        RECT {
+                            left: card_rc.left + 8,
+                            top: card_rc.top + 8,
+                            right: card_rc.left + 54,
+                            bottom: card_rc.top + 26,
+                        },
+                        proto_color,
+                        conn.protocol.display_name(),
+                        self.palette.font_small,
+                    );
+
+                    let _ = SelectObject(hdc, self.palette.font_ui_bold.into());
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let star_w = if conn.is_favorite { 18 } else { 0 };
+                    draw_text_line(
+                        hdc,
+                        &conn.name,
+                        RECT {
+                            left: card_rc.left + 60,
+                            top: card_rc.top + 7,
+                            right: card_rc.right - 10 - star_w,
+                            bottom: card_rc.top + 27,
+                        },
+                    );
+
+                    if conn.is_favorite {
+                        draw_icon_star(hdc, card_rc.right - 22, card_rc.top + 9, 0x0041B8FF);
+                    }
+
+                    let mut path_str = String::new();
+                    if let Some(mut cur_fid) = conn.folder_id {
+                        let mut parts = Vec::new();
+                        let mut loop_protect = 0;
+                        while let Some((name, parent)) = folder_map.get(&cur_fid) {
+                            parts.push(name.as_str());
+                            loop_protect += 1;
+                            if loop_protect > 50 {
+                                break;
+                            }
+                            if let Some(p) = parent {
+                                cur_fid = *p;
+                            } else {
+                                break;
+                            }
+                        }
+                        if !parts.is_empty() {
+                            parts.reverse();
+                            path_str = format!("{} • ", parts.join("/"));
+                        }
+                    }
+
+                    let detail = format!("{}{}", path_str, conn.endpoint_label());
+                    let _ = SelectObject(hdc, self.palette.font_small.into());
+                    let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
+                    draw_text_line(
+                        hdc,
+                        &detail,
+                        RECT {
+                            left: card_rc.left + 8,
+                            top: card_rc.top + 30,
+                            right: card_rc.right - 8,
+                            bottom: card_rc.bottom - 6,
+                        },
+                    );
+
+                    self.hit_zones.push(HitZone {
+                        rect: card_rc,
+                        zone: InteractiveZone::HomeCardConnect(conn.id),
+                    });
+                }
 
                 col += 1;
                 if col >= cols {
@@ -3306,6 +3518,21 @@ impl AppWindowState {
         if new_hover != self.hovered_zone {
             self.hovered_zone = new_hover;
             self.invalidate_canvas();
+        }
+    }
+
+    fn on_mouse_wheel(&mut self, delta: i16) {
+        if self.sessions.is_empty() {
+            let rc = self.client_rect();
+            let visible_h = rc.bottom - rc.top - TABBAR_HEIGHT - STATUSBAR_HEIGHT;
+            let max_scroll = (self.dashboard_content_height - visible_h + 30).max(0);
+            let scroll_step = 60;
+            let change = if delta > 0 { -scroll_step } else { scroll_step };
+            let new_scroll = (self.dashboard_scroll_y + change).clamp(0, max_scroll);
+            if new_scroll != self.dashboard_scroll_y {
+                self.dashboard_scroll_y = new_scroll;
+                self.invalidate_canvas();
+            }
         }
     }
 
@@ -7304,6 +7531,10 @@ pub const IDC_SET_UPDATE_CHECK_NOW: usize = 4223;
 pub const IDC_SET_UPDATE_DOWNLOAD: usize = 4224;
 pub const IDC_SET_ABOUT_GITHUB: usize = 4225;
 pub const IDC_SET_ABOUT_CHECK_UPDATES: usize = 4226;
+pub const IDC_SET_ADV_PATH_DISPLAY: usize = 4227;
+pub const IDC_SET_ADV_CHANGE_PATH: usize = 4228;
+pub const IDC_SET_ADV_OPEN_FOLDER: usize = 4229;
+pub const IDC_SET_ADV_RESET_DEFAULT: usize = 4230;
 #[allow(dead_code)]
 pub const IDC_SET_TAB_GENERAL: usize = 4290;
 #[allow(dead_code)]
@@ -7313,7 +7544,9 @@ pub const IDC_SET_TAB_DATA: usize = 4292;
 #[allow(dead_code)]
 pub const IDC_SET_TAB_UPDATES: usize = 4293;
 #[allow(dead_code)]
-pub const IDC_SET_TAB_ABOUT: usize = 4294;
+pub const IDC_SET_TAB_ADVANCED: usize = 4294;
+#[allow(dead_code)]
+pub const IDC_SET_TAB_ABOUT: usize = 4295;
 
 struct SettingsDialogState {
     owner: HWND,
@@ -7372,7 +7605,14 @@ struct SettingsDialogState {
     update_status_text: String,
     latest_release: Option<crate::updater::ReleaseInfo>,
 
-    // Tab 4 : À propos
+    // Tab 4 : Avancé (Emplacement personnalisé malvision.db)
+    ed_adv_path: HWND,
+    btn_adv_change_path: HWND,
+    btn_adv_open_folder: HWND,
+    btn_adv_reset_default: HWND,
+    adv_path_rc: RECT,
+
+    // Tab 5 : À propos
     btn_about_github: HWND,
     btn_about_check_updates: HWND,
     logo_bitmap: Option<HBITMAP>,
@@ -7463,10 +7703,22 @@ impl SettingsDialogState {
             }
         }
 
-        // Onglet 4 : À propos
-        for &ctrl in &[self.btn_about_github, self.btn_about_check_updates] {
+        // Onglet 4 : Avancé
+        for &ctrl in &[
+            self.ed_adv_path,
+            self.btn_adv_change_path,
+            self.btn_adv_open_folder,
+            self.btn_adv_reset_default,
+        ] {
             if !ctrl.is_invalid() {
                 let _ = unsafe { ShowWindow(ctrl, if t == 4 { SW_SHOW } else { SW_HIDE }) };
+            }
+        }
+
+        // Onglet 5 : À propos
+        for &ctrl in &[self.btn_about_github, self.btn_about_check_updates] {
+            if !ctrl.is_invalid() {
+                let _ = unsafe { ShowWindow(ctrl, if t == 5 { SW_SHOW } else { SW_HIDE }) };
             }
         }
     }
@@ -7522,7 +7774,9 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                     }
                     if d.CtlType == ODT_BUTTON {
                         let id = d.CtlID as usize;
-                        let is_primary = id == IDC_DLG_OK || id == IDC_SET_DATA_EXPORT;
+                        let is_primary = id == IDC_DLG_OK
+                            || id == IDC_SET_DATA_EXPORT
+                            || id == IDC_SET_ADV_CHANGE_PATH;
                         if id == IDC_DLG_OK
                             || id == IDC_DLG_CANCEL
                             || id == IDC_SET_ANYDESK_BROWSE
@@ -7535,6 +7789,9 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                             || id == IDC_SET_DATA_IMPORT
                             || id == IDC_SET_UPDATE_CHECK_NOW
                             || id == IDC_SET_UPDATE_DOWNLOAD
+                            || id == IDC_SET_ADV_CHANGE_PATH
+                            || id == IDC_SET_ADV_OPEN_FOLDER
+                            || id == IDC_SET_ADV_RESET_DEFAULT
                             || id == IDC_SET_ABOUT_GITHUB
                             || id == IDC_SET_ABOUT_CHECK_UPDATES
                         {
@@ -7560,7 +7817,7 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                         let item_h = state.dpi.scale(42);
                         if y >= start_y {
                             let tab_idx = ((y - start_y) / item_h) as usize;
-                            if tab_idx < 5 && tab_idx != state.current_tab {
+                            if tab_idx < 6 && tab_idx != state.current_tab {
                                 state.current_tab = tab_idx;
                                 state.update_tab_visibility();
                                 let _ = InvalidateRect(Some(hwnd), None, true);
@@ -7584,7 +7841,7 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                         let item_h = state.dpi.scale(42);
                         if y >= start_y {
                             let tab_idx = ((y - start_y) / item_h) as usize;
-                            if tab_idx < 5 {
+                            if tab_idx < 6 {
                                 hover = Some(tab_idx);
                             }
                         }
@@ -7659,6 +7916,7 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                     "Protocoles",
                     "Données",
                     "Mises à jour",
+                    "Avancé",
                     "À propos",
                 ];
                 let item_start_y = state.dpi.scale(24);
@@ -7713,9 +7971,13 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                         "Mises à Jour du Logiciel",
                         "Vérification et téléchargement sécurisé des versions officielles GitHub.",
                     ),
+                    4 => (
+                        "Emplacement des Données (Avancé)",
+                        "Configurez l'emplacement de votre base de données SQLite malvision.db.",
+                    ),
                     _ => (
                         "À propos de Malvision",
-                        "Gestionnaire de connexions distantes natif Windows 11 — Version 1.0.0.",
+                        "Gestionnaire de connexions distantes natif Windows 11 — Version 1.0.1.",
                     ),
                 };
 
@@ -8142,8 +8404,108 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                             },
                         );
                     }
+                    4 => {
+                        // ONGLET 4 : AVANCÉ (Emplacement personnalisé malvision.db)
+                        let _ = SelectObject(hdc, state.font_bold.into());
+                        let _ = SetTextColor(hdc, COLORREF(col_accent()));
+                        draw_text_line(
+                            hdc,
+                            "EMPLACEMENT DE LA BASE DE DONNÉES SQLITE",
+                            RECT {
+                                left: content_x,
+                                top: state.dpi.scale(76),
+                                right: content_right,
+                                bottom: state.dpi.scale(98),
+                            },
+                        );
+
+                        let _ = SelectObject(hdc, state.font_ui.into());
+                        let _ = SetTextColor(hdc, COLORREF(col_text_secondary()));
+                        draw_text_line(
+                            hdc,
+                            "Fichier de base de données actif :",
+                            RECT {
+                                left: content_x,
+                                top: state.dpi.scale(98),
+                                right: content_right,
+                                bottom: state.dpi.scale(118),
+                            },
+                        );
+
+                        // Statut / Type de lecteur
+                        let current_path = (*state.storage).db_path();
+                        let is_custom = crate::bootstrap::is_using_custom_database();
+                        let drive_kind = crate::bootstrap::check_drive_kind(current_path);
+                        let status_str = match (is_custom, drive_kind) {
+                            (false, _) => "Emplacement standard (%LOCALAPPDATA%)",
+                            (true, crate::bootstrap::DriveKind::LocalFixed) => {
+                                "Emplacement personnalisé (Disque local fixe)"
+                            }
+                            (true, crate::bootstrap::DriveKind::Removable) => {
+                                "Emplacement personnalisé (Disque amovible)"
+                            }
+                            (true, crate::bootstrap::DriveKind::NetworkRemote) => {
+                                "Emplacement personnalisé (Partage réseau)"
+                            }
+                            (true, _) => "Emplacement personnalisé",
+                        };
+
+                        let _ = SelectObject(hdc, state.font_small.into());
+                        let _ = SetTextColor(
+                            hdc,
+                            COLORREF(if is_custom {
+                                col_accent()
+                            } else {
+                                col_text_muted()
+                            }),
+                        );
+                        draw_text_line(
+                            hdc,
+                            status_str,
+                            RECT {
+                                left: content_x,
+                                top: state.dpi.scale(208),
+                                right: content_right,
+                                bottom: state.dpi.scale(228),
+                            },
+                        );
+
+                        // Carte d'explication et de sécurité
+                        let info_rc = RECT {
+                            left: content_x,
+                            top: state.dpi.scale(236),
+                            right: content_right,
+                            bottom: state.dpi.scale(426),
+                        };
+                        draw_rounded_box(hdc, info_rc, col_bg_input(), col_border());
+                        let _ = SelectObject(hdc, state.font_bold.into());
+                        let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                        draw_text_line(
+                            hdc,
+                            "Règles strictes de gestion et sécurité des données",
+                            RECT {
+                                left: content_x + state.dpi.scale(16),
+                                top: state.dpi.scale(246),
+                                right: content_right - state.dpi.scale(16),
+                                bottom: state.dpi.scale(268),
+                            },
+                        );
+                        let _ = SelectObject(hdc, state.font_small.into());
+                        let _ = SetTextColor(hdc, COLORREF(col_text_secondary()));
+                        let rules_notice = "• Le fichier de base de données doit obligatoirement s'appeler « malvision.db ».\n• Malvision ne déplace, ne renomme ni ne supprime JAMAIS votre ancienne base de données.\n• Si un nouveau dossier vide est choisi, la base active actuelle y est copiée en ligne de manière intègre.\n• Si une base malvision.db existe déjà dans le dossier cible, son intégrité est vérifiée avant bascule.\n• En cas de clé USB ou de disque externe débranché au démarrage, Malvision affiche un écran d'alerte sans créer de base vide.";
+                        draw_text_multiline(
+                            hdc,
+                            rules_notice,
+                            RECT {
+                                left: content_x + state.dpi.scale(16),
+                                top: state.dpi.scale(272),
+                                right: content_right - state.dpi.scale(16),
+                                bottom: state.dpi.scale(416),
+                            },
+                        );
+                    }
                     _ => {
-                        // ONGLET 4 : À PROPOS
+                        // ONGLET 5 : À PROPOS
                         // Dessin du logo officiel
                         if let Some(logo) = state.logo_bitmap {
                             let mem_dc = CreateCompatibleDC(Some(hdc));
@@ -8262,7 +8624,7 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
 
                     if (IDC_SET_TAB_GENERAL..=IDC_SET_TAB_ABOUT).contains(&id) {
                         let tab_idx = id - IDC_SET_TAB_GENERAL;
-                        if tab_idx < 5 && tab_idx != state.current_tab {
+                        if tab_idx < 6 && tab_idx != state.current_tab {
                             state.current_tab = tab_idx;
                             state.update_tab_visibility();
                             let _ = InvalidateRect(Some(hwnd), None, true);
@@ -8761,6 +9123,14 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                             Some(WPARAM(IDC_SET_UPDATE_CHECK_NOW)),
                             Some(LPARAM(0)),
                         );
+                    } else if id == IDC_SET_ADV_CHANGE_PATH {
+                        handle_adv_change_database_path(hwnd, state);
+                    } else if id == IDC_SET_ADV_OPEN_FOLDER {
+                        let cur_path = (*state.storage).db_path();
+                        let folder = cur_path.parent().unwrap_or(std::path::Path::new("C:\\"));
+                        open_folder_in_explorer(folder);
+                    } else if id == IDC_SET_ADV_RESET_DEFAULT {
+                        handle_adv_reset_default_path(hwnd, state);
                     } else if id == IDC_DLG_OK || id == 1 {
                         let theme_sel = SendMessageW(
                             state.cb_theme,
@@ -9060,6 +9430,11 @@ fn run_settings_dialog(
             btn_download_update: HWND::default(),
             update_status_text: "Recherche non effectuée".to_string(),
             latest_release: None,
+            ed_adv_path: HWND::default(),
+            btn_adv_change_path: HWND::default(),
+            btn_adv_open_folder: HWND::default(),
+            btn_adv_reset_default: HWND::default(),
+            adv_path_rc: RECT::default(),
             btn_about_github: HWND::default(),
             btn_about_check_updates: HWND::default(),
             logo_bitmap: logo_bm,
@@ -9536,7 +9911,78 @@ fn run_settings_dialog(
         );
         let _ = EnableWindow(btn_download_update, false);
 
-        // --- ONGLET 4 : CONTRÔLES À PROPOS ---
+        // --- ONGLET 4 : CONTRÔLES AVANCÉ (EMPLACEMENT BASE SQLITE) ---
+        let current_db_path = (*storage).db_path();
+        let rc_adv_path = RECT {
+            left: content_x,
+            top: dpi.scale(120),
+            right: content_right,
+            bottom: dpi.scale(120) + field_h,
+        };
+        dlg_state.adv_path_rc = rc_adv_path;
+        let ed_adv_path = create_dark_edit(
+            hwnd,
+            hinstance.into(),
+            rc_adv_path,
+            IDC_SET_ADV_PATH_DISPLAY,
+            false,
+            palette.font_ui,
+            dpi,
+        );
+        const EM_SETREADONLY: u32 = 0x00CF;
+        let _ = SendMessageW(
+            ed_adv_path,
+            EM_SETREADONLY,
+            Some(WPARAM(1)),
+            Some(LPARAM(0)),
+        );
+        set_window_text(ed_adv_path, &current_db_path.to_string_lossy());
+
+        let btn_adv_change_path = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Modifier l'emplacement…"),
+            RECT {
+                left: content_x,
+                top: dpi.scale(164),
+                right: content_x + dpi.scale(190),
+                bottom: dpi.scale(164) + dpi.scale(34),
+            },
+            IDC_SET_ADV_CHANGE_PATH,
+            palette.font_ui_bold,
+        );
+        let btn_adv_open_folder = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Ouvrir le dossier"),
+            RECT {
+                left: content_x + dpi.scale(198),
+                top: dpi.scale(164),
+                right: content_x + dpi.scale(338),
+                bottom: dpi.scale(164) + dpi.scale(34),
+            },
+            IDC_SET_ADV_OPEN_FOLDER,
+            palette.font_ui,
+        );
+        let btn_adv_reset_default = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Revenir au dossier par défaut"),
+            RECT {
+                left: content_x + dpi.scale(346),
+                top: dpi.scale(164),
+                right: content_x + dpi.scale(570),
+                bottom: dpi.scale(164) + dpi.scale(34),
+            },
+            IDC_SET_ADV_RESET_DEFAULT,
+            palette.font_ui,
+        );
+        let _ = EnableWindow(
+            btn_adv_reset_default,
+            crate::bootstrap::is_using_custom_database(),
+        );
+
+        // --- ONGLET 5 : CONTRÔLES À PROPOS ---
         let btn_about_github = create_dark_button(
             hwnd,
             hinstance.into(),
@@ -9629,6 +10075,11 @@ fn run_settings_dialog(
         dlg_state.btn_check_update = btn_check_update;
         dlg_state.btn_download_update = btn_download_update;
 
+        dlg_state.ed_adv_path = ed_adv_path;
+        dlg_state.btn_adv_change_path = btn_adv_change_path;
+        dlg_state.btn_adv_open_folder = btn_adv_open_folder;
+        dlg_state.btn_adv_reset_default = btn_adv_reset_default;
+
         dlg_state.btn_about_github = btn_about_github;
         dlg_state.btn_about_check_updates = btn_about_check_updates;
 
@@ -9662,6 +10113,10 @@ fn run_settings_dialog(
             chk_auto_update,
             btn_check_update,
             btn_download_update,
+            ed_adv_path,
+            btn_adv_change_path,
+            btn_adv_open_folder,
+            btn_adv_reset_default,
             btn_about_github,
             btn_about_check_updates,
             btn_ok,
@@ -9801,6 +10256,270 @@ fn confirm_dialog(hwnd: HWND, title: &str, message: &str) -> bool {
     }
 }
 
+pub fn open_folder_in_explorer(folder: &std::path::Path) {
+    let mut folder_w: Vec<u16> = folder.to_string_lossy().encode_utf16().collect();
+    folder_w.push(0);
+    unsafe {
+        let _ = ShellExecuteW(
+            None,
+            windows_core::w!("explore"),
+            windows_core::PCWSTR(folder_w.as_ptr()),
+            None,
+            None,
+            SW_SHOW,
+        );
+    }
+}
+
+pub fn restart_application() {
+    crate::single_instance::prepare_for_voluntary_restart();
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).spawn();
+    }
+    std::process::exit(0);
+}
+
+pub fn prompt_missing_custom_db_at_startup(
+    custom_path: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    if cfg!(test) {
+        return Ok(custom_path.to_path_buf());
+    }
+    loop {
+        let msg = format!(
+            "La base de données SQLite personnalisée est introuvable à l'emplacement configuré :\n\n{}\n\nLe lecteur ou support amovible est peut-être déconnecté.\n\n• Cliquez sur [Recommencer] pour réessayer d'accéder au support.\n• Cliquez sur [Annuler] pour afficher les options de récupération.",
+            custom_path.display()
+        );
+        let res = unsafe {
+            let mut title_w: Vec<u16> = "Base de données personnalisée introuvable"
+                .encode_utf16()
+                .collect();
+            title_w.push(0);
+            let mut msg_w: Vec<u16> = msg.encode_utf16().collect();
+            msg_w.push(0);
+            MessageBoxW(
+                None,
+                PCWSTR(msg_w.as_ptr()),
+                PCWSTR(title_w.as_ptr()),
+                MB_RETRYCANCEL | MB_ICONWARNING,
+            )
+        };
+        if res == IDRETRY {
+            if custom_path.exists() {
+                return Ok(custom_path.to_path_buf());
+            }
+            continue;
+        }
+
+        // Annuler -> Proposer les alternatives
+        let choice_msg = "Que souhaitez-vous faire ?\n\n• [Oui] : Choisir un autre dossier pour votre base de données.\n• [Non] : Revenir à l'emplacement standard (%LOCALAPPDATA%).\n• [Annuler] : Quitter l'application sans modifier votre configuration.";
+        let choice_res = unsafe {
+            let mut title_w: Vec<u16> = "Options de récupération de la base"
+                .encode_utf16()
+                .collect();
+            title_w.push(0);
+            let mut msg_w: Vec<u16> = choice_msg.encode_utf16().collect();
+            msg_w.push(0);
+            MessageBoxW(
+                None,
+                PCWSTR(msg_w.as_ptr()),
+                PCWSTR(title_w.as_ptr()),
+                MB_YESNOCANCEL | MB_ICONQUESTION,
+            )
+        };
+
+        if choice_res == IDYES {
+            if let Some(folder) = crate::external_apps::browse_for_folder(
+                HWND::default(),
+                "Sélectionnez le dossier contenant malvision.db",
+            ) {
+                let candidate = folder.join(crate::bootstrap::DATABASE_FILENAME);
+                if candidate.exists() {
+                    let _ = crate::bootstrap::set_custom_database_path(Some(&candidate));
+                    return Ok(candidate);
+                } else {
+                    show_error_dialog(
+                        HWND::default(),
+                        "Fichier introuvable",
+                        &format!(
+                            "Aucun fichier malvision.db n'a été trouvé dans le dossier :\n{}",
+                            folder.display()
+                        ),
+                    );
+                }
+            }
+        } else if choice_res == IDNO {
+            let _ = crate::bootstrap::set_custom_database_path(None);
+            return crate::bootstrap::default_database_path();
+        } else {
+            std::process::exit(0);
+        }
+    }
+}
+
+unsafe fn handle_adv_change_database_path(hwnd: HWND, state: &mut SettingsDialogState) {
+    let current_path = unsafe { (*state.storage).db_path() };
+    let chosen_folder = match crate::external_apps::browse_for_folder(
+        hwnd,
+        "Sélectionnez le dossier où stocker malvision.db",
+    ) {
+        Some(f) => f,
+        None => return,
+    };
+
+    let plan = match crate::bootstrap::plan_database_location_change(current_path, &chosen_folder) {
+        Ok(p) => p,
+        Err(err) => {
+            show_error_dialog(hwnd, "Emplacement non valide", &err);
+            return;
+        }
+    };
+
+    match plan {
+        crate::bootstrap::LocationChangePlan::AlreadyCurrent => {
+            show_info_dialog(
+                hwnd,
+                "Emplacement inchangé",
+                "Le dossier sélectionné contient déjà la base de données SQLite active.",
+            );
+        }
+        crate::bootstrap::LocationChangePlan::CopyRequired(target_db) => {
+            let drive_kind = crate::bootstrap::check_drive_kind(&chosen_folder);
+            if drive_kind == crate::bootstrap::DriveKind::Removable {
+                let msg = "Le dossier sélectionné est situé sur un disque amovible (ex. clé USB).\n\nSi ce support est débranché lors d'un prochain lancement, Malvision vous demandera de le reconnecter.\n\nSouhaitez-vous continuer ?";
+                if !confirm_dialog(hwnd, "Disque amovible détecté", msg) {
+                    return;
+                }
+            } else if drive_kind == crate::bootstrap::DriveKind::NetworkRemote {
+                let msg = "Le dossier sélectionné est situé sur un partage réseau.\n\nL'utilisation d'une base SQLite via un réseau local requiert un lien stable.\n\nSouhaitez-vous continuer ?";
+                if !confirm_dialog(hwnd, "Emplacement réseau détecté", msg) {
+                    return;
+                }
+            }
+
+            // Exporter la base actuelle vers le nouvel emplacement de manière sécurisée et intègre
+            if let Err(err) = unsafe { (*state.storage).export_database(&target_db) } {
+                show_error_dialog(
+                    hwnd,
+                    "Échec de la copie de la base",
+                    &format!("Impossible de copier la base active vers la destination :\n{err}"),
+                );
+                return;
+            }
+
+            if let Err(err) = crate::bootstrap::set_custom_database_path(Some(&target_db)) {
+                show_error_dialog(
+                    hwnd,
+                    "Erreur de configuration",
+                    &format!("Impossible d'enregistrer la configuration bootstrap :\n{err}"),
+                );
+                return;
+            }
+
+            let restart_msg = format!(
+                "La base de données a été copiée avec succès vers :\n{}\n\nPour activer ce nouvel emplacement, Malvision doit redémarrer.\n\nSouhaitez-vous redémarrer Malvision maintenant ?",
+                target_db.display()
+            );
+            if confirm_dialog(hwnd, "Nouvel emplacement configuré", &restart_msg) {
+                restart_application();
+            } else {
+                unsafe {
+                    set_window_text(state.ed_adv_path, &target_db.to_string_lossy());
+                    let _ = EnableWindow(state.btn_adv_reset_default, true);
+                    let _ = InvalidateRect(Some(hwnd), None, true);
+                }
+            }
+        }
+        crate::bootstrap::LocationChangePlan::ExistingFound(target_db) => {
+            // Valider l'intégrité de la base existante
+            match Storage::open_at_path(&target_db) {
+                Ok(_) => {}
+                Err(err) => {
+                    show_error_dialog(
+                        hwnd,
+                        "Base de données existante invalide",
+                        &format!(
+                            "Un fichier malvision.db existe dans ce dossier mais n'est pas une base SQLite valide :\n{err}"
+                        ),
+                    );
+                    return;
+                }
+            }
+
+            let confirm_msg = format!(
+                "Un fichier malvision.db existant a été détecté dans ce dossier :\n{}\n\nSouhaitez-vous basculer sur cette base existante ?\n(Aucune donnée ne sera écrasée).",
+                target_db.display()
+            );
+            if !confirm_dialog(hwnd, "Base existante détectée", &confirm_msg) {
+                return;
+            }
+
+            if let Err(err) = crate::bootstrap::set_custom_database_path(Some(&target_db)) {
+                show_error_dialog(
+                    hwnd,
+                    "Erreur de configuration",
+                    &format!("Impossible d'enregistrer la configuration bootstrap :\n{err}"),
+                );
+                return;
+            }
+
+            let restart_msg = format!(
+                "L'emplacement a été configuré vers :\n{}\n\nPour activer cette base, Malvision doit redémarrer.\n\nSouhaitez-vous redémarrer Malvision maintenant ?",
+                target_db.display()
+            );
+            if confirm_dialog(hwnd, "Emplacement configuré", &restart_msg) {
+                restart_application();
+            } else {
+                unsafe {
+                    set_window_text(state.ed_adv_path, &target_db.to_string_lossy());
+                    let _ = EnableWindow(state.btn_adv_reset_default, true);
+                    let _ = InvalidateRect(Some(hwnd), None, true);
+                }
+            }
+        }
+    }
+}
+
+unsafe fn handle_adv_reset_default_path(hwnd: HWND, state: &mut SettingsDialogState) {
+    if !crate::bootstrap::is_using_custom_database() {
+        return;
+    }
+
+    let confirm = confirm_dialog(
+        hwnd,
+        "Revenir à l'emplacement standard",
+        "Souhaitez-vous revenir à l'emplacement par défaut dans %LOCALAPPDATA% ?\n\nVotre base personnalisée actuelle restera intacte sur le disque.",
+    );
+    if !confirm {
+        return;
+    }
+
+    if let Err(err) = crate::bootstrap::set_custom_database_path(None) {
+        show_error_dialog(
+            hwnd,
+            "Erreur de réinitialisation",
+            &format!("Impossible de réinitialiser la configuration bootstrap :\n{err}"),
+        );
+        return;
+    }
+
+    let default_path = crate::bootstrap::default_database_path()
+        .unwrap_or_else(|_| std::path::PathBuf::from("malvision.db"));
+    let restart_msg = format!(
+        "L'emplacement standard par défaut a été rétabli :\n{}\n\nPour activer ce changement, Malvision doit redémarrer.\n\nSouhaitez-vous redémarrer Malvision maintenant ?",
+        default_path.display()
+    );
+    if confirm_dialog(hwnd, "Emplacement par défaut rétabli", &restart_msg) {
+        restart_application();
+    } else {
+        unsafe {
+            set_window_text(state.ed_adv_path, &default_path.to_string_lossy());
+            let _ = EnableWindow(state.btn_adv_reset_default, false);
+            let _ = InvalidateRect(Some(hwnd), None, true);
+        }
+    }
+}
+
 unsafe extern "system" fn main_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -9907,6 +10626,14 @@ unsafe extern "system" fn main_wnd_proc(
                     let x = (lparam.0 & 0xFFFF) as i16 as i32;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                     (*ptr).on_mouse_move(x, y);
+                }
+                LRESULT(0)
+            }
+            WM_MOUSEWHEEL => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+                if !ptr.is_null() {
+                    let delta = ((wparam.0 >> 16) & 0xFFFF) as i16;
+                    (*ptr).on_mouse_wheel(delta);
                 }
                 LRESULT(0)
             }
@@ -10165,10 +10892,25 @@ unsafe extern "system" fn main_wnd_proc(
             }
             _ => {
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
-                if !ptr.is_null() && msg != 0 && msg == (*ptr).wm_taskbar_created {
-                    (*ptr).tray_icon_added = false;
-                    (*ptr).init_tray_icon();
-                    return LRESULT(0);
+                if !ptr.is_null() {
+                    if msg != 0 && msg == (*ptr).wm_taskbar_created {
+                        (*ptr).tray_icon_added = false;
+                        (*ptr).init_tray_icon();
+                        return LRESULT(0);
+                    }
+                    if msg != 0 && msg == crate::single_instance::get_activate_window_message() {
+                        let state = &mut *ptr;
+                        if state.is_hidden_in_tray {
+                            state.restore_from_tray();
+                        } else if IsIconic(hwnd).as_bool() {
+                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                            let _ = SetForegroundWindow(hwnd);
+                        } else {
+                            let _ = ShowWindow(hwnd, SW_SHOW);
+                            let _ = SetForegroundWindow(hwnd);
+                        }
+                        return LRESULT(0);
+                    }
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -11226,8 +11968,16 @@ mod tests {
             let btn_check_now =
                 GetDlgItem(Some(dlg), IDC_SET_UPDATE_CHECK_NOW as i32).unwrap_or_default();
             let btn_github = GetDlgItem(Some(dlg), IDC_SET_ABOUT_GITHUB as i32).unwrap_or_default();
+            let ed_adv_path =
+                GetDlgItem(Some(dlg), IDC_SET_ADV_PATH_DISPLAY as i32).unwrap_or_default();
+            let btn_adv_change =
+                GetDlgItem(Some(dlg), IDC_SET_ADV_CHANGE_PATH as i32).unwrap_or_default();
+            let btn_adv_open =
+                GetDlgItem(Some(dlg), IDC_SET_ADV_OPEN_FOLDER as i32).unwrap_or_default();
+            let btn_adv_reset =
+                GetDlgItem(Some(dlg), IDC_SET_ADV_RESET_DEFAULT as i32).unwrap_or_default();
 
-            // 1. Initialement dans Général : le thème est visible, Données/Mises à jour/À propos masqués
+            // 1. Initialement dans Général : le thème est visible, Données/Mises à jour/Avancé/À propos masqués
             assert!(
                 IsWindowVisible(cb_theme).as_bool(),
                 "Général doit être actif par défaut"
@@ -11243,6 +11993,10 @@ mod tests {
             assert!(
                 !IsWindowVisible(chk_updates).as_bool(),
                 "Mises à jour doit être masqué"
+            );
+            assert!(
+                !IsWindowVisible(ed_adv_path).as_bool(),
+                "Avancé doit être masqué dans Général"
             );
             assert!(
                 !IsWindowVisible(btn_github).as_bool(),
@@ -11307,11 +12061,11 @@ mod tests {
             // Décocher la vérification automatique
             let _ = SendMessageW(chk_updates, BM_SETCHECK, Some(WPARAM(0)), Some(LPARAM(0)));
 
-            // 4. Basculer vers À propos (IDC_SET_TAB_ABOUT)
+            // 5. Basculer vers Avancé (IDC_SET_TAB_ADVANCED)
             let _ = SendMessageW(
                 dlg,
                 WM_COMMAND,
-                Some(WPARAM(IDC_SET_TAB_ABOUT)),
+                Some(WPARAM(IDC_SET_TAB_ADVANCED)),
                 Some(LPARAM(0)),
             );
             assert!(
@@ -11319,11 +12073,39 @@ mod tests {
                 "Mises à jour doit être masqué"
             );
             assert!(
+                IsWindowVisible(ed_adv_path).as_bool(),
+                "Champ chemin DB doit être visible dans Avancé"
+            );
+            assert!(
+                IsWindowVisible(btn_adv_change).as_bool(),
+                "Bouton modifier emplacement doit être visible dans Avancé"
+            );
+            assert!(
+                IsWindowVisible(btn_adv_open).as_bool(),
+                "Bouton ouvrir dossier doit être visible dans Avancé"
+            );
+            assert!(
+                IsWindowVisible(btn_adv_reset).as_bool(),
+                "Bouton reset défaut doit être visible dans Avancé"
+            );
+
+            // 6. Basculer vers À propos (IDC_SET_TAB_ABOUT)
+            let _ = SendMessageW(
+                dlg,
+                WM_COMMAND,
+                Some(WPARAM(IDC_SET_TAB_ABOUT)),
+                Some(LPARAM(0)),
+            );
+            assert!(
+                !IsWindowVisible(ed_adv_path).as_bool(),
+                "Avancé doit être masqué dans À propos"
+            );
+            assert!(
                 IsWindowVisible(btn_github).as_bool(),
                 "Bouton GitHub doit être visible dans À propos"
             );
 
-            // 5. Enregistrer et fermer (IDC_DLG_OK)
+            // 7. Enregistrer et fermer (IDC_DLG_OK)
             let btn_ok = GetDlgItem(Some(dlg), IDC_DLG_OK as i32).unwrap_or_default();
             let _ = SendMessageW(btn_ok, BM_CLICK, Some(WPARAM(0)), Some(LPARAM(0)));
         }
@@ -12154,6 +12936,220 @@ mod tests {
                 initial_expanded, toggled_expanded,
                 "Le double-clic tout à droite sur la ligne d'un dossier doit basculer son expansion"
             );
+
+            let _ = DestroyWindow(hwnd);
+        }
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_ui_single_instance_activation_message_restores_from_tray_and_focuses() {
+        let _guard = WIN32_UI_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db_path = create_temp_test_db_path("single_inst_msg");
+        let _ = std::fs::remove_file(&db_path);
+
+        unsafe {
+            let hwnd = create_isolated_test_main_window(&db_path);
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+
+            // 1. Simuler Malvision minimisé / masqué dans le tray
+            (*ptr).is_hidden_in_tray = true;
+            let _ = ShowWindow(hwnd, SW_HIDE);
+            assert!(!windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd).as_bool());
+
+            // 2. Envoyer le message de réactivation d'instance unique
+            let msg = crate::single_instance::get_activate_window_message();
+            assert_ne!(msg, 0);
+            let res = SendMessageW(hwnd, msg, Some(WPARAM(0)), Some(LPARAM(0)));
+            assert_eq!(res.0, 0);
+
+            // 3. Vérifier que la fenêtre a bien été restaurée du tray et est visible
+            assert!(!(*ptr).is_hidden_in_tray);
+            assert!(windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd).as_bool());
+
+            let _ = DestroyWindow(hwnd);
+        }
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    fn make_test_draft(
+        name: &str,
+        protocol: Protocol,
+        host: &str,
+        folder_id: Option<i64>,
+        is_favorite: bool,
+    ) -> ConnectionDraft {
+        ConnectionDraft {
+            folder_id,
+            name: name.to_string(),
+            protocol,
+            host: host.to_string(),
+            port: 3389,
+            username: String::new(),
+            domain: String::new(),
+            description: String::new(),
+            is_favorite,
+            save_password: false,
+            password: crate::security::SecretString::new(String::new()),
+            keep_existing_password: false,
+            dynamic_resolution: true,
+            redirect_clipboard: true,
+        }
+    }
+
+    #[test]
+    fn test_ui_dashboard_layout_cas_a_and_cas_b_and_scrolling() {
+        let _guard = WIN32_UI_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db_path = create_temp_test_db_path("dash_cas_ab");
+        let _ = std::fs::remove_file(&db_path);
+
+        unsafe {
+            let hwnd = create_isolated_test_main_window(&db_path);
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+
+            // Insérer des connexions de test
+            let state = &mut *ptr;
+            let f1 = state.storage.create_folder("Production", None).unwrap();
+            let _ = state
+                .storage
+                .create_connection(make_test_draft(
+                    "Alpha SRV",
+                    Protocol::Rdp,
+                    "10.0.0.1",
+                    None,
+                    true,
+                ))
+                .unwrap();
+            let _ = state
+                .storage
+                .create_connection(make_test_draft(
+                    "Zeta SRV",
+                    Protocol::AnyDesk,
+                    "123456789",
+                    Some(f1.id),
+                    false,
+                ))
+                .unwrap();
+
+            let hdc = GetDC(Some(hwnd));
+            assert!(!hdc.0.is_null());
+
+            let area = RECT {
+                left: 260,
+                top: TABBAR_HEIGHT,
+                right: 1200,
+                bottom: 800 - STATUSBAR_HEIGHT,
+            };
+
+            // Cas A : Connexions récentes activées
+            state.settings.show_recent_connections = true;
+            state.hit_zones.clear();
+            state.paint_home_dashboard(hdc, area);
+            let height_cas_a = state.dashboard_content_height;
+            assert!(
+                height_cas_a > 100,
+                "Le tableau de bord doit calculer une hauteur valide"
+            );
+
+            // Vérifier que « Toutes les connexions » contient bien des zones cliquables
+            let card_zones_cas_a = state
+                .hit_zones
+                .iter()
+                .filter(|z| matches!(z.zone, InteractiveZone::HomeCardConnect(_)))
+                .count();
+            assert!(
+                card_zones_cas_a >= 2,
+                "Au moins 2 cartes doivent être cliquables"
+            );
+
+            // Cas B : Connexions récentes désactivées
+            state.settings.show_recent_connections = false;
+            state.hit_zones.clear();
+            state.paint_home_dashboard(hdc, area);
+            let height_cas_b = state.dashboard_content_height;
+            assert!(height_cas_b > 0);
+
+            // Test du défilement fluide au mousewheel
+            assert_eq!(state.dashboard_scroll_y, 0);
+            state.on_mouse_wheel(-120); // Scroll vers le bas
+            // Si la hauteur de contenu dépasse la zone visible ou s'adapte, clampé proprement
+            let visible_h = 800 - TABBAR_HEIGHT - STATUSBAR_HEIGHT;
+            let max_scroll = (state.dashboard_content_height - visible_h + 30).max(0);
+            assert!(state.dashboard_scroll_y <= max_scroll);
+
+            state.on_mouse_wheel(120); // Scroll vers le haut
+            assert_eq!(state.dashboard_scroll_y, 0);
+
+            let _ = ReleaseDC(Some(hwnd), hdc);
+            let _ = DestroyWindow(hwnd);
+        }
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_ui_treeview_direct_connections_appear_before_subfolders() {
+        let _guard = WIN32_UI_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db_path = create_temp_test_db_path("tree_sorting");
+        let _ = std::fs::remove_file(&db_path);
+
+        unsafe {
+            let hwnd = create_isolated_test_main_window(&db_path);
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+
+            let state = &mut *ptr;
+            // Créer un dossier parent avec des connexions directes et des sous-dossiers
+            let parent = state.storage.create_folder("Clients", None).unwrap();
+            let _sub_b = state
+                .storage
+                .create_folder("Client B", Some(parent.id))
+                .unwrap();
+            let _sub_a = state
+                .storage
+                .create_folder("Client A", Some(parent.id))
+                .unwrap();
+
+            let _conn_z = state
+                .storage
+                .create_connection(make_test_draft(
+                    "Zebra Server",
+                    Protocol::Rdp,
+                    "10.0.0.99",
+                    Some(parent.id),
+                    false,
+                ))
+                .unwrap();
+
+            let _conn_a = state
+                .storage
+                .create_connection(make_test_draft(
+                    "Alpha Server",
+                    Protocol::RustDesk,
+                    "999888777",
+                    Some(parent.id),
+                    false,
+                ))
+                .unwrap();
+
+            state.rebuild_treeview();
+
+            // Vérifier que le tri commun models::collect_tree_ordered_connections respecte la règle
+            let folders = state.storage.list_folders().unwrap();
+            let conns = state.storage.list_connections().unwrap();
+            let ordered = crate::models::collect_tree_ordered_connections(&folders, &conns);
+
+            // Dans "Clients", Alpha Server doit venir avant Zebra Server,
+            // et tous deux avant les connexions des sous-dossiers Client A / Client B
+            let names: Vec<&str> = ordered.iter().map(|c| c.name.as_str()).collect();
+            assert_eq!(names, vec!["Alpha Server", "Zebra Server"]);
 
             let _ = DestroyWindow(hwnd);
         }

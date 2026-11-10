@@ -2,24 +2,45 @@
 
 Application native **Windows 11 x64** de gestion de connexions distantes, écrite en **Rust** avec `windows-rs` (Win32 natif + COM/ActiveX + SQLite embarqué + DPAPI).
 
-**Version actuelle :** `1.0.0` (V1.0.0 Stable Portable)
+**Version actuelle :** `1.0.1` (V1.0.1 Stable Portable)
 
 ---
 
-## Fonctionnalités principales (V1.0.0)
+## Fonctionnalités principales (V1.0.1)
 
-- **Identité graphique & Finition Windows 11 (Jalon 4)** :
-  - **Monogramme officiel « M »** géométrique bicolore (Bleu Windows `#0078D4` et Cyan `#38BDF8`) évoquant des écrans connectés.
-  - **Icône PE multirésolution** intégrée aux ressources du binaire exécutable (16×16, 24×24, 32×32, 48×48, 64×64, 128×128, 256×256) pour l'Explorateur Windows, la barre des tâches, Alt+Tab, la fenêtre principale et le System Tray.
-  - **Splash screen officiel** au démarrage (650 ms, non bloquant, masqué lors du démarrage minimisé).
-  - **Métadonnées de version Windows PE** complètes (`ProductName: MALVISION`, `FileDescription: Malvision Remote Connection Manager`, `FileVersion: 1.0.0.0`, `ProductVersion: 1.0.0`).
-- **Centre de Paramètres moderne à 5 catégories (Jalon 4)** :
-  - Volet de navigation latéral style Fluent avec 5 onglets dédiés :
+- **Instance unique avec réactivation intelligente (V1.0.1)** :
+  - Mutex Win32 nommé à portée de session (`Local\Malvision_SingleInstance_Mutex`).
+  - Toute tentative de seconde instance réactive immédiatement l'instance déjà ouverte : restauration depuis l'état minimisé ou le System Tray, mise au premier plan et focus garanti (`AllowSetForegroundWindow`).
+  - Le processus secondaire s'arrête instantanément sans ouvrir de base SQLite, sans créer de fenêtre ni dupliquer d'icône dans la zone de notification.
+  - Libération contrôlée lors des redémarrages volontaires de l'application.
+- **Emplacement personnalisé de la base de données SQLite (V1.0.1)** :
+  - Nouvel onglet **Avancé** dans le dialogue des Paramètres (6 catégories au total).
+  - Déplacement assisté de `malvision.db` vers n'importe quel dossier choisi par l'utilisateur via un sélecteur moderne `IFileOpenDialog`.
+  - Boutons d'accès direct « Ouvrir le dossier » dans l'Explorateur et « Revenir au dossier par défaut ».
+  - Détection et avertissement clair pour les disques amovibles (`DRIVE_REMOVABLE`) et partages réseau (`DRIVE_REMOTE`).
+  - Sauvegarde sécurisée sans suppression ni renommage de l'ancienne base : copie intègre avec `Storage::export_database()` et checkpoint WAL complet.
+  - Persistance dans `%LOCALAPPDATA%\Malvision\bootstrap.json`.
+  - Résilience au démarrage : dialogue interactif en cas de disque déconnecté (Réessayer, Choisir un autre dossier, Revenir au défaut, Quitter).
+- **Tri perfectionné de l'arborescence des connexions (V1.0.1)** :
+  - Règle stricte et intuitive : **dans chaque dossier et à la racine, les connexions directes apparaissent toujours avant les sous-dossiers**.
+  - Tri alphabétique insensible à la casse (A à Z) appliqué récursivement.
+  - Préservation intégrale des favoris, icônes de protocoles (RDP, AnyDesk, RustDesk) et de l'état développé/replié des dossiers.
+- **Tableau de bord : « Toutes les connexions » & Défilement fluide (V1.0.1)** :
+  - Section complète affichant l'intégralité des connexions sous forme de cartes compactes Fluent (`hauteur = 56px`) en grille adaptative (1 à 4 colonnes).
+  - Informations synthétiques : badge protocole, nom en gras, étoile dorée de favori, chemin du dossier et hôte / identifiant distant.
+  - Défilement vertical fluide à la molette (`WM_MOUSEWHEEL`) sur toute la page d'accueil avec hit-testing précis des cartes.
+  - **Repositionnement dynamique intelligent** :
+    - *Cas A (Connexions récentes activées)* : enchaînement harmonieux Actions rapides -> Favoris -> Récentes -> Toutes les connexions.
+    - *Cas B (Connexions récentes désactivées)* : section récente complètement masquée sans espace résiduel ; la section « Toutes les connexions » remonte directement sous les favoris / actions rapides.
+  - Lancement immédiat par clic sur n'importe quelle carte.
+- **Centre de Paramètres moderne à 6 catégories (V1.0.1)** :
+  - Volet de navigation latéral style Fluent avec 6 onglets dédiés :
     1. **Général** : sélection du thème (Sombre, Clair, Système), comportement System Tray, démarrage avec Windows, connexions récentes.
     2. **Protocoles** : chemins d'accès vers AnyDesk et RustDesk (avec détection automatique et test), options RDP par défaut (Presse-papiers, Dynamic Resolution, KeyboardHookMode).
     3. **Données** : exportation transactionnelle de la configuration SQLite (compatible WAL, préservation DPAPI), importation avec contrôle d'intégrité et sauvegarde de sécurité `.pre_import_bak`.
     4. **Mises à jour** : vérification automatique ou manuelle via l'API GitHub Releases, téléchargement sécurisé avec vérification SHA-256 et instructions de remplacement portable.
-    5. **À propos** : logo officiel, version installée, description, lien direct vers le dépôt GitHub et raccourci de vérification des versions.
+    5. **Avancé** : gestion de l'emplacement personnalisé de la base de données SQLite `malvision.db`.
+    6. **À propos** : logo officiel, version installée, description, lien direct vers le dépôt GitHub et raccourci de vérification des versions.
 - **Sauvegarde et Restauration SQLite (Jalon 4)** :
   - **Exportation WAL-safe** : utilisation de l'API de sauvegarde en ligne SQLite (`rusqlite::backup::Backup`), sans verrouillage ni déconnexion des sessions RDP actives.
   - **Protection DPAPI** : conservation intégrale des mots de passe chiffrés par Windows DPAPI. Avertissement explicite sur la récupération liée au compte Windows.

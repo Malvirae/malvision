@@ -1,11 +1,13 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+mod bootstrap;
 mod external_apps;
 mod models;
 mod rdp;
 mod security;
 mod sessions;
 mod settings;
+mod single_instance;
 mod storage;
 mod ui;
 mod updater;
@@ -20,6 +22,18 @@ use windows::Win32::UI::HiDpi::{
 };
 
 fn main() {
+    // 1. Contrôle d'instance unique pour la session Windows interactive
+    // Si une instance de Malvision est déjà active (visible ou minimisée dans le System Tray),
+    // elle est immédiatement réactivée et restaurée, et le processus secondaire quitte.
+    let _instance_guard = if !cfg!(test) {
+        match single_instance::check_single_instance() {
+            single_instance::SingleInstanceResult::Primary(guard) => Some(guard),
+            single_instance::SingleInstanceResult::SecondaryExited => return,
+        }
+    } else {
+        None
+    };
+
     unsafe {
         // Activer la prise en charge HiDPI Per-Monitor V2 sur Windows 11
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);

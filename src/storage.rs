@@ -63,16 +63,37 @@ pub fn atomic_replace_file(src: &Path, dst: &Path) -> Result<(), String> {
 }
 
 impl Storage {
-    /// Ouvre ou crée la base de données dans `%LOCALAPPDATA%\Malvision\malvision.db`.
+    /// Retourne le chemin d'accès au fichier de base de données actif.
+    pub fn db_path(&self) -> &Path {
+        &self.db_path
+    }
+
+    /// Ouvre la base de données active résolue par le bootstrap (emplacement personnalisé si défini,
+    /// sinon emplacement par défaut dans `%LOCALAPPDATA%\Malvision\malvision.db`).
+    /// Si un emplacement personnalisé configuré est introuvable au démarrage, sollicite l'utilisateur.
     pub fn open_default() -> Result<Self, String> {
-        let dir = default_app_data_dir()?;
-        std::fs::create_dir_all(&dir).map_err(|e| {
-            format!(
-                "Impossible de créer le répertoire de données '{}' : {e}",
-                dir.display()
-            )
-        })?;
-        let db_path = dir.join("malvision.db");
+        let cfg = crate::bootstrap::load_bootstrap();
+        let db_path = if let Some(custom) = cfg.custom_db_path {
+            if !custom.exists() && !cfg!(test) {
+                crate::ui::prompt_missing_custom_db_at_startup(&custom)?
+            } else {
+                custom
+            }
+        } else {
+            crate::bootstrap::default_database_path()?
+        };
+
+        if let Some(parent) = db_path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Impossible de créer le répertoire de données '{}' : {e}",
+                    parent.display()
+                )
+            })?;
+        }
         Self::open_at_path(&db_path)
     }
 

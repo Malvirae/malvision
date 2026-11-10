@@ -2,6 +2,45 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
+## [1.0.1] — Version Corrective et Améliorations Ergonomiques (2026-11-10)
+
+### Ajouté & Amélioré
+- **Instance unique avec réactivation et focus garanti** :
+  - Mutex Win32 nommé à portée de session (`Local\Malvision_SingleInstance_Mutex`).
+  - Détection immédiate au lancement (barre des tâches, menu Démarrer, raccourcis, démarrage auto, ou EXE direct).
+  - Réactivation fiable de l'instance principale, restauration depuis l'état minimisé ou depuis la zone de notification (System Tray) avec transfert d'autorisation de focus (`AllowSetForegroundWindow`) et message fenêtré enregistré (`RegisterWindowMessageW`).
+  - Quitter immédiat du processus secondaire sans initialisation de base SQLite, sans création de fenêtre ni doublon d'icône tray.
+  - Libération atomique du verrou lors des redémarrages volontaires (changement d'emplacement de base).
+- **Emplacement personnalisable de la base de données SQLite (`malvision.db`)** :
+  - Nouvel onglet **Avancé** dans la boîte de dialogue des Paramètres (volet latéral étendu à 6 catégories).
+  - Contrôle du chemin actif avec boutons « Modifier l'emplacement… » (sélecteur de dossier Win32 `IFileOpenDialog` moderne), « Ouvrir le dossier » dans l'Explorateur et « Revenir au dossier par défaut ».
+  - Détection du type de support (`DRIVE_REMOTE`, `DRIVE_REMOVABLE`, `DRIVE_FIXED`) avec avertissement explicite pour les disques amovibles ou réseaux.
+  - Sauvegarde sécurisée sans altération de la base d'origine (jamais supprimée, déplacée ni renommée). Copie intègre par `Storage::export_database()` avec validation SQLite (`PRAGMA integrity_check`) et checkpoint WAL.
+  - Persistance dans `%LOCALAPPDATA%\Malvision\bootstrap.json`.
+  - Robustesse au démarrage : dialogue interactif en cas de disque personnalisé déconnecté (Réessayer, Choisir un autre dossier, Revenir au défaut, Quitter).
+- **Tri perfectionné de l'arborescence des connexions** :
+  - Dans chaque dossier et à la racine : **connexions directes toujours affichées avant les sous-dossiers**.
+  - Tri alphabétique insensible à la casse (A à Z) appliqué récursivement dans toute la hiérarchie.
+  - Préservation intégrale des favoris, icônes de protocoles, expansion/repli des nœuds et double-clic pleine largeur.
+- **Tableau de bord : Section « Toutes les connexions » & Défilement vertical fluide** :
+  - Nouvelle section affichant toutes les connexions sous les connexions récentes, ordonnée selon la hiérarchie logique de l'arborescence.
+  - Cartes compactes Fluent (`hauteur = 56px`) en grille responsive (1 à 4 colonnes) avec badge protocole, nom en gras, étoile dorée, chemin du dossier et hôte / identifiant distant.
+  - Prise en charge complète du défilement à la molette (`WM_MOUSEWHEEL`) avec conservation de la zone visible et hit-testing précis des cartes.
+  - **Repositionnement dynamique intelligent** :
+    - *Cas A (Connexions récentes activées)* : enchaînement classique sous les favoris et récentes.
+    - *Cas B (Connexions récentes désactivées)* : masquage intégral de la section récente sans aucun espace résiduel, « Toutes les connexions » remontant directement sous les favoris / actions rapides.
+  - Clic direct sur une carte pour lancer instantanément la session correspondante.
+
+### Testé
+- Suite de tests portée à **62 tests automatisés (100 % passants)** :
+  - `test_single_instance_guard_drop_clean` & `test_activate_message_registration` (instance unique Win32).
+  - `test_bootstrap_defaults_and_roundtrip` & `test_validate_directory_writable_success_and_plan` (bootstrap et validation des dossiers).
+  - `test_collect_tree_ordered_connections_rules` (tri connexions avant dossiers).
+  - `test_ui_single_instance_activation_message_restores_from_tray_and_focuses`.
+  - `test_ui_dashboard_layout_cas_a_and_cas_b_and_scrolling`.
+  - `test_ui_treeview_direct_connections_appear_before_subfolders`.
+  - `test_ui_settings_dialog_tabs_jalon4_categories_and_buttons` mis à jour pour 6 onglets.
+
 ## [1.0.0] — Jalon 4C : Dernières Finitions Prépublication V1.0.0 (2026-11-10)
 
 ### Interface & Ergonomie
