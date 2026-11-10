@@ -2,7 +2,32 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
-## [1.0.0] — Jalon 4B : Sécurisation Finale de Prépublication V1.0.0 (2026-11-10)
+## [1.0.0] — Jalon 4C : Dernières Finitions Prépublication V1.0.0 (2026-11-10)
+
+### Interface & Ergonomie
+- **Cadre DPAPI intégralement visible (Paramètres > Données)** :
+  - Ajustement vertical de la carte informative Windows DPAPI (extension de la hauteur à 172px scaled) offrant un dégagement confortable pour les 4 puces explicatives complètes sans aucun rognage de la dernière ligne.
+  - Recalage proportionné et aéré de l'ensemble des sections et boutons d'export et d'import sur la grille visuelle (boutons à Y: 312px et Y: 414px), vérifié sur les facteurs d'échelle 100 %, 125 % et 150 % HiDPI.
+
+### Sécurité & Robustesse SQLite
+- **Élimination complète des fichiers auxiliaires d'exportation** :
+  - Exécution de `PRAGMA wal_checkpoint(TRUNCATE)` et `PRAGMA journal_mode = DELETE` sur la base d'export temporaire avant fermeture, convertissant la sauvegarde en fichier `.db` totalement autonome et indépendant de tout journal externe.
+  - Fermeture explicite des connexions SQLite temporaires avant toute manipulation de fichiers.
+  - Nettoyage sécurisé et garanti de l'ensemble des fichiers auxiliaires résiduels (`.tmp_export-wal`, `.tmp_export-shm`, `.tmp_export-journal`) en cas de succès comme en cas d'erreur.
+  - Garantie stricte d'absence d'impact sur la base de données active en cours d'utilisation.
+
+### Mises à jour
+- **Traitement ergonomique du code HTTP 404 GitHub Releases** :
+  - Prise en charge explicite du retour HTTP 404 lorsque le dépôt est privé ou qu'aucune release publique n'est encore publiée.
+  - Affichage d'un message informatif direct : « Aucune version publique disponible pour le moment. » sans le présenter à tort comme une défaillance de la connexion Internet.
+  - Préservation intégrale de l'URL officielle GitHub et du comportement standard lors de la future publication publique de la V1.0.0.
+
+### Testé
+- Suite de tests portée à **54 tests automatisés (100 % passants)** :
+  - Ajout de `test_storage_export_produces_only_single_db_without_auxiliary_files` (vérification stricte de la production d'un fichier `.db` unique sans aucun fichier `.tmp_export-wal` ou `.tmp_export-shm` résiduel).
+  - Ajout de `test_parse_release_json_github_not_found` (validation du message utilisateur sur réponse HTTP 404 / `Not Found`).
+
+## [1.0.0-rc2] — Jalon 4B : Sécurisation Finale de Prépublication V1.0.0 (2026-11-10)
 
 ### Sécurité & Robustesse
 - **Exportation SQLite durcie et sans risque de perte** :

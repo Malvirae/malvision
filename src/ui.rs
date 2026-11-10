@@ -7929,12 +7929,12 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                     }
                     2 => {
                         // ONGLET 2 : DONNÉES & SAUVEGARDES
-                        // Carte informative de sécurité DPAPI
+                        // Carte informative de sécurité DPAPI (dimensionnée pour accueillir toutes les puces sans troncature)
                         let card_rc = RECT {
                             left: content_x,
                             top: state.dpi.scale(76),
                             right: content_right,
-                            bottom: state.dpi.scale(192),
+                            bottom: state.dpi.scale(248),
                         };
                         draw_rounded_box(hdc, card_rc, col_bg_input(), col_border());
 
@@ -7961,7 +7961,7 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                                 left: content_x + state.dpi.scale(16),
                                 top: state.dpi.scale(114),
                                 right: content_right - state.dpi.scale(16),
-                                bottom: state.dpi.scale(186),
+                                bottom: state.dpi.scale(238),
                             },
                         );
 
@@ -7973,9 +7973,9 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                             "Exporter la configuration",
                             RECT {
                                 left: content_x,
-                                top: state.dpi.scale(208),
+                                top: state.dpi.scale(264),
                                 right: content_right,
-                                bottom: state.dpi.scale(230),
+                                bottom: state.dpi.scale(286),
                             },
                         );
                         let _ = SelectObject(hdc, state.font_small.into());
@@ -7985,9 +7985,9 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                             "Créez une sauvegarde complète autonome (.db) sans interruption de service.",
                             RECT {
                                 left: content_x,
-                                top: state.dpi.scale(230),
+                                top: state.dpi.scale(286),
                                 right: content_right,
-                                bottom: state.dpi.scale(250),
+                                bottom: state.dpi.scale(306),
                             },
                         );
 
@@ -7999,9 +7999,9 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                             "Importer et restaurer une configuration",
                             RECT {
                                 left: content_x,
-                                top: state.dpi.scale(308),
+                                top: state.dpi.scale(366),
                                 right: content_right,
-                                bottom: state.dpi.scale(330),
+                                bottom: state.dpi.scale(388),
                             },
                         );
                         let _ = SelectObject(hdc, state.font_small.into());
@@ -8011,9 +8011,9 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                             "Restaure une base sauvegardée. Une copie de secours (.pre_import_bak) est générée automatiquement.",
                             RECT {
                                 left: content_x,
-                                top: state.dpi.scale(330),
+                                top: state.dpi.scale(388),
                                 right: content_right,
-                                bottom: state.dpi.scale(350),
+                                bottom: state.dpi.scale(408),
                             },
                         );
                     }
@@ -8646,15 +8646,29 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                             }
                             Err(err) => {
                                 let _ = EnableWindow(state.btn_check_update, true);
-                                state.update_status_text = format!("Erreur : {err}");
-                                let _ = InvalidateRect(Some(hwnd), None, false);
-                                show_warning_dialog(
-                                    hwnd,
-                                    "Vérification des mises à jour",
-                                    &format!(
-                                        "Impossible de vérifier les mises à jour :\n{err}\n\nVeuillez vérifier votre connexion Internet."
-                                    ),
-                                );
+                                let is_not_found = err == crate::updater::MSG_NO_PUBLIC_RELEASE
+                                    || err.contains("404")
+                                    || err.contains("Not Found");
+                                if is_not_found {
+                                    state.update_status_text =
+                                        crate::updater::MSG_NO_PUBLIC_RELEASE.to_string();
+                                    let _ = InvalidateRect(Some(hwnd), None, false);
+                                    show_info_dialog(
+                                        hwnd,
+                                        "Mises à jour",
+                                        crate::updater::MSG_NO_PUBLIC_RELEASE,
+                                    );
+                                } else {
+                                    state.update_status_text = format!("Erreur : {err}");
+                                    let _ = InvalidateRect(Some(hwnd), None, false);
+                                    show_warning_dialog(
+                                        hwnd,
+                                        "Vérification des mises à jour",
+                                        &format!(
+                                            "Impossible de vérifier les mises à jour :\n{err}\n\nVeuillez vérifier votre connexion Internet."
+                                        ),
+                                    );
+                                }
                             }
                         }
                     } else if id == IDC_SET_UPDATE_DOWNLOAD {
@@ -9452,9 +9466,9 @@ fn run_settings_dialog(
             w!("Exporter ma configuration…"),
             RECT {
                 left: content_x,
-                top: dpi.scale(254),
+                top: dpi.scale(312),
                 right: content_x + dpi.scale(250),
-                bottom: dpi.scale(254) + dpi.scale(36),
+                bottom: dpi.scale(312) + dpi.scale(36),
             },
             IDC_SET_DATA_EXPORT,
             palette.font_ui_bold,
@@ -9465,9 +9479,9 @@ fn run_settings_dialog(
             w!("Importer une configuration…"),
             RECT {
                 left: content_x,
-                top: dpi.scale(354),
+                top: dpi.scale(414),
                 right: content_x + dpi.scale(250),
-                bottom: dpi.scale(354) + dpi.scale(36),
+                bottom: dpi.scale(414) + dpi.scale(36),
             },
             IDC_SET_DATA_IMPORT,
             palette.font_ui,

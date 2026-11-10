@@ -1109,6 +1109,15 @@ impl Storage {
             .map_err(|e| format!("Erreur lecture préférence '{key}' : {e}"))
     }
 
+    fn sqlite_auxiliary_paths(path: &Path) -> [PathBuf; 3] {
+        let s = path.to_string_lossy();
+        [
+            PathBuf::from(format!("{s}-wal")),
+            PathBuf::from(format!("{s}-shm")),
+            PathBuf::from(format!("{s}-journal")),
+        ]
+    }
+
     /// Exporte la base de données courante vers le fichier spécifié en utilisant
     /// l'API de sauvegarde SQLite (`rusqlite::backup::Backup`).
     ///
@@ -1116,8 +1125,10 @@ impl Storage {
     /// - La sauvegarde est d'abord écrite dans un fichier temporaire sur le même volume/dossier.
     /// - L'intégrité SQLite (`PRAGMA integrity_check`) et le schéma sont validés avant tout remplacement.
     /// - Si le fichier de destination existe déjà, il est conservé intact en cas d'erreur de sauvegarde.
+    /// - Le journal WAL est vidé (`wal_checkpoint(TRUNCATE)`) et basculé en mode DELETE afin de
+    ///   garantir un fichier `.db` totalement autonome sans fichiers `-wal` ou `-shm` résiduels.
     /// - Le remplacement vers la destination finale est atomique et sécurisé.
-    /// - Les fichiers temporaires sont nettoyés en cas de succès comme en cas d'échec.
+    /// - Tous les fichiers temporaires et auxiliaires sont nettoyés en cas de succès comme en cas d'échec.
     pub fn export_database(&self, dest_path: &Path) -> Result<(), String> {
         let parent = dest_path.parent().unwrap_or_else(|| Path::new("."));
         if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -1143,13 +1154,24 @@ impl Storage {
         if temp_path.exists() {
             let _ = std::fs::remove_file(&temp_path);
         }
+        for aux in Self::sqlite_auxiliary_paths(&temp_path) {
+            if aux.exists() {
+                let _ = std::fs::remove_file(aux);
+            }
+        }
 
-        // Structure Guard pour garantir le nettoyage automatique du fichier temporaire en cas d'erreur
+        // Structure Guard pour garantir le nettoyage automatique du fichier temporaire et de ses fichiers
+        // auxiliaires (-wal, -shm, -journal) en cas d'erreur ou d'interruption
         struct TempCleanup<'a>(&'a Path);
         impl Drop for TempCleanup<'_> {
             fn drop(&mut self) {
                 if self.0.exists() {
                     let _ = std::fs::remove_file(self.0);
+                }
+                for aux in Storage::sqlite_auxiliary_paths(self.0) {
+                    if aux.exists() {
+                        let _ = std::fs::remove_file(aux);
+                    }
                 }
             }
         }
@@ -1164,13 +1186,26 @@ impl Storage {
                 )
             })?;
 
-            let backup = rusqlite::backup::Backup::new(&self.conn, &mut dst_conn)
-                .map_err(|e| format!("Échec de l'initialisation de la sauvegarde SQLite : {e}"))?;
+            {
+                let backup =
+                    rusqlite::backup::Backup::new(&self.conn, &mut dst_conn).map_err(|e| {
+                        format!("Échec de l'initialisation de la sauvegarde SQLite : {e}")
+                    })?;
 
-            backup
-                .run_to_completion(100, std::time::Duration::from_millis(10), None)
-                .map_err(|e| format!("Erreur lors de l'exportation de la base SQLite : {e}"))?;
-            // dst_conn et backup sont fermés ici, libérant les verrous de fichier Windows
+                backup
+                    .run_to_completion(100, std::time::Duration::from_millis(10), None)
+                    .map_err(|e| format!("Erreur lors de l'exportation de la base SQLite : {e}"))?;
+            } // backup est libéré ici avant d'exécuter des requêtes sur dst_conn
+
+            // Finaliser le journal WAL et basculer la base exportée en mode journal autonome DELETE.
+            // Cela transfère toutes les pages WAL dans le fichier .db principal et supprime les fichiers -wal et -shm.
+            let _ = dst_conn.execute_batch(
+                "PRAGMA wal_checkpoint(TRUNCATE);
+                 PRAGMA journal_mode = DELETE;",
+            );
+
+            // dst_conn est explicitement fermé ici, libérant les verrous de fichier Windows
+            drop(dst_conn);
         }
 
         // 2. Vérification d'intégrité stricte sur le fichier temporaire avant tout remplacement
@@ -1214,14 +1249,30 @@ impl Storage {
                         .to_string(),
                 );
             }
-            // check_conn est fermé ici
+            // check_conn est explicitement fermé ici
+            drop(check_conn);
         }
 
         // 3. Remplacement atomique contrôlé vers la destination finale
         // Le fichier de destination existant (le cas échéant) n'est remplacé qu'après succès complet des étapes 1 et 2
         atomic_replace_file(&temp_path, dest_path)?;
 
-        // Désactiver le nettoyage du fichier temporaire puisqu'il a été déplacé avec succès
+        // Nettoyage garanti de tous les fichiers auxiliaires temporaires (-wal, -shm, -journal)
+        // créés spécifiquement pour le fichier temporaire de cet export
+        for aux in Self::sqlite_auxiliary_paths(&temp_path) {
+            if aux.exists() {
+                let _ = std::fs::remove_file(aux);
+            }
+        }
+
+        // Si l'ancienne destination avait des fichiers auxiliaires résiduels, les nettoyer également
+        for aux in Self::sqlite_auxiliary_paths(dest_path) {
+            if aux.exists() {
+                let _ = std::fs::remove_file(aux);
+            }
+        }
+
+        // Désactiver le nettoyage de temp_path puisqu'il a été déplacé avec succès vers dest_path
         std::mem::forget(cleanup);
 
         Ok(())
@@ -1853,5 +1904,81 @@ mod tests {
         let _ = std::fs::remove_file(&main_db_path);
         let _ = std::fs::remove_file(main_db_path.with_extension("db.pre_import_bak"));
         let _ = std::fs::remove_file(&bad_import_path);
+    }
+
+    #[test]
+    fn test_storage_export_produces_only_single_db_without_auxiliary_files() {
+        let base_dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let test_root = base_dir.join(format!("malvision_export_clean_test_{pid}_{nanos}"));
+        std::fs::create_dir_all(&test_root).unwrap();
+
+        let src_path = test_root.join("active_source.db");
+        let mut store = Storage::open_at_path(&src_path).unwrap();
+
+        // Créer des dossiers et connexions avec mots de passe chiffrés DPAPI
+        let f = store.create_folder("Dossier Production", None).unwrap();
+        store
+            .create_connection(sample_rdp_draft(
+                "Serveur Principal",
+                "192.168.1.100",
+                Some(f.id),
+            ))
+            .unwrap();
+
+        // 1. Export standard vers un sous-dossier d'export dédié
+        let export_dir = test_root.join("backups");
+        std::fs::create_dir_all(&export_dir).unwrap();
+        let dest_path = export_dir.join("malvision_backup_2026-11-10.db");
+
+        store
+            .export_database(&dest_path)
+            .expect("L'exportation doit réussir");
+
+        // 2. Vérifier que la destination finale existe et que son contenu est intègre
+        assert!(dest_path.exists(), "Le fichier exporté doit exister");
+        let summary = Storage::validate_import_file(&dest_path)
+            .expect("La sauvegarde exportée doit être intègre");
+        assert_eq!(summary.folders_count, 1);
+        assert_eq!(summary.connections_count, 1);
+
+        // 3. Vérifier qu'aucun fichier temporaire .tmp_export ou auxiliaire (-wal, -shm, -journal) ne subsiste
+        let entries: Vec<PathBuf> = std::fs::read_dir(&export_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .collect();
+
+        assert_eq!(
+            entries.len(),
+            1,
+            "Le dossier d'export ne doit contenir STRICTEMENT que le fichier .db final, trouvé: {:?}",
+            entries
+        );
+        assert_eq!(entries[0], dest_path);
+
+        // 4. Vérifier qu'aucun fichier .tmp_export-wal ou .tmp_export-shm n'a fuité dans test_root
+        let root_entries: Vec<PathBuf> = std::fs::read_dir(&test_root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .collect();
+
+        for entry in root_entries {
+            let name = entry.file_name().unwrap().to_string_lossy();
+            if name.starts_with('.') && name.contains("tmp_export") {
+                panic!("Fichier temporaire d'export non nettoyé : {name}");
+            }
+            if name.contains("tmp_export-wal") || name.contains("tmp_export-shm") {
+                panic!("Fichier auxiliaire WAL/SHM temporaire résiduel : {name}");
+            }
+        }
+
+        // Nettoyage
+        let _ = std::fs::remove_dir_all(&test_root);
     }
 }

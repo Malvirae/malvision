@@ -14,6 +14,7 @@ use windows_core::{PCWSTR, w};
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GITHUB_REPO: &str = "Malvirae/malvision";
+pub const MSG_NO_PUBLIC_RELEASE: &str = "Aucune version publique disponible pour le moment.";
 
 /// Représentation sémantique d'une version logicielle (Major.Minor.Patch).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +102,13 @@ pub struct ReleaseInfo {
 pub fn parse_release_json(json_str: &str) -> Result<ReleaseInfo, String> {
     let v: serde_json::Value =
         serde_json::from_str(json_str).map_err(|e| format!("JSON invalide : {e}"))?;
+
+    // Réponse standard de GitHub lorsque le dépôt est privé ou qu'aucune release publique n'existe
+    if let Some(msg) = v.get("message").and_then(|m| m.as_str())
+        && msg.eq_ignore_ascii_case("Not Found")
+    {
+        return Err(MSG_NO_PUBLIC_RELEASE.to_string());
+    }
 
     let is_draft = v["draft"].as_bool().unwrap_or(false);
     let is_prerelease = v["prerelease"].as_bool().unwrap_or(false);
@@ -385,7 +393,13 @@ fn parse_url(url: &str) -> Result<(String, u16, String), String> {
 /// Vérifie la dernière release publique disponible sur le dépôt GitHub.
 pub fn check_latest_release(repo: &str) -> Result<ReleaseInfo, String> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let body = winhttp_get(&url)?;
+    let body = winhttp_get(&url).map_err(|e| {
+        if e.contains("code HTTP 404") || e.contains("404") {
+            MSG_NO_PUBLIC_RELEASE.to_string()
+        } else {
+            e
+        }
+    })?;
     let json_str = String::from_utf8(body).map_err(|e| format!("Réponse UTF-8 invalide : {e}"))?;
     let mut info = parse_release_json(&json_str)?;
 
@@ -679,5 +693,16 @@ mod tests {
             extracted.as_deref(),
             Some("5d89be95c7c4ab5db2c4c7dc92875a759e6b08ca1856a49fd06667c09da2db25")
         );
+    }
+
+    #[test]
+    fn test_parse_release_json_github_not_found() {
+        let not_found_json = r#"{
+            "message": "Not Found",
+            "documentation_url": "https://docs.github.com/rest/releases/releases#get-the-latest-release"
+        }"#;
+        let res = parse_release_json(not_found_json);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), MSG_NO_PUBLIC_RELEASE);
     }
 }
