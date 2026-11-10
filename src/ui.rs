@@ -223,6 +223,9 @@ const DEFERRED_NEW_CONNECTION: usize = 2;
 const DEFERRED_NEW_FOLDER: usize = 3;
 const DEFERRED_EDIT_CONNECTION: usize = 4;
 const DEFERRED_OPEN_SETTINGS: usize = 5;
+const DEFERRED_APPLY_UPDATE_AND_EXIT: usize = 6;
+
+const WM_APP_UPDATE_PROGRESS: u32 = WM_APP + 110;
 
 // Message de notification de la zone de notification Windows (System Tray)
 pub const WM_TRAYICON: u32 = WM_APP + 102;
@@ -4907,8 +4910,14 @@ impl AppWindowState {
             sync_settings_with_real_startup_shortcut(&mut self.settings, &mut self.storage);
         }
 
-        let (maybe_settings, imported_data) =
-            run_settings_dialog(self.hwnd, &self.settings, &self.palette, &mut self.storage);
+        let active_count = self.sessions.tabs().len();
+        let (maybe_settings, imported_data) = run_settings_dialog(
+            self.hwnd,
+            &self.settings,
+            &self.palette,
+            &mut self.storage,
+            active_count,
+        );
 
         if let Some(new_settings) = maybe_settings {
             if !cfg!(test)
@@ -7983,6 +7992,7 @@ pub const IDC_SET_ADV_PATH_DISPLAY: usize = 4227;
 pub const IDC_SET_ADV_CHANGE_PATH: usize = 4228;
 pub const IDC_SET_ADV_OPEN_FOLDER: usize = 4229;
 pub const IDC_SET_ADV_RESET_DEFAULT: usize = 4230;
+pub const IDC_SET_UPDATE_MANUAL_DOWNLOAD: usize = 4231;
 #[allow(dead_code)]
 pub const IDC_SET_TAB_GENERAL: usize = 4290;
 #[allow(dead_code)]
@@ -8050,6 +8060,9 @@ struct SettingsDialogState {
     chk_auto_update: HWND,
     btn_check_update: HWND,
     btn_download_update: HWND,
+    btn_manual_download: HWND,
+    is_updating: bool,
+    active_sessions_count: usize,
     update_status_text: String,
     latest_release: Option<crate::updater::ReleaseInfo>,
 
@@ -8145,6 +8158,7 @@ impl SettingsDialogState {
             self.chk_auto_update,
             self.btn_check_update,
             self.btn_download_update,
+            self.btn_manual_download,
         ] {
             if !ctrl.is_invalid() {
                 let _ = unsafe { ShowWindow(ctrl, if t == 3 { SW_SHOW } else { SW_HIDE }) };
@@ -8168,6 +8182,36 @@ impl SettingsDialogState {
             if !ctrl.is_invalid() {
                 let _ = unsafe { ShowWindow(ctrl, if t == 5 { SW_SHOW } else { SW_HIDE }) };
             }
+        }
+    }
+}
+
+fn notify_update_status(dlg_hwnd_raw: isize, status: &str) {
+    let boxed = Box::new(status.to_string());
+    unsafe {
+        let hwnd = HWND(dlg_hwnd_raw as *mut _);
+        if IsWindow(Some(hwnd)).as_bool() {
+            let _ = PostMessageW(
+                Some(hwnd),
+                WM_APP_UPDATE_PROGRESS,
+                WPARAM(0),
+                LPARAM(Box::into_raw(boxed) as isize),
+            );
+        }
+    }
+}
+
+fn notify_update_error(dlg_hwnd_raw: isize, err: String) {
+    let boxed = Box::new(err);
+    unsafe {
+        let hwnd = HWND(dlg_hwnd_raw as *mut _);
+        if IsWindow(Some(hwnd)).as_bool() {
+            let _ = PostMessageW(
+                Some(hwnd),
+                WM_APP_UPDATE_PROGRESS,
+                WPARAM(1),
+                LPARAM(Box::into_raw(boxed) as isize),
+            );
         }
     }
 }
@@ -8237,6 +8281,7 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                             || id == IDC_SET_DATA_IMPORT
                             || id == IDC_SET_UPDATE_CHECK_NOW
                             || id == IDC_SET_UPDATE_DOWNLOAD
+                            || id == IDC_SET_UPDATE_MANUAL_DOWNLOAD
                             || id == IDC_SET_ADV_CHANGE_PATH
                             || id == IDC_SET_ADV_OPEN_FOLDER
                             || id == IDC_SET_ADV_RESET_DEFAULT
@@ -8271,6 +8316,31 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                                 let _ = InvalidateRect(Some(hwnd), None, true);
                             }
                         }
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_APP_UPDATE_PROGRESS => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut SettingsDialogState;
+                if !ptr.is_null() && lparam.0 != 0 {
+                    let state = &mut *ptr;
+                    let is_error = wparam.0 == 1;
+                    let text = *Box::from_raw(lparam.0 as *mut String);
+                    if is_error {
+                        state.is_updating = false;
+                        state.update_status_text = format!("Mise à jour impossible : {text}");
+                        let _ = EnableWindow(state.btn_check_update, true);
+                        let _ = EnableWindow(state.btn_download_update, true);
+                        let _ = EnableWindow(state.btn_manual_download, true);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        show_error_dialog(
+                            hwnd,
+                            "Mise à jour impossible",
+                            &format!("Impossible d'appliquer la mise à jour :\n\n{text}"),
+                        );
+                    } else {
+                        state.update_status_text = text;
+                        let _ = InvalidateRect(Some(hwnd), None, false);
                     }
                 }
                 LRESULT(0)
@@ -8844,7 +8914,7 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                         );
                         let _ = SelectObject(hdc, state.font_small.into());
                         let _ = SetTextColor(hdc, COLORREF(col_text_secondary()));
-                        let portable_notice = "• Malvision est distribué comme un exécutable portable unique Malvision.exe.\n• Le bouton « Télécharger la mise à jour » vérifie automatiquement l'intégrité SHA-256 officielle.\n• Pour appliquer la mise à jour : quittez Malvision et remplacez votre ancien fichier exécutable.\n• Toutes vos connexions et préférences restent intactes lors du remplacement.";
+                        let portable_notice = "• Malvision est distribué comme un exécutable portable unique Malvision.exe.\n• Le bouton « Mettre à jour et redémarrer » télécharge la version officielle, vérifie son empreinte SHA-256 et remplace automatiquement l'application sans intervention manuelle.\n• En cas d'erreur de lancement, l'ancienne version est automatiquement restaurée.\n• Toutes vos connexions et préférences restent intactes dans votre base SQLite.";
                         draw_text_multiline(
                             hdc,
                             portable_notice,
@@ -9165,6 +9235,7 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                             state.chk_auto_update,
                             state.btn_check_update,
                             state.btn_download_update,
+                            state.btn_manual_download,
                             state.btn_about_github,
                             state.btn_about_check_updates,
                             state.btn_ok,
@@ -9437,10 +9508,11 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                                         Some(info.version.to_string());
                                     state.latest_release = Some(info.clone());
                                     let _ = EnableWindow(state.btn_download_update, true);
+                                    let _ = EnableWindow(state.btn_manual_download, true);
                                     let _ = InvalidateRect(Some(hwnd), None, false);
 
                                     let msg = format!(
-                                        "Une nouvelle version de Malvision est disponible !\n\nVersion actuelle : v{}\nNouvelle version : v{}\nNom : {}\n\nCliquez sur « Télécharger la mise à jour » pour récupérer l'exécutable portable.",
+                                        "Une nouvelle version de Malvision est disponible !\n\nVersion actuelle : v{}\nNouvelle version : v{}\nNom : {}\n\nCliquez sur « Mettre à jour et redémarrer » pour l'installer automatiquement.",
                                         crate::updater::CURRENT_VERSION,
                                         info.version,
                                         info.name
@@ -9453,6 +9525,7 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                                     );
                                     state.latest_release = None;
                                     let _ = EnableWindow(state.btn_download_update, false);
+                                    let _ = EnableWindow(state.btn_manual_download, false);
                                     let _ = InvalidateRect(Some(hwnd), None, false);
                                     show_info_dialog(
                                         hwnd,
@@ -9489,6 +9562,9 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                             }
                         }
                     } else if id == IDC_SET_UPDATE_DOWNLOAD {
+                        if state.is_updating {
+                            return LRESULT(0);
+                        }
                         if let Some(info) = &state.latest_release
                             && let Some(asset) = &info.exe_asset
                         {
@@ -9497,7 +9573,140 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                                 show_error_dialog(
                                     hwnd,
                                     "Vérification d'intégrité impossible",
-                                    "Aucune empreinte cryptographique SHA-256 officielle n'a été trouvée pour cette release (ni dans les notes de version, ni dans SHA256SUMS.txt).\n\nPar mesure de sécurité stricte, le téléchargement est bloqué.",
+                                    "Aucune empreinte cryptographique SHA-256 officielle n'a été trouvée pour cette release (ni dans les notes de version, ni dans SHA256SUMS.txt).\n\nPar mesure de sécurité stricte, la mise à jour est bloquée.",
+                                );
+                                return LRESULT(0);
+                            }
+
+                            // 1. Avertissement sessions actives
+                            if state.active_sessions_count > 0 {
+                                let count = state.active_sessions_count;
+                                let msg = format!(
+                                    "{count} session(s) RDP active(s) sont actuellement ouvertes.\n\nMalvision doit fermer ces sessions et redémarrer pour appliquer la mise à jour.\n\nVoulez-vous continuer ?"
+                                );
+                                if !confirm_dialog(hwnd, "Sessions actives", &msg) {
+                                    return LRESULT(0);
+                                }
+                            }
+
+                            // 2. Bascule en état de mise à jour en cours
+                            state.is_updating = true;
+                            let _ = EnableWindow(state.btn_check_update, false);
+                            let _ = EnableWindow(state.btn_download_update, false);
+                            let _ = EnableWindow(state.btn_manual_download, false);
+                            state.update_status_text =
+                                "Téléchargement de la nouvelle version…".to_string();
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                            let _ = UpdateWindow(hwnd);
+
+                            // 3. Thread d'arrière-plan pour ne pas bloquer l'UI
+                            let asset_url = asset.download_url.clone();
+                            let expected_hash_str = expected_hash.unwrap().trim().to_string();
+                            let dlg_hwnd_raw = hwnd.0 as isize;
+                            let owner_hwnd_raw = state.owner.0 as isize;
+
+                            std::thread::spawn(move || {
+                                let updates_dir = match crate::updater::get_updates_temp_dir() {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        notify_update_error(dlg_hwnd_raw, e);
+                                        return;
+                                    }
+                                };
+                                let new_exe_temp = updates_dir.join("new_version.exe");
+                                if new_exe_temp.exists() {
+                                    let _ = std::fs::remove_file(&new_exe_temp);
+                                }
+
+                                notify_update_status(
+                                    dlg_hwnd_raw,
+                                    "Téléchargement de la nouvelle version…",
+                                );
+                                if let Err(e) = crate::updater::download_and_verify_asset(
+                                    &asset_url,
+                                    &new_exe_temp,
+                                    Some(&expected_hash_str),
+                                ) {
+                                    notify_update_error(
+                                        dlg_hwnd_raw,
+                                        format!("Échec du téléchargement : {e}"),
+                                    );
+                                    return;
+                                }
+
+                                notify_update_status(
+                                    dlg_hwnd_raw,
+                                    "Vérification de l'intégrité SHA-256…",
+                                );
+                                match crate::security::compute_file_sha256(&new_exe_temp) {
+                                    Ok(h) if h.eq_ignore_ascii_case(&expected_hash_str) => {}
+                                    _ => {
+                                        notify_update_error(
+                                            dlg_hwnd_raw,
+                                            "Empreinte cryptographique SHA-256 non conforme."
+                                                .to_string(),
+                                        );
+                                        return;
+                                    }
+                                }
+
+                                notify_update_status(
+                                    dlg_hwnd_raw,
+                                    "Préparation de l'installation…",
+                                );
+                                let prep = match crate::updater::prepare_update_helper(
+                                    &new_exe_temp,
+                                    &expected_hash_str,
+                                ) {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        notify_update_error(
+                                            dlg_hwnd_raw,
+                                            format!(
+                                                "Préparation de l'installation impossible : {e}"
+                                            ),
+                                        );
+                                        return;
+                                    }
+                                };
+
+                                notify_update_status(dlg_hwnd_raw, "Redémarrage de Malvision…");
+                                if let Err(e) = crate::updater::launch_helper_and_wait_ready(
+                                    &prep,
+                                    std::time::Duration::from_secs(5),
+                                ) {
+                                    notify_update_error(
+                                        dlg_hwnd_raw,
+                                        format!(
+                                            "Le processus auxiliaire de mise à jour n'a pas répondu : {e}"
+                                        ),
+                                    );
+                                    return;
+                                }
+
+                                // Fermer la boîte de dialogue et demander la fermeture propre et sortie du processus principal
+                                let owner_hwnd = HWND(owner_hwnd_raw as *mut _);
+                                let dlg_hwnd = HWND(dlg_hwnd_raw as *mut _);
+                                let _ =
+                                    PostMessageW(Some(dlg_hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                                let _ = PostMessageW(
+                                    Some(owner_hwnd),
+                                    WM_DEFERRED_ACTION,
+                                    WPARAM(DEFERRED_APPLY_UPDATE_AND_EXIT),
+                                    LPARAM(0),
+                                );
+                            });
+                        }
+                    } else if id == IDC_SET_UPDATE_MANUAL_DOWNLOAD {
+                        if let Some(info) = &state.latest_release
+                            && let Some(asset) = &info.exe_asset
+                        {
+                            let expected_hash = info.expected_exe_sha256.as_deref();
+                            if expected_hash.is_none() || expected_hash.unwrap().trim().is_empty() {
+                                show_error_dialog(
+                                    hwnd,
+                                    "Vérification d'intégrité impossible",
+                                    "Aucune empreinte SHA-256 officielle disponible.",
                                 );
                                 return LRESULT(0);
                             }
@@ -9511,9 +9720,7 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                                 "*.exe",
                             ) {
                                 state.update_status_text =
-                                    "Téléchargement et vérification SHA-256 en cours..."
-                                        .to_string();
-                                let _ = EnableWindow(state.btn_download_update, false);
+                                    "Téléchargement manuel en cours...".to_string();
                                 let _ = InvalidateRect(Some(hwnd), None, false);
                                 let _ = UpdateWindow(hwnd);
 
@@ -9523,38 +9730,25 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                                     expected_hash,
                                 ) {
                                     Ok(()) => {
-                                        let _ = EnableWindow(state.btn_download_update, true);
-                                        let sha256 =
-                                            crate::security::compute_file_sha256(&dest_path)
-                                                .unwrap_or_else(|_| "Vérifiée".to_string());
                                         state.update_status_text = format!(
-                                            "Version v{} téléchargée et vérifiée avec succès !",
+                                            "Version v{} enregistrée avec succès !",
                                             info.version
                                         );
                                         let _ = InvalidateRect(Some(hwnd), None, false);
                                         show_info_dialog(
                                             hwnd,
-                                            "Téléchargement réussi",
+                                            "Téléchargement manuel réussi",
                                             &format!(
-                                                "La version v{} a été téléchargée et vérifiée avec succès !\n\nFichier enregistré :\n{}\n\nEmpreinte SHA-256 valide :\n{}\n\nProcédure :\n1. Fermez Malvision.\n2. Remplacez votre exécutable existant par ce nouveau fichier.\n3. Relancez l'application.",
-                                                info.version,
-                                                dest_path.display(),
-                                                sha256
+                                                "Fichier enregistré :\n{}\n\nSHA-256 vérifié.",
+                                                dest_path.display()
                                             ),
                                         );
                                     }
                                     Err(err) => {
-                                        let _ = EnableWindow(state.btn_download_update, true);
                                         state.update_status_text =
                                             format!("Échec du téléchargement : {err}");
                                         let _ = InvalidateRect(Some(hwnd), None, false);
-                                        show_error_dialog(
-                                            hwnd,
-                                            "Échec du téléchargement",
-                                            &format!(
-                                                "Impossible de télécharger ou vérifier la mise à jour :\n{err}"
-                                            ),
-                                        );
+                                        show_error_dialog(hwnd, "Échec du téléchargement", &err);
                                     }
                                 }
                             }
@@ -9773,6 +9967,7 @@ fn run_settings_dialog(
     current: &AppSettings,
     palette: &GdiPalette,
     storage: &mut Storage,
+    active_sessions_count: usize,
 ) -> (Option<AppSettings>, bool) {
     unsafe {
         let hinstance = GetModuleHandleW(None).unwrap_or_default();
@@ -9883,6 +10078,9 @@ fn run_settings_dialog(
             chk_auto_update: HWND::default(),
             btn_check_update: HWND::default(),
             btn_download_update: HWND::default(),
+            btn_manual_download: HWND::default(),
+            is_updating: false,
+            active_sessions_count,
             update_status_text: "Recherche non effectuée".to_string(),
             latest_release: None,
             ed_adv_path: HWND::default(),
@@ -10354,17 +10552,32 @@ fn run_settings_dialog(
         let btn_download_update = create_dark_button(
             hwnd,
             hinstance.into(),
-            w!("Télécharger la mise à jour…"),
+            w!("Mettre à jour et redémarrer"),
             RECT {
                 left: content_x + dpi.scale(192),
                 top: dpi.scale(228),
-                right: content_x + dpi.scale(420),
+                right: content_x + dpi.scale(430),
                 bottom: dpi.scale(228) + dpi.scale(34),
             },
             IDC_SET_UPDATE_DOWNLOAD,
             palette.font_ui_bold,
         );
         let _ = EnableWindow(btn_download_update, false);
+
+        let btn_manual_download = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Téléchargement manuel (.exe)…"),
+            RECT {
+                left: content_x,
+                top: dpi.scale(398),
+                right: content_x + dpi.scale(250),
+                bottom: dpi.scale(398) + dpi.scale(30),
+            },
+            IDC_SET_UPDATE_MANUAL_DOWNLOAD,
+            palette.font_ui,
+        );
+        let _ = EnableWindow(btn_manual_download, false);
 
         // --- ONGLET 4 : CONTRÔLES AVANCÉ (EMPLACEMENT BASE SQLITE) ---
         let current_db_path = (*storage).db_path();
@@ -10529,6 +10742,7 @@ fn run_settings_dialog(
         dlg_state.chk_auto_update = chk_auto_update;
         dlg_state.btn_check_update = btn_check_update;
         dlg_state.btn_download_update = btn_download_update;
+        dlg_state.btn_manual_download = btn_manual_download;
 
         dlg_state.ed_adv_path = ed_adv_path;
         dlg_state.btn_adv_change_path = btn_adv_change_path;
@@ -10568,6 +10782,7 @@ fn run_settings_dialog(
             chk_auto_update,
             btn_check_update,
             btn_download_update,
+            btn_manual_download,
             ed_adv_path,
             btn_adv_change_path,
             btn_adv_open_folder,
@@ -11369,6 +11584,11 @@ unsafe extern "system" fn main_wnd_proc(
                         }
                         DEFERRED_OPEN_SETTINGS => {
                             (*ptr).open_settings_dialog();
+                        }
+                        DEFERRED_APPLY_UPDATE_AND_EXIT => {
+                            crate::single_instance::prepare_for_voluntary_restart();
+                            (*ptr).perform_clean_exit();
+                            std::process::exit(0);
                         }
                         _ => {}
                     }

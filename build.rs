@@ -29,8 +29,8 @@ fn main() {
         let rc_content = format!(
             r#"#pragma code_page(65001)
 1 VERSIONINFO
-FILEVERSION 1,0,3,0
-PRODUCTVERSION 1,0,3,0
+FILEVERSION 1,0,4,0
+PRODUCTVERSION 1,0,4,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -43,8 +43,8 @@ BEGIN
         BEGIN
             VALUE "ProductName", "MALVISION\0"
             VALUE "FileDescription", "Malvision Remote Connection Manager\0"
-            VALUE "FileVersion", "1.0.3.0\0"
-            VALUE "ProductVersion", "1.0.3\0"
+            VALUE "FileVersion", "1.0.4.0\0"
+            VALUE "ProductVersion", "1.0.4\0"
             VALUE "InternalName", "Malvision\0"
             VALUE "OriginalFilename", "Malvision.exe\0"
             VALUE "LegalCopyright", "Copyright (c) 2026 Malvirae\0"
@@ -53,8 +53,8 @@ BEGIN
         BEGIN
             VALUE "ProductName", "MALVISION\0"
             VALUE "FileDescription", "Malvision Remote Connection Manager\0"
-            VALUE "FileVersion", "1.0.3.0\0"
-            VALUE "ProductVersion", "1.0.3\0"
+            VALUE "FileVersion", "1.0.4.0\0"
+            VALUE "ProductVersion", "1.0.4\0"
             VALUE "InternalName", "Malvision\0"
             VALUE "OriginalFilename", "Malvision.exe\0"
             VALUE "LegalCopyright", "Copyright (c) 2026 Malvirae\0"

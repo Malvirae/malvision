@@ -22,7 +22,18 @@ use windows::Win32::UI::HiDpi::{
 };
 
 fn main() {
-    // 1. Contrôle d'instance unique pour la session Windows interactive
+    // 0. Interception prioritaire : mode auxiliaire de mise à jour différée (--apply-update)
+    // Ce mode s'exécute sans interface, sans toucher à SQLite ni au mutex d'instance unique.
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 2 && args[1] == "--apply-update" {
+        updater::run_apply_update_mode(&args[2..]);
+        return;
+    }
+
+    // 1. Nettoyage préventif des fichiers résiduels d'une éventuelle mise à jour précédente (.bak, helper)
+    updater::cleanup_leftover_update_files();
+
+    // 2. Contrôle d'instance unique pour la session Windows interactive
     // Si une instance de Malvision est déjà active (visible ou minimisée dans le System Tray),
     // elle est immédiatement réactivée et restaurée, et le processus secondaire quitte.
     let _instance_guard = if !cfg!(test) {

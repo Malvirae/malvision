@@ -2,11 +2,22 @@
 
 Application native **Windows 11 x64** de gestion de connexions distantes, écrite en **Rust** avec `windows-rs` (Win32 natif + COM/ActiveX + SQLite embarqué + DPAPI).
 
-**Version actuelle :** `1.0.3` (V1.0.3 Stable Portable)
+**Version actuelle :** `1.0.4` (V1.0.4 Stable Portable)
 
 ---
 
-## Fonctionnalités principales (V1.0.3)
+## Fonctionnalités principales (V1.0.4)
+
+- **Mise à jour automatique en place avec remplacement et redémarrage (V1.0.4)** :
+  - **Expérience « Un clic » moderne** : bouton proéminent **« Mettre à jour et redémarrer »** dans Paramètres > Mises à jour dès qu'une version supérieure est détectée.
+  - **Remplacement direct sans installateur** : résout définitivement l'erreur Windows `0x80070005 — Accès refusé` liée au verrouillage d'image PE de l'exécutable en cours d'exécution, sans exiger de l'utilisateur qu'il déplace ou copie manuellement le fichier.
+  - **Single Portable Executable garanti** : l'application reste distribuée sous la forme d'un unique binaire autonome (`Malvision.exe`). Aucun installateur tiers, aucun service Windows en arrière-plan, aucune tâche planifiée permanente.
+  - **Processus relais éphémère sécurisé** : Malvision utilise une copie temporaire de son propre binaire lancée en mode relais silencieux (`--apply-update <auth_token>`), contournant le mutex d'instance unique et attendant la fin propre du processus parent avant de procéder au remplacement.
+  - **Contrôle d'intégrité SHA-256 strict** : vérification cryptographique complète de l'archive téléchargée et du binaire installé en place.
+  - **Sauvegarde et Rollback automatique** : création préalable d'un fichier de secours `Malvision.exe.bak`. En cas d'échec du remplacement ou de plantage au redémarrage, la version précédente est instantanément et automatiquement restaurée.
+  - **Protection des sessions actives** : détection des sessions RDP en cours avec boîte de dialogue d'avertissement et confirmation explicite avant fermeture de l'application.
+  - **Nettoyage automatique** : suppression transparente des résidus temporaires et sauvegardes `.bak` lors du lancement normal ultérieur.
+  - **Option manuelle conservée** : un bouton « Téléchargement manuel (.exe)… » reste accessible pour les utilisateurs souhaitant enregistrer l'exécutable dans un emplacement de leur choix.
 
 - **Source unique de vérité pour le moteur de mises à jour (V1.0.3)** :
   - **Élimination de la duplication de version** : suppression de la constante codée en dur `SemVer::CURRENT` au profit de `CARGO_PKG_VERSION` via la fonction centralisée `current_semver()`.

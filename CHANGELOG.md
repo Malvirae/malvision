@@ -2,6 +2,35 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
+## [1.0.4] — Mise à jour automatique avec remplacement et redémarrage (2026-11-10)
+
+### Ajouté & Amélioré
+- **Mise à jour automatique en place avec redémarrage transparent** :
+  - Ajout du bouton proéminent **« Mettre à jour et redémarrer »** dans l'onglet Paramètres > Mises à jour lors de la détection d'une nouvelle version sur GitHub Releases.
+  - Élimination définitive de l'erreur Windows `0x80070005 — Accès refusé` causée par la tentative d'écriture directe sur le binaire `Malvision.exe` verrouillé par le système d'exploitation.
+  - Parcours utilisateur entièrement automatisé : téléchargement en arrière-plan, vérification SHA-256, fermeture propre, remplacement atomique, relance immédiate de Malvision et affichage de la nouvelle version.
+  - Conservation d'un bouton secondaire discret « Téléchargement manuel (.exe)… » pour les utilisateurs souhaitant enregistrer le fichier manuellement via `IFileSaveDialog`.
+- **Architecture relais éphémère sans installateur externe (Single Portable Executable)** :
+  - Maintien rigoureux du principe d'un seul fichier exécutable portable distribué (`Malvision.exe`), sans installateur externe (InnoSetup, MSI, etc.), sans service d'arrière-plan permanent et sans tâche planifiée Windows.
+  - Utilisation de `Malvision.exe` lui-même comme processus relais éphémère exécuté depuis `%LOCALAPPDATA%\Malvision\updates\malvision_updater.exe` avec le commutateur interne `--apply-update <auth_token>`.
+  - Contournement immédiat du mutex d'instance unique et des initialisations lourdes (ActiveX, SQLite, interface Win32) dès l'interception de l'argument `--apply-update`.
+- **Sécurité, Intégrité et Rollback automatique** :
+  - **Jeton d'authentification unique (auth_token)** : généré de manière cryptographique et transmis au helper, vérifié contre un manifeste horodaté stocké dans `%LOCALAPPDATA%\Malvision\updates\update_manifest.json` avec expiration stricte (5 minutes).
+  - **Validation de la cible et du processus parent** : contrôle du PID parent et validation du chemin de l'image exécutable via `QueryFullProcessImageNameW`, empêchant tout déclenchement non sollicité ou détournement de processus.
+  - **Attente active de libération** : surveillance de la terminaison du processus parent via `WaitForSingleObject` sur le handle de processus `SYNCHRONIZE`, garantissant la libération complète du verrou d'image par le noyau Windows.
+  - **Remplacement atomique avec sauvegarde de secours** : renommage préalable de l'exécutable actif vers `Malvision.exe.bak`, déplacement du nouveau binaire vers son emplacement cible, et re-vérification immédiate du SHA-256 du fichier final.
+  - **Rollback automatique** : en cas d'erreur de remplacement, d'incohérence d'empreinte SHA-256 ou d'échec de démarrage de la nouvelle version dans les 1,5 seconde, la version précédente (`Malvision.exe.bak`) est automatiquement restaurée en place.
+  - **Protection des sessions distantes** : détection des sessions RDP actives avec boîte de dialogue d'avertissement et confirmation explicite avant toute fermeture de l'application. Les processus externes AnyDesk et RustDesk ne sont jamais interrompus.
+  - **Nettoyage automatique des résidus** : purge transparente des fichiers `.bak` et du dossier de mise à jour au démarrage normal de Malvision (`cleanup_leftover_update_files`).
+
+### Testé
+- Suite de tests automatisés étendue à **79 tests (100 % passants)** :
+  - `test_manifest_serialization_and_validation` : validation complète du format JSON du manifeste, des champs obligatoires et de la détection de corruptions.
+  - `test_atomic_replacement_and_rollback_on_hash_mismatch` : test d'intégration simulant le renommage en `.bak`, la détection d'une altération de hash et la restauration automatique du binaire d'origine.
+  - `test_cleanup_leftover_update_files` : test de détection et purge des résidus `.bak` et fichiers temporaires de mise à jour.
+  - `test_in_use_file_lock_reproduction_and_wait` : reproduction du verrouillage de fichier en cours d'exécution sous Windows (reproduction de l'erreur `0x80070005`) et validation du remplacement immédiat dès la libération du handle.
+  - Mise à jour de la matrice de versions SemVer (`test_semver_comparison_matrix_for_v104` et `test_current_semver_matches_cargo_pkg_version`).
+
 ## [1.0.3] — Correctif de comparaison des versions GitHub (2026-11-10)
 
 ### Corrigé
