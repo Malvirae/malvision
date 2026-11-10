@@ -15,7 +15,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const CURRENT_SCHEMA_VERSION: i32 = 3;
+const CURRENT_SCHEMA_VERSION: i32 = 4;
 
 /// Résumé du diagnostic et du résultat d'un import de configuration SQLite.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,6 +306,24 @@ impl Storage {
                 .map_err(|e| format!("Échec de validation de la migration SQLite v3 : {e}"))?;
         }
 
+        if version < 4 {
+            let tx = self
+                .conn
+                .transaction()
+                .map_err(|e| format!("Échec d'ouverture de transaction de migration v4 : {e}"))?;
+
+            // Ajouter la colonne is_priority avec valeur par défaut 0
+            tx.execute_batch(
+                "ALTER TABLE connections ADD COLUMN is_priority INTEGER NOT NULL DEFAULT 0;
+                 CREATE INDEX IF NOT EXISTS idx_connections_priority ON connections(is_priority, name);
+                 PRAGMA user_version = 4;",
+            )
+            .map_err(|e| format!("Échec de la migration SQLite v4 : {e}"))?;
+
+            tx.commit()
+                .map_err(|e| format!("Échec de validation de la migration SQLite v4 : {e}"))?;
+        }
+
         if version > CURRENT_SCHEMA_VERSION {
             return Err(format!(
                 "La base de données (schéma v{version}) est plus récente que cette version de Malvision (schéma v{CURRENT_SCHEMA_VERSION})."
@@ -447,6 +465,14 @@ impl Storage {
                 params![val, folder_id],
             )
             .map_err(|e| format!("Erreur mise à jour état dossier : {e}"))?;
+        Ok(())
+    }
+
+    pub fn set_all_folders_expanded(&mut self, expanded: bool) -> Result<(), String> {
+        let val = i32::from(expanded);
+        self.conn
+            .execute("UPDATE folders SET is_expanded = ?1", params![val])
+            .map_err(|e| format!("Erreur mise à jour globale état dossiers : {e}"))?;
         Ok(())
     }
 
@@ -624,12 +650,12 @@ impl Storage {
             .execute(
                 "INSERT INTO connections (
                     folder_id, name, protocol, host, port, username, domain, description,
-                    is_favorite, save_password, encrypted_password, dynamic_resolution,
+                    is_favorite, is_priority, save_password, encrypted_password, dynamic_resolution,
                     redirect_clipboard, sort_order, created_at, updated_at
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-                    ?9, ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?15
+                    ?9, ?10, ?11, ?12, ?13,
+                    ?14, ?15, ?16, ?16
                  )",
                 params![
                     draft.folder_id,
@@ -641,6 +667,7 @@ impl Storage {
                     draft.domain,
                     draft.description,
                     i32::from(draft.is_favorite),
+                    i32::from(draft.is_priority),
                     save_pwd_flag,
                     encrypted_blob,
                     i32::from(draft.dynamic_resolution),
@@ -683,10 +710,10 @@ impl Storage {
             tx.execute(
                 "UPDATE connections SET
                     folder_id = ?1, name = ?2, protocol = ?3, host = ?4, port = ?5,
-                    username = ?6, domain = ?7, description = ?8, is_favorite = ?9,
+                    username = ?6, domain = ?7, description = ?8, is_favorite = ?9, is_priority = ?10,
                     save_password = 0, encrypted_password = NULL,
-                    dynamic_resolution = ?10, redirect_clipboard = ?11, updated_at = ?12
-                 WHERE id = ?13",
+                    dynamic_resolution = ?11, redirect_clipboard = ?12, updated_at = ?13
+                 WHERE id = ?14",
                 params![
                     draft.folder_id,
                     draft.name,
@@ -697,6 +724,7 @@ impl Storage {
                     draft.domain,
                     draft.description,
                     i32::from(draft.is_favorite),
+                    i32::from(draft.is_priority),
                     i32::from(draft.dynamic_resolution),
                     i32::from(draft.redirect_clipboard),
                     now,
@@ -711,10 +739,10 @@ impl Storage {
             tx.execute(
                 "UPDATE connections SET
                     folder_id = ?1, name = ?2, protocol = ?3, host = ?4, port = ?5,
-                    username = ?6, domain = ?7, description = ?8, is_favorite = ?9,
-                    save_password = 1, encrypted_password = ?10,
-                    dynamic_resolution = ?11, redirect_clipboard = ?12, updated_at = ?13
-                 WHERE id = ?14",
+                    username = ?6, domain = ?7, description = ?8, is_favorite = ?9, is_priority = ?10,
+                    save_password = 1, encrypted_password = ?11,
+                    dynamic_resolution = ?12, redirect_clipboard = ?13, updated_at = ?14
+                 WHERE id = ?15",
                 params![
                     draft.folder_id,
                     draft.name,
@@ -725,6 +753,7 @@ impl Storage {
                     draft.domain,
                     draft.description,
                     i32::from(draft.is_favorite),
+                    i32::from(draft.is_priority),
                     encrypted_blob,
                     i32::from(draft.dynamic_resolution),
                     i32::from(draft.redirect_clipboard),
@@ -738,9 +767,9 @@ impl Storage {
             tx.execute(
                 "UPDATE connections SET
                     folder_id = ?1, name = ?2, protocol = ?3, host = ?4, port = ?5,
-                    username = ?6, domain = ?7, description = ?8, is_favorite = ?9,
-                    dynamic_resolution = ?10, redirect_clipboard = ?11, updated_at = ?12
-                 WHERE id = ?13",
+                    username = ?6, domain = ?7, description = ?8, is_favorite = ?9, is_priority = ?10,
+                    dynamic_resolution = ?11, redirect_clipboard = ?12, updated_at = ?13
+                 WHERE id = ?14",
                 params![
                     draft.folder_id,
                     draft.name,
@@ -751,6 +780,7 @@ impl Storage {
                     draft.domain,
                     draft.description,
                     i32::from(draft.is_favorite),
+                    i32::from(draft.is_priority),
                     i32::from(draft.dynamic_resolution),
                     i32::from(draft.redirect_clipboard),
                     now,
@@ -798,7 +828,7 @@ impl Storage {
         self.conn
             .query_row(
                 "SELECT id, folder_id, name, protocol, host, port, username, domain, description,
-                        is_favorite, save_password,
+                        is_favorite, is_priority, save_password,
                         (encrypted_password IS NOT NULL AND length(encrypted_password) > 0) AS has_pwd,
                         dynamic_resolution, redirect_clipboard, sort_order,
                         created_at, updated_at, last_connected_at
@@ -815,7 +845,7 @@ impl Storage {
             .conn
             .prepare(
                 "SELECT id, folder_id, name, protocol, host, port, username, domain, description,
-                        is_favorite, save_password,
+                        is_favorite, is_priority, save_password,
                         (encrypted_password IS NOT NULL AND length(encrypted_password) > 0) AS has_pwd,
                         dynamic_resolution, redirect_clipboard, sort_order,
                         created_at, updated_at, last_connected_at
@@ -846,7 +876,7 @@ impl Storage {
             .conn
             .prepare(
                 "SELECT id, folder_id, name, protocol, host, port, username, domain, description,
-                        is_favorite, save_password,
+                        is_favorite, is_priority, save_password,
                         (encrypted_password IS NOT NULL AND length(encrypted_password) > 0) AS has_pwd,
                         dynamic_resolution, redirect_clipboard, sort_order,
                         created_at, updated_at, last_connected_at
@@ -857,7 +887,7 @@ impl Storage {
                     OR lower(domain) LIKE ?1
                     OR lower(description) LIKE ?1
                     OR lower(protocol) LIKE ?1
-                 ORDER BY is_favorite DESC, name COLLATE NOCASE ASC, id ASC",
+                 ORDER BY is_favorite DESC, is_priority DESC, name COLLATE NOCASE ASC, id ASC",
             )
             .map_err(|e| format!("Erreur préparation search_connections : {e}"))?;
 
@@ -937,6 +967,25 @@ impl Storage {
         Ok(())
     }
 
+    pub fn set_connection_priority(
+        &mut self,
+        connection_id: i64,
+        priority: bool,
+    ) -> Result<(), String> {
+        let now = unix_timestamp();
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE connections SET is_priority = ?1, updated_at = ?2 WHERE id = ?3",
+                params![i32::from(priority), now, connection_id],
+            )
+            .map_err(|e| format!("Erreur mise à jour priorité : {e}"))?;
+        if affected == 0 {
+            return Err(format!("La connexion #{connection_id} n'existe pas."));
+        }
+        Ok(())
+    }
+
     pub fn move_connection(
         &mut self,
         connection_id: i64,
@@ -984,12 +1033,12 @@ impl Storage {
             .execute(
                 "INSERT INTO connections (
                     folder_id, name, protocol, host, port, username, domain, description,
-                    is_favorite, save_password, encrypted_password, dynamic_resolution,
+                    is_favorite, is_priority, save_password, encrypted_password, dynamic_resolution,
                     redirect_clipboard, sort_order, created_at, updated_at
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-                    ?9, ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?15
+                    ?9, ?10, ?11, ?12, ?13,
+                    ?14, ?15, ?16, ?16
                  )",
                 params![
                     orig.folder_id,
@@ -1001,6 +1050,7 @@ impl Storage {
                     orig.domain,
                     orig.description,
                     i32::from(orig.is_favorite),
+                    i32::from(orig.is_priority),
                     i32::from(orig.save_password),
                     blob,
                     i32::from(orig.dynamic_resolution),
@@ -1495,14 +1545,15 @@ impl Storage {
             domain: row.get(7)?,
             description: row.get(8)?,
             is_favorite: row.get::<_, i32>(9)? != 0,
-            save_password: row.get::<_, i32>(10)? != 0,
-            has_saved_password: row.get::<_, i32>(11)? != 0,
-            dynamic_resolution: row.get::<_, i32>(12)? != 0,
-            redirect_clipboard: row.get::<_, i32>(13)? != 0,
-            sort_order: row.get(14)?,
-            created_at: row.get(15)?,
-            updated_at: row.get(16)?,
-            last_connected_at: row.get(17)?,
+            is_priority: row.get::<_, i32>(10)? != 0,
+            save_password: row.get::<_, i32>(11)? != 0,
+            has_saved_password: row.get::<_, i32>(12)? != 0,
+            dynamic_resolution: row.get::<_, i32>(13)? != 0,
+            redirect_clipboard: row.get::<_, i32>(14)? != 0,
+            sort_order: row.get(15)?,
+            created_at: row.get(16)?,
+            updated_at: row.get(17)?,
+            last_connected_at: row.get(18)?,
         })
     }
 }
@@ -1546,6 +1597,7 @@ mod tests {
             domain: "LAB".to_string(),
             description: "Serveur de test".to_string(),
             is_favorite: false,
+            is_priority: false,
             save_password: true,
             password: SecretString::new("MonSecretDPAPI!42".to_string()),
             keep_existing_password: false,
@@ -1557,7 +1609,7 @@ mod tests {
     #[test]
     fn test_schema_migration_and_settings() {
         let mut store = Storage::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 3);
+        assert_eq!(store.schema_version().unwrap(), 4);
         assert_eq!(
             store.get_setting("theme_mode").unwrap().as_deref(),
             Some("dark")
@@ -2010,5 +2062,133 @@ mod tests {
 
         // Nettoyage
         let _ = std::fs::remove_dir_all(&test_root);
+    }
+
+    #[test]
+    fn test_set_connection_priority_and_duplicate() {
+        let mut store = Storage::open_in_memory().unwrap();
+        let mut draft = sample_rdp_draft("Server Prio", "192.168.1.50", None);
+        draft.is_priority = true;
+        let created = store.create_connection(draft).unwrap();
+        assert!(created.is_priority);
+
+        // Retirer la priorité
+        store.set_connection_priority(created.id, false).unwrap();
+        let reloaded = store.get_connection(created.id).unwrap().unwrap();
+        assert!(!reloaded.is_priority);
+
+        // Remettre la priorité
+        store.set_connection_priority(created.id, true).unwrap();
+        let reloaded = store.get_connection(created.id).unwrap().unwrap();
+        assert!(reloaded.is_priority);
+
+        // Dupliquer : la priorité doit être copiée
+        let dup = store.duplicate_connection(created.id).unwrap();
+        assert!(dup.is_priority);
+        assert_eq!(dup.name, "Server Prio (Copie)");
+    }
+
+    #[test]
+    fn test_folder_expansion_individual_and_global() {
+        let mut store = Storage::open_in_memory().unwrap();
+        let f1 = store.create_folder("Dossier 1", None).unwrap();
+        let f2 = store.create_folder("Dossier 2", None).unwrap();
+        let f3 = store.create_folder("Sous-dossier 1A", Some(f1.id)).unwrap();
+
+        // Par défaut, les dossiers sont créés dépliés (is_expanded = true)
+        assert!(f1.is_expanded);
+        assert!(f2.is_expanded);
+        assert!(f3.is_expanded);
+
+        // Replier individuellement f1 et f3, garder f2 déplié
+        store.set_folder_expanded(f1.id, false).unwrap();
+        store.set_folder_expanded(f3.id, false).unwrap();
+
+        let list = store.list_folders().unwrap();
+        let find_f = |id| list.iter().find(|f| f.id == id).unwrap().is_expanded;
+        assert!(!find_f(f1.id));
+        assert!(find_f(f2.id));
+        assert!(!find_f(f3.id));
+
+        // Action globale "Tout replier"
+        store.set_all_folders_expanded(false).unwrap();
+        let list = store.list_folders().unwrap();
+        for f in &list {
+            assert!(!f.is_expanded);
+        }
+
+        // Action globale "Tout déplier"
+        store.set_all_folders_expanded(true).unwrap();
+        let list = store.list_folders().unwrap();
+        for f in &list {
+            assert!(f.is_expanded);
+        }
+    }
+
+    #[test]
+    fn test_migration_v4_preserves_data() {
+        let temp_dir = std::env::temp_dir().join(format!("malvision_mig_v4_{}", unix_timestamp()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let db_path = temp_dir.join("test_mig.db");
+
+        // Créer manuellement une base de données simulant un schéma v3 (sans colonne is_priority)
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE folders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    parent_id INTEGER NULL,
+                    name TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    is_expanded INTEGER NOT NULL DEFAULT 1,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE connections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    folder_id INTEGER NULL,
+                    name TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    host TEXT NOT NULL,
+                    port INTEGER NOT NULL DEFAULT 3389,
+                    username TEXT NOT NULL DEFAULT '',
+                    domain TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    is_favorite INTEGER NOT NULL DEFAULT 0,
+                    save_password INTEGER NOT NULL DEFAULT 0,
+                    encrypted_password BLOB NULL,
+                    dynamic_resolution INTEGER NOT NULL DEFAULT 1,
+                    redirect_clipboard INTEGER NOT NULL DEFAULT 1,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    last_connected_at INTEGER NULL
+                );
+                CREATE TABLE recent_connections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    connection_id INTEGER NOT NULL,
+                    connected_at INTEGER NOT NULL
+                );
+                CREATE TABLE settings (
+                    key TEXT PRIMARY KEY NOT NULL,
+                    value TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                INSERT INTO connections (name, protocol, host, created_at, updated_at) VALUES ('Old Server', 'rdp', '10.0.0.1', 1000, 1000);
+                PRAGMA user_version = 3;",
+            ).unwrap();
+        }
+
+        // Ouvrir avec Malvision Storage : la migration v4 doit s'exécuter
+        let store = Storage::open_at_path(&db_path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 4);
+
+        let conns = store.list_connections().unwrap();
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].name, "Old Server");
+        assert!(!conns[0].is_priority); // Par défaut false
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

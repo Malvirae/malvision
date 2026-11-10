@@ -75,6 +75,7 @@ pub struct ConnectionItem {
     pub domain: String,
     pub description: String,
     pub is_favorite: bool,
+    pub is_priority: bool,
     pub save_password: bool,
     pub has_saved_password: bool,
     pub dynamic_resolution: bool,
@@ -113,6 +114,7 @@ pub struct ConnectionDraft {
     pub domain: String,
     pub description: String,
     pub is_favorite: bool,
+    pub is_priority: bool,
     pub save_password: bool,
     /// Mot de passe saisi ou modifié dans le formulaire (sera chiffré avec DPAPI si `save_password` est vrai,
     /// ou effacé s'il est vide et que `keep_existing_password` est faux).
@@ -226,9 +228,13 @@ pub fn collect_tree_ordered_connections(
     for c in connections {
         conns_by_folder.entry(c.folder_id).or_default().push(c);
     }
-    // Trier les connexions de chaque dossier par ordre alphabétique insensible à la casse
+    // Trier les connexions de chaque dossier : prioritaires d'abord (alphabétique), puis normales (alphabétique)
     for list in conns_by_folder.values_mut() {
-        list.sort_by_key(|a| a.name.to_lowercase());
+        list.sort_by(|a, b| {
+            b.is_priority
+                .cmp(&a.is_priority)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
     }
 
     let mut result = Vec::new();
@@ -286,6 +292,7 @@ mod tests {
             domain: String::new(),
             description: " Contrôleur ".to_string(),
             is_favorite: true,
+            is_priority: false,
             save_password: false,
             password: SecretString::new("MonMotDePasse".to_string()),
             keep_existing_password: false,
@@ -315,6 +322,7 @@ mod tests {
             domain: String::new(),
             description: String::new(),
             is_favorite: false,
+            is_priority: false,
             save_password: false,
             password: SecretString::new(String::new()),
             keep_existing_password: false,
@@ -386,6 +394,7 @@ mod tests {
                 domain: String::new(),
                 description: String::new(),
                 is_favorite: false,
+                is_priority: false,
                 save_password: false,
                 has_saved_password: false,
                 dynamic_resolution: true,
@@ -406,6 +415,7 @@ mod tests {
                 domain: String::new(),
                 description: String::new(),
                 is_favorite: false,
+                is_priority: false,
                 save_password: false,
                 has_saved_password: false,
                 dynamic_resolution: true,
@@ -427,6 +437,7 @@ mod tests {
                 domain: String::new(),
                 description: String::new(),
                 is_favorite: false,
+                is_priority: false,
                 save_password: false,
                 has_saved_password: false,
                 dynamic_resolution: true,
@@ -447,6 +458,7 @@ mod tests {
                 domain: String::new(),
                 description: String::new(),
                 is_favorite: false,
+                is_priority: false,
                 save_password: false,
                 has_saved_password: false,
                 dynamic_resolution: true,
@@ -468,6 +480,7 @@ mod tests {
                 domain: String::new(),
                 description: String::new(),
                 is_favorite: false,
+                is_priority: false,
                 save_password: false,
                 has_saved_password: false,
                 dynamic_resolution: true,
@@ -489,6 +502,7 @@ mod tests {
                 domain: String::new(),
                 description: String::new(),
                 is_favorite: false,
+                is_priority: false,
                 save_password: false,
                 has_saved_password: false,
                 dynamic_resolution: true,
@@ -510,6 +524,7 @@ mod tests {
                 domain: String::new(),
                 description: String::new(),
                 is_favorite: true,
+                is_priority: false,
                 save_password: false,
                 has_saved_password: false,
                 dynamic_resolution: true,
@@ -541,6 +556,97 @@ mod tests {
                 "Serveur RDS",
                 "Machine Client A",
                 "Machine Client B",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_priority_connections_sorting_and_rules() {
+        let folders = vec![
+            Folder {
+                id: 1,
+                parent_id: None,
+                name: "Clients".to_string(),
+                sort_order: 0,
+                is_expanded: true,
+                created_at: 0,
+                updated_at: 0,
+            },
+            Folder {
+                id: 2,
+                parent_id: Some(1),
+                name: "Infrastructure".to_string(),
+                sort_order: 0,
+                is_expanded: false,
+                created_at: 0,
+                updated_at: 0,
+            },
+        ];
+
+        let make_conn = |id, fid, name: &str, is_fav, is_prio| ConnectionItem {
+            id,
+            folder_id: fid,
+            name: name.to_string(),
+            protocol: Protocol::Rdp,
+            host: "10.0.0.1".to_string(),
+            port: 3389,
+            username: "admin".to_string(),
+            domain: String::new(),
+            description: String::new(),
+            is_favorite: is_fav,
+            is_priority: is_prio,
+            save_password: false,
+            has_saved_password: false,
+            dynamic_resolution: true,
+            redirect_clipboard: true,
+            sort_order: 0,
+            created_at: 0,
+            updated_at: 0,
+            last_connected_at: None,
+        };
+
+        let connections = vec![
+            // Dans dossier 1 ("Clients") :
+            // Normales
+            make_conn(1, Some(1), "Serveur sauvegarde", false, false),
+            make_conn(2, Some(1), "Serveur fichiers", true, false), // Favori mais non prioritaire
+            // Prioritaires
+            make_conn(3, Some(1), "Serveur RDS", false, true),
+            make_conn(4, Some(1), "Serveur AD", true, true), // Favori ET prioritaire
+            // Dans sous-dossier 2 ("Infrastructure")
+            make_conn(5, Some(2), "Switch Core", false, false),
+            make_conn(6, Some(2), "Routeur BGP", false, true), // Prioritaire dans son sous-dossier
+            // Racine
+            make_conn(7, None, "Z-Normale", false, false),
+            make_conn(8, None, "A-Normale", false, false),
+            make_conn(9, None, "M-Prioritaire", false, true),
+        ];
+
+        let ordered = collect_tree_ordered_connections(&folders, &connections);
+        let names: Vec<&str> = ordered.iter().map(|c| c.name.as_str()).collect();
+
+        // Ordre attendu :
+        // 1. Racine :
+        //    a. Prioritaires (alphabétique) : "M-Prioritaire"
+        //    b. Normales (alphabétique) : "A-Normale", "Z-Normale"
+        // 2. Dossier "Clients" :
+        //    a. Connexions prioritaires directes (alphabétique) : "Serveur AD", "Serveur RDS"
+        //    b. Connexions normales directes (alphabétique) : "Serveur fichiers", "Serveur sauvegarde"
+        //    c. Sous-dossier "Infrastructure" :
+        //       - Prioritaire : "Routeur BGP"
+        //       - Normale : "Switch Core"
+        assert_eq!(
+            names,
+            vec![
+                "M-Prioritaire",
+                "A-Normale",
+                "Z-Normale",
+                "Serveur AD",
+                "Serveur RDS",
+                "Serveur fichiers",
+                "Serveur sauvegarde",
+                "Routeur BGP",
+                "Switch Core",
             ]
         );
     }

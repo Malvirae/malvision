@@ -31,13 +31,14 @@ use windows::Win32::UI::Controls::{
     CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDIS_HOT, CDIS_SELECTED, CDRF_NOTIFYITEMDRAW,
     CDRF_SKIPDEFAULT, DRAWITEMSTRUCT, HTREEITEM, MEASUREITEMSTRUCT, NM_CLICK, NM_CUSTOMDRAW,
     NM_DBLCLK, NM_RCLICK, NMHDR, NMTREEVIEWW, NMTVCUSTOMDRAW, ODS_FOCUS, ODS_SELECTED, ODT_BUTTON,
-    ODT_COMBOBOX, SetWindowTheme, TV_FIRST, TVE_EXPAND, TVE_TOGGLE, TVGN_CARET, TVGN_DROPHILITE,
-    TVGN_FIRSTVISIBLE, TVGN_NEXTVISIBLE, TVHITTESTINFO, TVHT_ONITEMBUTTON, TVI_LAST, TVI_ROOT,
-    TVIF_HANDLE, TVIF_PARAM, TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW, TVIS_EXPANDED, TVITEMEXW,
-    TVITEMW, TVM_DELETEITEM, TVM_EXPAND, TVM_GETITEMRECT, TVM_GETITEMW, TVM_GETNEXTITEM,
-    TVM_HITTEST, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETBKCOLOR, TVM_SETTEXTCOLOR, TVN_BEGINDRAGW,
-    TVN_ITEMEXPANDEDW, TVN_SELCHANGEDW, TVS_FULLROWSELECT, TVS_HASBUTTONS, TVS_SHOWSELALWAYS,
-    WC_BUTTONW, WC_COMBOBOXW, WC_EDITW, WC_TREEVIEWW, WM_MOUSELEAVE,
+    ODT_COMBOBOX, SetWindowTheme, TV_FIRST, TVE_COLLAPSE, TVE_EXPAND, TVE_TOGGLE, TVGN_CARET,
+    TVGN_DROPHILITE, TVGN_FIRSTVISIBLE, TVGN_NEXTVISIBLE, TVHITTESTINFO, TVHT_ONITEMBUTTON,
+    TVI_LAST, TVI_ROOT, TVIF_HANDLE, TVIF_PARAM, TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW,
+    TVIS_EXPANDED, TVITEMEXW, TVITEMW, TVM_DELETEITEM, TVM_EXPAND, TVM_GETITEMRECT, TVM_GETITEMW,
+    TVM_GETNEXTITEM, TVM_HITTEST, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETBKCOLOR,
+    TVM_SETTEXTCOLOR, TVN_BEGINDRAGW, TVN_ITEMEXPANDEDW, TVN_SELCHANGEDW, TVS_FULLROWSELECT,
+    TVS_HASBUTTONS, TVS_SHOWSELALWAYS, WC_BUTTONW, WC_COMBOBOXW, WC_EDITW, WC_TREEVIEWW,
+    WM_MOUSELEAVE,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -190,11 +191,12 @@ fn col_status_err() -> u32 {
 
 const COL_TEXT_ON_ACCENT: u32 = 0x00F6F3F0; // Blanc pur sur boutons primaires et badges colorés
 const COL_GOLD_STAR: u32 = 0x00249CE8; // Doré lisible sur fond sombre et clair
+const COL_PRIORITY_ARROW: u32 = 0x00E08020; // Orange/ambre priorité lisible sur fond sombre et clair
 const COL_FOLDER_AMBER: u32 = 0x003294DC; // Ambre dossier lisible sur fond sombre et clair
 const COL_PROTO_ANYDESK: u32 = 0x003943D8; // #D84339 Badge AnyDesk
 const COL_PROTO_RUSTDESK: u32 = 0x008A9616; // #16968A Badge RustDesk
 
-const SIDEBAR_HEADER_HEIGHT: i32 = 126;
+const SIDEBAR_HEADER_HEIGHT: i32 = 152;
 const SIDEBAR_FOOTER_HEIGHT: i32 = 46;
 const SPLITTER_WIDTH: i32 = 5;
 const TABBAR_HEIGHT: i32 = 38;
@@ -239,6 +241,7 @@ const CMD_CTX_EDIT: u32 = 3002;
 const CMD_CTX_RENAME: u32 = 3003;
 const CMD_CTX_DUPLICATE: u32 = 3004;
 const CMD_CTX_TOGGLE_FAV: u32 = 3005;
+const CMD_CTX_TOGGLE_PRIORITY: u32 = 3010;
 const CMD_CTX_MOVE: u32 = 3006;
 const CMD_CTX_DELETE: u32 = 3007;
 const CMD_CTX_NEW_CONN_HERE: u32 = 3008;
@@ -333,6 +336,8 @@ impl TreeNodeKind {
 enum InteractiveZone {
     BtnNewConnection,
     BtnNewFolder,
+    BtnExpandAll,
+    BtnCollapseAll,
     BtnSettings,
     TabSelect(u32),
     TabClose(u32),
@@ -809,6 +814,7 @@ pub struct AppWindowState {
     last_launch_debounce: Option<(i64, std::time::Instant)>,
     pub dashboard_scroll_y: i32,
     pub dashboard_content_height: i32,
+    is_programmatic_tree_update: bool,
 }
 
 impl AppWindowState {
@@ -1056,6 +1062,7 @@ impl AppWindowState {
                 last_launch_debounce: None,
                 dashboard_scroll_y: 0,
                 dashboard_content_height: 0,
+                is_programmatic_tree_update: false,
             };
 
             if !cfg!(test) {
@@ -1507,6 +1514,7 @@ impl AppWindowState {
             return;
         }
 
+        self.is_programmatic_tree_update = true;
         let previous_selection = self.selected_node;
         unsafe {
             let _ = SendMessageW(
@@ -1614,6 +1622,19 @@ impl AppWindowState {
         }
 
         unsafe {
+            let _ = SendMessageW(
+                self.treeview,
+                TVM_EXPAND,
+                Some(WPARAM(TVE_EXPAND.0 as usize)),
+                Some(LPARAM(h_fav_root.0)),
+            );
+            let _ = SendMessageW(
+                self.treeview,
+                TVM_EXPAND,
+                Some(WPARAM(TVE_EXPAND.0 as usize)),
+                Some(LPARAM(h_conn_root.0)),
+            );
+
             if let Some(h_sel) = handle_to_select {
                 let _ = SendMessageW(
                     self.treeview,
@@ -1625,7 +1646,24 @@ impl AppWindowState {
             let _ = InvalidateRect(Some(self.treeview), None, false);
         }
 
+        self.is_programmatic_tree_update = false;
         self.invalidate_canvas();
+    }
+
+    pub fn expand_all_folders(&mut self) {
+        let _ = self.storage.set_all_folders_expanded(true);
+        for f in self.cached_folders.values_mut() {
+            f.is_expanded = true;
+        }
+        self.rebuild_treeview();
+    }
+
+    pub fn collapse_all_folders(&mut self) {
+        let _ = self.storage.set_all_folders_expanded(false);
+        for f in self.cached_folders.values_mut() {
+            f.is_expanded = false;
+        }
+        self.rebuild_treeview();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1639,10 +1677,14 @@ impl AppWindowState {
         handle_to_select: &mut Option<HTREEITEM>,
         visited: &mut Vec<i64>,
     ) {
-        // 1. Les connexions directes apparaissent TOUJOURS AVANT les sous-dossiers, classées alphabétiquement (insensible à la casse)
+        // 1. Les connexions directes apparaissent TOUJOURS AVANT les sous-dossiers : prioritaires d'abord (alphabétique), puis normales (alphabétique)
         if let Some(conns) = conns_by_folder.get(&parent_folder_id) {
             let mut sorted_conns = conns.clone();
-            sorted_conns.sort_by_key(|a| a.name.to_lowercase());
+            sorted_conns.sort_by(|a, b| {
+                b.is_priority
+                    .cmp(&a.is_priority)
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            });
             for conn in sorted_conns {
                 let label = format!("{} {}", conn.protocol.badge_prefix(), conn.name);
                 let h_conn = self.insert_tree_item(
@@ -1687,6 +1729,20 @@ impl AppWindowState {
                     handle_to_select,
                     visited,
                 );
+
+                unsafe {
+                    let act = if folder.is_expanded {
+                        TVE_EXPAND
+                    } else {
+                        TVE_COLLAPSE
+                    };
+                    let _ = SendMessageW(
+                        self.treeview,
+                        TVM_EXPAND,
+                        Some(WPARAM(act.0 as usize)),
+                        Some(LPARAM(h_folder.0)),
+                    );
+                }
             }
         }
     }
@@ -1918,7 +1974,13 @@ impl AppWindowState {
                             self.palette.font_small,
                         );
 
+                        let text_offset = if conn.is_priority { 62 } else { 50 };
                         let right_pad = if conn.is_favorite { 24 } else { 8 };
+
+                        if conn.is_priority {
+                            draw_icon_priority(hdc, indent + 47, mid_y - 6, COL_PRIORITY_ARROW);
+                        }
+
                         let _ = SelectObject(
                             hdc,
                             if is_selected {
@@ -1932,14 +1994,14 @@ impl AppWindowState {
                             hdc,
                             &conn.name,
                             RECT {
-                                left: indent + 50,
+                                left: indent + text_offset,
                                 top: row_rc.top,
-                                right: (row_rc.right - right_pad).max(indent + 60),
+                                right: (row_rc.right - right_pad).max(indent + text_offset + 10),
                                 bottom: row_rc.bottom,
                             },
                         );
 
-                        if conn.is_favorite && row_rc.right - 18 > indent + 65 {
+                        if conn.is_favorite && row_rc.right - 18 > indent + text_offset + 15 {
                             draw_icon_star(hdc, row_rc.right - 18, mid_y - 7, COL_GOLD_STAR);
                         }
                     }
@@ -2083,22 +2145,21 @@ impl AppWindowState {
                 self.palette.font_small,
             );
 
-            // Bouton "+ Connexion" et "+ Dossier"
+            // Bouton "+ Connexion" et "+ Dossier" (symétrie stricte de largeur et d'alignement)
             let btn_gap = 8;
-            let total_btn_w = (sidebar_w - 24 - btn_gap).max(120);
-            let btn_conn_w = (total_btn_w * 58) / 100;
-            let btn_fold_w = total_btn_w - btn_conn_w;
+            let total_btn_w = (sidebar_w - 24 - btn_gap).max(100);
+            let btn_w = total_btn_w / 2;
 
             let rc_btn_conn = RECT {
                 left: 12,
                 top: 44,
-                right: 12 + btn_conn_w,
+                right: 12 + btn_w,
                 bottom: 76,
             };
             let rc_btn_fold = RECT {
-                left: rc_btn_conn.right + btn_gap,
+                left: 12 + btn_w + btn_gap,
                 top: 44,
-                right: rc_btn_conn.right + btn_gap + btn_fold_w,
+                right: 12 + btn_w + btn_gap + btn_w,
                 bottom: 76,
             };
 
@@ -2168,6 +2229,49 @@ impl AppWindowState {
                     col_text_muted()
                 },
             );
+
+            // Boutons « Tout déplier » et « Tout replier » au-dessus de l'arborescence
+            let rc_expand_all = RECT {
+                left: 12,
+                top: 118,
+                right: 12 + btn_w,
+                bottom: 144,
+            };
+            let rc_collapse_all = RECT {
+                left: 12 + btn_w + btn_gap,
+                top: 118,
+                right: 12 + btn_w + btn_gap + btn_w,
+                bottom: 144,
+            };
+
+            let is_expand_hover = self.hovered_zone == Some(InteractiveZone::BtnExpandAll);
+            draw_compact_toolbar_button(
+                hdc,
+                rc_expand_all,
+                is_expand_hover,
+                "Tout déplier",
+                true,
+                self.palette.font_small,
+            );
+            self.hit_zones.push(HitZone {
+                rect: rc_expand_all,
+                zone: InteractiveZone::BtnExpandAll,
+            });
+
+            let is_collapse_hover = self.hovered_zone == Some(InteractiveZone::BtnCollapseAll);
+            draw_compact_toolbar_button(
+                hdc,
+                rc_collapse_all,
+                is_collapse_hover,
+                "Tout replier",
+                false,
+                self.palette.font_small,
+            );
+            self.hit_zones.push(HitZone {
+                rect: rc_collapse_all,
+                zone: InteractiveZone::BtnCollapseAll,
+            });
+
             draw_horizontal_line(hdc, 0, sidebar_w, SIDEBAR_HEADER_HEIGHT - 1, col_border());
 
             // 2b. Pied du panneau gauche : bouton « Paramètres » avec icône engrenage
@@ -3372,6 +3476,113 @@ unsafe fn draw_icon_star(hdc: HDC, x: i32, y: i32, color: u32) {
     }
 }
 
+/// Dessine un indicateur de connexion prioritaire discret (flèche verticale vers le haut).
+unsafe fn draw_icon_priority(hdc: HDC, x: i32, y: i32, color: u32) {
+    unsafe {
+        let pen = CreatePen(PS_SOLID, 2, COLORREF(color));
+        let old = SelectObject(hdc, pen.into());
+        let cx = x + 5;
+        let cy = y + 6;
+        let _ = MoveToEx(hdc, cx, cy + 5, None);
+        let _ = LineTo(hdc, cx, cy - 4);
+        let _ = MoveToEx(hdc, cx - 4, cy, None);
+        let _ = LineTo(hdc, cx, cy - 4);
+        let _ = LineTo(hdc, cx + 5, cy + 1);
+        let _ = SelectObject(hdc, old);
+        let _ = DeleteObject(pen.into());
+    }
+}
+
+/// Dessine une icône à doubles chevrons (descendants pour « Tout déplier », montants pour « Tout replier »).
+unsafe fn draw_icon_double_chevron(hdc: HDC, cx: i32, cy: i32, downwards: bool, color: u32) {
+    unsafe {
+        let pen = CreatePen(PS_SOLID, 2, COLORREF(color));
+        let old = SelectObject(hdc, pen.into());
+        if downwards {
+            // Chevrons vers le bas ︾
+            let _ = MoveToEx(hdc, cx - 4, cy - 3, None);
+            let _ = LineTo(hdc, cx, cy);
+            let _ = LineTo(hdc, cx + 5, cy - 4);
+
+            let _ = MoveToEx(hdc, cx - 4, cy + 2, None);
+            let _ = LineTo(hdc, cx, cy + 5);
+            let _ = LineTo(hdc, cx + 5, cy + 1);
+        } else {
+            // Chevrons vers le haut ︽
+            let _ = MoveToEx(hdc, cx - 4, cy - 1, None);
+            let _ = LineTo(hdc, cx, cy - 4);
+            let _ = LineTo(hdc, cx + 5, cy);
+
+            let _ = MoveToEx(hdc, cx - 4, cy + 4, None);
+            let _ = LineTo(hdc, cx, cy + 1);
+            let _ = LineTo(hdc, cx + 5, cy + 5);
+        }
+        let _ = SelectObject(hdc, old);
+        let _ = DeleteObject(pen.into());
+    }
+}
+
+/// Dessine un bouton compact de barre d'outils Fluent (avec icône vectorielle et texte centré).
+unsafe fn draw_compact_toolbar_button(
+    hdc: HDC,
+    rc: RECT,
+    is_hover: bool,
+    label: &str,
+    downwards: bool,
+    font: HFONT,
+) {
+    unsafe {
+        let fill_col = if is_hover {
+            col_bg_hover()
+        } else {
+            col_bg_surface()
+        };
+        let border_col = if is_hover { col_accent() } else { col_border() };
+        draw_rounded_box(hdc, rc, fill_col, border_col);
+
+        let icon_col = if is_hover {
+            col_accent()
+        } else {
+            col_text_muted()
+        };
+        let text_col = col_text_primary();
+
+        let _ = SelectObject(hdc, font.into());
+        let mut trc = RECT::default();
+        let mut wide: Vec<u16> = label.encode_utf16().collect();
+        let _ = DrawTextW(
+            hdc,
+            &mut wide,
+            &mut trc,
+            DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        let text_w = trc.right - trc.left;
+        let icon_w = 12;
+        let spacing = 6;
+        let total_content_w = icon_w + spacing + text_w;
+        let btn_w = rc.right - rc.left;
+        let start_x = rc.left + ((btn_w - total_content_w) / 2).max(4);
+
+        let mid_y = (rc.top + rc.bottom) / 2;
+        draw_icon_double_chevron(hdc, start_x + 5, mid_y, downwards, icon_col);
+
+        let _ = SetTextColor(hdc, COLORREF(text_col));
+        let text_left = start_x + icon_w + spacing;
+        let mut text_rc = RECT {
+            left: text_left,
+            top: rc.top,
+            right: rc.right - 4,
+            bottom: rc.bottom,
+        };
+        let _ = DrawTextW(
+            hdc,
+            &mut wide,
+            &mut text_rc,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+        );
+    }
+}
+
 /// Dessine une icône de grille/couches pour la racine "Connexions".
 unsafe fn draw_icon_layers(hdc: HDC, x: i32, y: i32, color: u32) {
     unsafe {
@@ -3617,6 +3828,12 @@ impl AppWindowState {
                         LPARAM(0),
                     );
                 },
+                InteractiveZone::BtnExpandAll => {
+                    self.expand_all_folders();
+                }
+                InteractiveZone::BtnCollapseAll => {
+                    self.collapse_all_folders();
+                }
                 InteractiveZone::BtnSettings => unsafe {
                     let _ = PostMessageW(
                         Some(self.hwnd),
@@ -4095,12 +4312,9 @@ impl AppWindowState {
 
             match self.selected_node {
                 Some(TreeNodeKind::Connection(cid)) => {
-                    let is_fav = self
-                        .storage
-                        .get_connection(cid)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|c| c.is_favorite);
+                    let conn_opt = self.storage.get_connection(cid).ok().flatten();
+                    let is_fav = conn_opt.as_ref().is_some_and(|c| c.is_favorite);
+                    let is_prio = conn_opt.as_ref().is_some_and(|c| c.is_priority);
                     let _ = AppendMenuW(
                         hmenu,
                         MF_STRING,
@@ -4122,6 +4336,16 @@ impl AppWindowState {
                             w!("Retirer des favoris")
                         } else {
                             w!("★ Ajouter aux favoris")
+                        },
+                    );
+                    let _ = AppendMenuW(
+                        hmenu,
+                        MF_STRING,
+                        CMD_CTX_TOGGLE_PRIORITY as usize,
+                        if is_prio {
+                            w!("Retirer la priorité")
+                        } else {
+                            w!("▲ Marquer comme prioritaire")
                         },
                     );
                     let _ = AppendMenuW(
@@ -4235,6 +4459,17 @@ impl AppWindowState {
                     && self
                         .storage
                         .set_connection_favorite(cid, !conn.is_favorite)
+                        .is_ok()
+                {
+                    self.rebuild_treeview();
+                }
+            }
+            CMD_CTX_TOGGLE_PRIORITY => {
+                if let Some(TreeNodeKind::Connection(cid)) = self.selected_node
+                    && let Ok(Some(conn)) = self.storage.get_connection(cid)
+                    && self
+                        .storage
+                        .set_connection_priority(cid, !conn.is_priority)
                         .is_ok()
                 {
                     self.rebuild_treeview();
@@ -4544,6 +4779,7 @@ const IDC_DLG_DOMAIN: usize = 4007;
 const IDC_DLG_PASS: usize = 4008;
 const IDC_DLG_SAVE_PASS: usize = 4009;
 const IDC_DLG_FAVORITE: usize = 4010;
+const IDC_DLG_PRIORITY: usize = 4016;
 const IDC_DLG_DYN_RES: usize = 4011;
 const IDC_DLG_CLIPBOARD: usize = 4012;
 const IDC_DLG_DESC: usize = 4013;
@@ -5635,6 +5871,7 @@ struct ConnectionDialogState {
     ed_pass: HWND,
     chk_save_pass: HWND,
     chk_fav: HWND,
+    chk_priority: HWND,
     chk_dyn_res: HWND,
     chk_clipboard: HWND,
     ed_desc: HWND,
@@ -6050,6 +6287,13 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                             Some(LPARAM(0)),
                         )
                         .0 != 0;
+                        let is_priority = SendMessageW(
+                            state.chk_priority,
+                            BM_GETCHECK,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(0)),
+                        )
+                        .0 != 0;
                         let dynamic_resolution = SendMessageW(
                             state.chk_dyn_res,
                             BM_GETCHECK,
@@ -6079,6 +6323,7 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                             domain: get_window_text(state.ed_domain),
                             description: get_window_text(state.ed_desc),
                             is_favorite,
+                            is_priority,
                             save_password,
                             password: SecretString::new(raw_pwd),
                             keep_existing_password,
@@ -6309,6 +6554,7 @@ fn run_connection_form_dialog(
             ed_pass: HWND::default(),
             chk_save_pass: HWND::default(),
             chk_fav: HWND::default(),
+            chk_priority: HWND::default(),
             chk_dyn_res: HWND::default(),
             chk_clipboard: HWND::default(),
             ed_desc: HWND::default(),
@@ -6581,10 +6827,11 @@ fn run_connection_form_dialog(
 
         // 8. Cases à cocher larges (434 px à 96 DPI -> aucune troncature)
         let chk_h = dpi.scale(24);
-        let y_chk1 = dpi.scale(376);
-        let y_chk2 = dpi.scale(404);
-        let y_chk3 = dpi.scale(432);
-        let y_chk4 = dpi.scale(460);
+        let y_chk1 = dpi.scale(372);
+        let y_chk2 = dpi.scale(398);
+        let y_chk_prio = dpi.scale(424);
+        let y_chk3 = dpi.scale(450);
+        let y_chk4 = dpi.scale(476);
 
         dlg_state.labels.push(ConnDialogLabel {
             text: "Options de session :".to_string(),
@@ -6625,6 +6872,19 @@ fn run_connection_form_dialog(
             IDC_DLG_FAVORITE,
             palette.font_ui,
         );
+        let chk_priority = create_dark_checkbox(
+            hwnd,
+            hinstance.into(),
+            w!("Connexion prioritaire (remonte au début de son dossier)"),
+            RECT {
+                left: field_left,
+                top: y_chk_prio,
+                right: field_right,
+                bottom: y_chk_prio + chk_h,
+            },
+            IDC_DLG_PRIORITY,
+            palette.font_ui,
+        );
         let chk_dyn_res = create_dark_checkbox(
             hwnd,
             hinstance.into(),
@@ -6653,7 +6913,7 @@ fn run_connection_form_dialog(
         );
 
         // 9. Description
-        let y_desc = dpi.scale(494);
+        let y_desc = dpi.scale(508);
         add_label(
             &mut dlg_state.labels,
             "Description :",
@@ -6727,6 +6987,7 @@ fn run_connection_form_dialog(
         dlg_state.ed_pass = ed_pass;
         dlg_state.chk_save_pass = chk_save_pass;
         dlg_state.chk_fav = chk_fav;
+        dlg_state.chk_priority = chk_priority;
         dlg_state.chk_dyn_res = chk_dyn_res;
         dlg_state.chk_clipboard = chk_clipboard;
         dlg_state.ed_desc = ed_desc;
@@ -6767,6 +7028,12 @@ fn run_connection_form_dialog(
                 chk_fav,
                 BM_SETCHECK,
                 Some(WPARAM(usize::from(ex.is_favorite))),
+                Some(LPARAM(0)),
+            );
+            let _ = SendMessageW(
+                chk_priority,
+                BM_SETCHECK,
+                Some(WPARAM(usize::from(ex.is_priority))),
                 Some(LPARAM(0)),
             );
             let _ = SendMessageW(
@@ -6812,6 +7079,7 @@ fn run_connection_form_dialog(
             ed_pass,
             chk_save_pass,
             chk_fav,
+            chk_priority,
             chk_dyn_res,
             chk_clipboard,
             ed_desc,
@@ -7991,7 +8259,11 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                     ),
                     _ => (
                         "À propos de Malvision",
-                        "Gestionnaire de connexions distantes natif Windows 11 — Version 1.0.1.",
+                        concat!(
+                            "Gestionnaire de connexions distantes natif Windows 11 — Version ",
+                            env!("CARGO_PKG_VERSION"),
+                            "."
+                        ),
                     ),
                 };
 
@@ -10816,12 +11088,20 @@ unsafe extern "system" fn main_wnd_proc(
                                 (*ptr).invalidate_canvas();
                             }
                             TVN_ITEMEXPANDEDW => {
-                                let nmtv = &*(lparam.0 as *const NMTREEVIEWW);
-                                if let Some(TreeNodeKind::Folder(fid)) =
-                                    TreeNodeKind::from_lparam(nmtv.itemNew.lParam.0)
+                                if !(*ptr).is_programmatic_tree_update
+                                    && (*ptr).search_query.trim().is_empty()
                                 {
-                                    let expanded = (nmtv.action.0 & TVE_EXPAND.0) != 0;
-                                    let _ = (*ptr).storage.set_folder_expanded(fid, expanded);
+                                    let nmtv = &*(lparam.0 as *const NMTREEVIEWW);
+                                    if let Some(TreeNodeKind::Folder(fid)) =
+                                        TreeNodeKind::from_lparam(nmtv.itemNew.lParam.0)
+                                    {
+                                        let expanded =
+                                            (*ptr).is_tree_item_expanded(nmtv.itemNew.hItem);
+                                        let _ = (*ptr).storage.set_folder_expanded(fid, expanded);
+                                        if let Some(f) = (*ptr).cached_folders.get_mut(&fid) {
+                                            f.is_expanded = expanded;
+                                        }
+                                    }
                                 }
                                 let _ = InvalidateRect(Some((*ptr).treeview), None, false);
                             }
@@ -12296,6 +12576,7 @@ mod tests {
                 folder_id: None,
                 description: String::new(),
                 is_favorite: false,
+                is_priority: false,
                 save_password: false,
                 has_saved_password: false,
                 dynamic_resolution: true,
@@ -12365,6 +12646,7 @@ mod tests {
                 folder_id: None,
                 description: String::new(),
                 is_favorite: false,
+                is_priority: false,
                 save_password: false,
                 has_saved_password: false,
                 dynamic_resolution: true,
@@ -12405,6 +12687,7 @@ mod tests {
                 domain: String::new(),
                 description: String::new(),
                 is_favorite: false,
+                is_priority: false,
                 save_password: false,
                 password: SecretString::new(String::new()),
                 keep_existing_password: false,
@@ -12614,6 +12897,7 @@ mod tests {
                 domain: String::new(),
                 folder_id: Some(folder.id),
                 is_favorite: false,
+                is_priority: false,
                 description: String::new(),
                 password: SecretString::new(String::new()),
                 save_password: false,
@@ -12633,6 +12917,7 @@ mod tests {
                 domain: String::new(),
                 folder_id: Some(folder.id),
                 is_favorite: false,
+                is_priority: false,
                 description: String::new(),
                 password: SecretString::new(String::new()),
                 save_password: false,
@@ -12778,6 +13063,7 @@ mod tests {
                 domain: String::new(),
                 folder_id: Some(sub_folder.id),
                 is_favorite: false,
+                is_priority: false,
                 description: String::new(),
                 password: SecretString::new(String::new()),
                 save_password: false,
@@ -13093,6 +13379,7 @@ mod tests {
             domain: String::new(),
             description: String::new(),
             is_favorite,
+            is_priority: false,
             save_password: false,
             password: crate::security::SecretString::new(String::new()),
             keep_existing_password: false,
@@ -13255,5 +13542,266 @@ mod tests {
             let _ = DestroyWindow(hwnd);
         }
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_ui_folder_expansion_individual_and_global_commands() {
+        let _guard = WIN32_UI_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db_path = create_temp_test_db_path("tree_expand_pers");
+        let _ = std::fs::remove_file(&db_path);
+
+        unsafe {
+            let hwnd = create_isolated_test_main_window(&db_path);
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+            let state = &mut *ptr;
+
+            let f_clients = state.storage.create_folder("Clients", None).unwrap();
+            let f_a = state
+                .storage
+                .create_folder("Client A", Some(f_clients.id))
+                .unwrap();
+            let f_b = state
+                .storage
+                .create_folder("Client B", Some(f_clients.id))
+                .unwrap();
+
+            state.rebuild_treeview();
+
+            // Par défaut, tous les dossiers sont créés dépliés (is_expanded = true)
+            let f_map = state.storage.list_folders().unwrap();
+            assert!(f_map.iter().all(|f| f.is_expanded));
+
+            // Replier individuellement Client A
+            state.storage.set_folder_expanded(f_a.id, false).unwrap();
+            state.rebuild_treeview();
+
+            assert!(state.cached_folders.get(&f_clients.id).unwrap().is_expanded);
+            assert!(!state.cached_folders.get(&f_a.id).unwrap().is_expanded);
+            assert!(state.cached_folders.get(&f_b.id).unwrap().is_expanded);
+
+            // Action globale : Tout replier
+            state.collapse_all_folders();
+            for f in state.storage.list_folders().unwrap() {
+                assert!(!f.is_expanded, "Le dossier {} doit être replié", f.name);
+            }
+
+            // Action globale : Tout déplier
+            state.expand_all_folders();
+            for f in state.storage.list_folders().unwrap() {
+                assert!(f.is_expanded, "Le dossier {} doit être déplié", f.name);
+            }
+
+            // Remettre Client A replié
+            state.storage.set_folder_expanded(f_a.id, false).unwrap();
+            state.rebuild_treeview();
+
+            // Changement de thème : ne doit pas réinitialiser les états
+            state.apply_theme();
+            assert!(
+                !state
+                    .storage
+                    .list_folders()
+                    .unwrap()
+                    .into_iter()
+                    .find(|f| f.id == f_a.id)
+                    .unwrap()
+                    .is_expanded
+            );
+
+            // Recherche temporaire : ne doit pas écraser les états en base
+            state.search_query = "quelquechose".to_string();
+            state.rebuild_treeview();
+            assert!(
+                !state
+                    .storage
+                    .list_folders()
+                    .unwrap()
+                    .into_iter()
+                    .find(|f| f.id == f_a.id)
+                    .unwrap()
+                    .is_expanded
+            );
+
+            state.search_query.clear();
+            state.rebuild_treeview();
+            assert!(
+                !state
+                    .storage
+                    .list_folders()
+                    .unwrap()
+                    .into_iter()
+                    .find(|f| f.id == f_a.id)
+                    .unwrap()
+                    .is_expanded
+            );
+
+            let _ = DestroyWindow(hwnd);
+        }
+
+        // Test de persistance après redémarrage complet de l'application (nouvelle fenêtre sur la même base)
+        unsafe {
+            let hwnd2 = create_isolated_test_main_window(&db_path);
+            let ptr2 = GetWindowLongPtrW(hwnd2, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr2.is_null());
+            let state2 = &mut *ptr2;
+
+            let folders = state2.storage.list_folders().unwrap();
+            let a = folders.iter().find(|f| f.name == "Client A").unwrap();
+            let b = folders.iter().find(|f| f.name == "Client B").unwrap();
+            assert!(
+                !a.is_expanded,
+                "Client A doit rester replié après redémarrage"
+            );
+            assert!(
+                b.is_expanded,
+                "Client B doit rester déplié après redémarrage"
+            );
+
+            let _ = DestroyWindow(hwnd2);
+        }
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_ui_connection_priority_dialog_and_context_menu_and_sorting() {
+        let _guard = WIN32_UI_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db_path = create_temp_test_db_path("conn_priority_ui");
+        let _ = std::fs::remove_file(&db_path);
+
+        unsafe {
+            let hwnd = create_isolated_test_main_window(&db_path);
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+            let state = &mut *ptr;
+
+            let f1 = state.storage.create_folder("Clients", None).unwrap();
+
+            // Créer une connexion normale
+            let c_normal = state
+                .storage
+                .create_connection(make_test_draft(
+                    "Serveur Normal",
+                    Protocol::Rdp,
+                    "10.0.0.1",
+                    Some(f1.id),
+                    false,
+                ))
+                .unwrap();
+            assert!(!c_normal.is_priority);
+
+            // Créer une connexion prioritaire
+            let mut prio_draft = make_test_draft(
+                "Serveur Prio",
+                Protocol::Rdp,
+                "10.0.0.2",
+                Some(f1.id),
+                false,
+            );
+            prio_draft.is_priority = true;
+            let c_prio = state.storage.create_connection(prio_draft).unwrap();
+            assert!(c_prio.is_priority);
+
+            // Simuler la commande du menu contextuel CMD_CTX_TOGGLE_PRIORITY sur la connexion normale
+            state.selected_node = Some(TreeNodeKind::Connection(c_normal.id));
+            state.execute_context_command(CMD_CTX_TOGGLE_PRIORITY);
+
+            let updated_normal = state.storage.get_connection(c_normal.id).unwrap().unwrap();
+            assert!(
+                updated_normal.is_priority,
+                "La connexion doit être devenue prioritaire via le menu"
+            );
+
+            // Basculer à nouveau pour retirer la priorité
+            state.execute_context_command(CMD_CTX_TOGGLE_PRIORITY);
+            let updated_normal2 = state.storage.get_connection(c_normal.id).unwrap().unwrap();
+            assert!(
+                !updated_normal2.is_priority,
+                "La priorité doit avoir été retirée"
+            );
+
+            // Connexion à la fois favorite et prioritaire
+            state
+                .storage
+                .set_connection_favorite(c_prio.id, true)
+                .unwrap();
+            let c_both = state.storage.get_connection(c_prio.id).unwrap().unwrap();
+            assert!(c_both.is_favorite);
+            assert!(c_both.is_priority);
+
+            let _ = DestroyWindow(hwnd);
+        }
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_ui_sidebar_buttons_symmetry_and_dpi() {
+        for &dpi_val in &[96, 120, 144] {
+            let sidebar_w = 260;
+            let btn_gap = 8;
+            let total_btn_w = (sidebar_w - 24 - btn_gap).max(100);
+            let btn_w = total_btn_w / 2;
+
+            let rc_btn_conn = RECT {
+                left: 12,
+                top: 44,
+                right: 12 + btn_w,
+                bottom: 76,
+            };
+            let rc_btn_fold = RECT {
+                left: 12 + btn_w + btn_gap,
+                top: 44,
+                right: 12 + btn_w + btn_gap + btn_w,
+                bottom: 76,
+            };
+
+            let rc_expand_all = RECT {
+                left: 12,
+                top: 118,
+                right: 12 + btn_w,
+                bottom: 144,
+            };
+            let rc_collapse_all = RECT {
+                left: 12 + btn_w + btn_gap,
+                top: 118,
+                right: 12 + btn_w + btn_gap + btn_w,
+                bottom: 144,
+            };
+
+            // Vérifier stricte égalité de largeur
+            let w_conn = rc_btn_conn.right - rc_btn_conn.left;
+            let w_fold = rc_btn_fold.right - rc_btn_fold.left;
+            let w_exp = rc_expand_all.right - rc_expand_all.left;
+            let w_col = rc_collapse_all.right - rc_collapse_all.left;
+
+            assert_eq!(
+                w_conn, w_fold,
+                "Connexion et Dossier doivent avoir la même largeur à {dpi_val} DPI"
+            );
+            assert_eq!(
+                w_exp, w_col,
+                "Tout déplier et Tout replier doivent avoir la même largeur à {dpi_val} DPI"
+            );
+            assert_eq!(
+                w_conn, w_exp,
+                "Les largeurs des paires de boutons doivent être symétriques"
+            );
+
+            // Vérifier hauteur identique
+            assert_eq!(rc_btn_conn.bottom - rc_btn_conn.top, 32);
+            assert_eq!(rc_btn_fold.bottom - rc_btn_fold.top, 32);
+            assert_eq!(rc_expand_all.bottom - rc_expand_all.top, 26);
+            assert_eq!(rc_collapse_all.bottom - rc_collapse_all.top, 26);
+
+            // Vérifier alignement horizontal
+            assert_eq!(rc_btn_conn.top, rc_btn_fold.top);
+            assert_eq!(rc_expand_all.top, rc_collapse_all.top);
+            assert_eq!(rc_btn_fold.left - rc_btn_conn.right, btn_gap);
+            assert_eq!(rc_collapse_all.left - rc_expand_all.right, btn_gap);
+        }
     }
 }

@@ -204,7 +204,7 @@ fn winhttp_get_with_depth(url: &str, depth: u32) -> Result<Vec<u8>, String> {
     unsafe {
         let (host, port, path) = parse_url(url)?;
 
-        let user_agent = w!("Malvision/1.0.1 (Windows NT 10.0; Win64; x64)");
+        let user_agent = w!("Malvision/1.0.2 (Windows NT 10.0; Win64; x64)");
         let session = WinHttpOpen(
             user_agent,
             WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -245,7 +245,7 @@ fn winhttp_get_with_depth(url: &str, depth: u32) -> Result<Vec<u8>, String> {
         let _ = WinHttpSetTimeouts(request, 5000, 5000, 5000, 10000);
 
         // Envoyer la requête avec accept header standard
-        let headers: Vec<u16> = "Accept: application/vnd.github.v3+json, application/octet-stream, */*\r\nUser-Agent: Malvision/1.0.1\r\n"
+        let headers: Vec<u16> = "Accept: application/vnd.github.v3+json, application/octet-stream, */*\r\nUser-Agent: Malvision/1.0.2\r\n"
             .encode_utf16()
             .collect();
         let send_res = WinHttpSendRequest(request, Some(&headers), None, 0, 0, 0);

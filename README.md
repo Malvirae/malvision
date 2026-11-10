@@ -2,11 +2,19 @@
 
 Application native **Windows 11 x64** de gestion de connexions distantes, écrite en **Rust** avec `windows-rs` (Win32 natif + COM/ActiveX + SQLite embarqué + DPAPI).
 
-**Version actuelle :** `1.0.1` (V1.0.1 Stable Portable)
+**Version actuelle :** `1.0.2` (V1.0.2 Stable Portable)
 
 ---
 
-## Fonctionnalités principales (V1.0.1)
+## Fonctionnalités principales (V1.0.2)
+
+- **Ergonomie avancée de l'arborescence (V1.0.2)** :
+  - **Boutons « Tout déplier » et « Tout replier »** : deux boutons compacts style Fluent situés sous le champ de recherche avec doubles chevrons vectoriels descendants (déplier) et montants (replier). Actions instantanées et fluides sur plusieurs centaines de dossiers sans altérer les sessions en cours.
+  - **Persistance individuelle de l'état des dossiers** : mémorisation de l'état développé ou replié de chaque dossier par identifiant stable SQLite (`folders.is_expanded`). Restauration fidèle après fermeture complète et redémarrage, préservée lors des changements de thèmes, rafraîchissements ou recherches sans écritures redondantes.
+  - **Connexions prioritaires** : nouvelle propriété locale à chaque dossier permettant de faire remonter les connexions critiques en haut de liste. Ordre obligatoire respecté dans l'arborescence et sur le tableau de bord : (1) Connexions prioritaires alphabétiques, (2) Connexions normales alphabétiques, (3) Sous-dossiers alphabétiques.
+  - **Indicateur visuel distinctif** : flèche verticale vers le haut (orange/ambre) affichée à côté du nom de la connexion prioritaire, parfaitement dissociée du losange doré des favoris (avec lesquels elle peut coexister).
+  - **Gestion complète de la priorité** : case à cocher « Connexion prioritaire » dans les formulaires de création et de modification, et bascule immédiate via le menu contextuel (« Marquer comme prioritaire » / « Retirer la priorité »).
+  - **Symétrie stricte des boutons d'en-tête** : calcul dynamique de la largeur disponible `(largeur_disponible - espacement) / 2` conférant une largeur et une hauteur strictement identiques aux boutons « + Connexion » (bleu accentué) et « + Dossier » (surface neutre), ainsi qu'aux boutons « Tout déplier » et « Tout replier », testé à 100 %, 125 % et 150 % DPI.
 
 - **Instance unique avec réactivation intelligente (V1.0.1)** :
   - Mutex Win32 nommé à portée de session (`Local\Malvision_SingleInstance_Mutex`).

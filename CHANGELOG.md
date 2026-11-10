@@ -2,6 +2,48 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
+## [1.0.2] — Ergonomie avancée de l'arborescence (2026-11-10)
+
+### Ajouté & Amélioré
+- **Boutons « Tout déplier » et « Tout replier »** :
+  - Deux boutons compacts de barre d'outils au style Fluent positionnés au-dessus de l'arborescence, immédiatement sous le champ de recherche.
+  - Icônes vectorielles GDI précises à doubles chevrons : double chevron descendant pour « Tout déplier », double chevron montant pour « Tout replier ».
+  - Dépliage et repliage récursifs instantanés de l'ensemble des dossiers et sous-dossiers, fluides même avec des arborescences de plusieurs centaines de dossiers.
+  - Mise à jour atomique de l'état persistant SQLite (`folders.is_expanded`) via `Storage::set_all_folders_expanded()`.
+  - Préservation intégrale des connexions, favoris et sessions RDP actives.
+- **Persistance individuelle de l'état développé / replié des dossiers** :
+  - Mémorisation de l'état de chaque dossier par identifiant SQLite stable (`folder_id`), indépendant du nom ou de l'ordre d'affichage.
+  - Restauration exacte des dossiers développés ou repliés à chaque redémarrage complet de Malvision.
+  - Préservation des états lors des rafraîchissements de l'arborescence, des renommages, déplacements de connexions et changements de thème (Sombre, Clair, Système).
+  - Découplage complet de la recherche : le dépliage temporaire pour afficher les résultats filtrés ne modifie pas les préférences enregistrées en base.
+  - Suppression des écritures SQLite redondantes lors des rafraîchissements programmatiques (`is_programmatic_tree_update`).
+- **Connexions prioritaires** :
+  - Nouvelle propriété booléenne `is_priority` gérée en base SQLite (migration automatique vers le schéma version 4 avec index optimisé `idx_connections_priority`).
+  - Règle de tri stricte appliquée au sein de chaque dossier et à la racine :
+    1. Connexions prioritaires classées par ordre alphabétique (A à Z).
+    2. Connexions normales classées par ordre alphabétique (A à Z).
+    3. Sous-dossiers classés par ordre alphabétique (A à Z).
+  - Indicateur visuel distinctif : flèche triangulaire montante (`▲`) ambre (`#2080E0`) dessinée sur le nœud de connexion dans l'arborescence, évitant toute confusion visuelle avec l'étoile dorée des favoris.
+  - Case à cocher dédiée « Marquer comme prioritaire » intégrée dans les boîtes de dialogue de création et d'édition de connexion.
+  - Action directe dans le menu contextuel clic droit de l'arborescence : « Marquer comme prioritaire » / « Retirer la priorité » permettant la bascule immédiate en un clic.
+  - Prise en charge complète dans les duplications, exports, sauvegardes et répercussion dans la liste ordonnée du tableau de bord « Toutes les connexions ».
+- **Symétrie parfaite des boutons d'action de la barre latérale** :
+  - Largeurs dynamiques rigoureusement identiques pour les boutons `+ Connexion` et `+ Dossier` grâce à la formule `(largeur_disponible - espacement) / 2`.
+  - Même hauteur (32 px logiques), même alignement vertical, texte parfaitement centré et états de survol/clic harmonisés.
+  - Rendu impeccable à 100 %, 125 % et 150 % HiDPI, ainsi que lors du redimensionnement dynamique de la barre latérale.
+- **Identité & Versioning** :
+  - Montée de version globale `1.0.2` : `Cargo.toml`, métadonnées PE Win32 (`build.rs`), User-Agent du vérificateur de mises à jour, et affichage dynamique du badge d'en-tête (`v1.0.2`).
+
+### Testé
+- Suite de tests automatisés étendue à **70 tests (100 % passants)** :
+  - `test_priority_connections_sorting_and_rules` : validation du tri prioritaire devant les connexions normales puis les sous-dossiers.
+  - `test_folder_expansion_individual_and_global` : validation du stockage et de l'expansion individuelle/globale en SQLite.
+  - `test_set_connection_priority_and_duplicate` : validation de la bascule de priorité et de sa duplication.
+  - `test_migration_v4_preserves_data` : validation de la migration transactionnelle du schéma v3 vers v4 sans perte de données.
+  - `test_ui_folder_expansion_individual_and_global_commands` : validation UI des commandes tout déplier / tout replier.
+  - `test_ui_connection_priority_dialog_and_context_menu_and_sorting` : validation du dialogue, du menu contextuel et du tri UI.
+  - `test_ui_sidebar_buttons_symmetry_and_dpi` : validation mathématique de la symétrie des boutons à 100 %, 125 % et 150 % DPI.
+
 ## [1.0.1] — Version Corrective et Améliorations Ergonomiques (2026-11-10)
 
 ### Ajouté & Amélioré
