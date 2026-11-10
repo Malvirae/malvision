@@ -17,6 +17,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const CURRENT_SCHEMA_VERSION: i32 = 3;
 
+/// Résumé du diagnostic et du résultat d'un import de configuration SQLite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportSummary {
+    pub folders_count: usize,
+    pub connections_count: usize,
+    pub dpapi_recoverable_count: usize,
+    pub dpapi_unrecoverable_count: usize,
+}
+
 pub struct Storage {
     conn: Connection,
     db_path: PathBuf,
@@ -1069,6 +1078,140 @@ impl Storage {
             .map_err(|e| format!("Erreur lecture préférence '{key}' : {e}"))
     }
 
+    /// Exporte la base de données courante vers le fichier spécifié en utilisant
+    /// l'API de sauvegarde SQLite (`rusqlite::backup::Backup`).
+    pub fn export_database(&self, dest_path: &Path) -> Result<(), String> {
+        if dest_path.exists() {
+            let _ = std::fs::remove_file(dest_path);
+        }
+
+        let mut dst_conn = Connection::open(dest_path).map_err(|e| {
+            format!(
+                "Impossible d'initialiser le fichier d'export '{}' : {e}",
+                dest_path.display()
+            )
+        })?;
+
+        let backup = rusqlite::backup::Backup::new(&self.conn, &mut dst_conn)
+            .map_err(|e| format!("Échec de l'initialisation de la sauvegarde SQLite : {e}"))?;
+
+        backup
+            .run_to_completion(100, std::time::Duration::from_millis(10), None)
+            .map_err(|e| {
+                let _ = std::fs::remove_file(dest_path);
+                format!("Erreur lors de l'exportation de la base SQLite : {e}")
+            })?;
+
+        Ok(())
+    }
+
+    /// Valide l'intégrité et la conformité d'un fichier SQLite avant import.
+    pub fn validate_import_file(path: &Path) -> Result<ImportSummary, String> {
+        if !path.exists() || !path.is_file() {
+            return Err(
+                "Le fichier sélectionné n'existe pas ou n'est pas un fichier valide.".to_string(),
+            );
+        }
+
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| {
+                format!("Impossible d'ouvrir le fichier : n'est pas une base SQLite valide ({e})")
+            })?;
+
+        // 1. Contrôle d'intégrité SQLite (PRAGMA integrity_check)
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check;", [], |r| r.get(0))
+            .map_err(|e| format!("Erreur lors de la vérification d'intégrité SQLite : {e}"))?;
+        if integrity.to_lowercase() != "ok" {
+            return Err(format!(
+                "Échec du contrôle d'intégrité SQLite : {integrity}"
+            ));
+        }
+
+        // 2. Vérification de l'existence des tables obligatoires (folders, connections)
+        let tables: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type='table';")
+                .map_err(|e| format!("Erreur de lecture du schéma : {e}"))?;
+            let rows = stmt
+                .query_map([], |r| r.get(0))
+                .map_err(|e| format!("Erreur lors du listage des tables : {e}"))?;
+            rows.filter_map(Result::ok).collect()
+        };
+
+        if !tables.contains(&"folders".to_string()) || !tables.contains(&"connections".to_string())
+        {
+            return Err("Le fichier sélectionné ne contient pas la structure de données attendue pour Malvision (tables 'folders' ou 'connections' manquantes).".to_string());
+        }
+
+        // 3. Compter les dossiers et connexions
+        let folders_count: usize = conn
+            .query_row("SELECT COUNT(*) FROM folders;", [], |r| r.get(0))
+            .unwrap_or(0);
+        let connections_count: usize = conn
+            .query_row("SELECT COUNT(*) FROM connections;", [], |r| r.get(0))
+            .unwrap_or(0);
+
+        // 4. Tester la déchiffrabilité DPAPI sans exposer ni logger les secrets
+        let mut dpapi_recoverable = 0;
+        let mut dpapi_unrecoverable = 0;
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT encrypted_password FROM connections WHERE encrypted_password IS NOT NULL;",
+        ) && let Ok(rows) = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))
+        {
+            for blob in rows.flatten() {
+                if blob.is_empty() {
+                    continue;
+                }
+                if decrypt_secret(&blob).is_ok() {
+                    dpapi_recoverable += 1;
+                } else {
+                    dpapi_unrecoverable += 1;
+                }
+            }
+        }
+
+        Ok(ImportSummary {
+            folders_count,
+            connections_count,
+            dpapi_recoverable_count: dpapi_recoverable,
+            dpapi_unrecoverable_count: dpapi_unrecoverable,
+        })
+    }
+
+    /// Importe une configuration depuis un fichier SQLite externe en remplacement contrôlé de la base courante.
+    pub fn import_database(&mut self, src_path: &Path) -> Result<ImportSummary, String> {
+        let summary = Self::validate_import_file(src_path)?;
+
+        // Sauvegarde de sécurité avant remplacement
+        if !self.db_path.as_os_str().is_empty() && self.db_path.exists() {
+            let backup_path = self.db_path.with_extension("db.pre_import_bak");
+            self.export_database(&backup_path).map_err(|e| {
+                format!("Échec de la sauvegarde de sécurité de la configuration actuelle. Importation annulée : {e}")
+            })?;
+        }
+
+        // Ouvrir le fichier source
+        let src_conn =
+            Connection::open_with_flags(src_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|e| format!("Impossible d'ouvrir le fichier source : {e}"))?;
+
+        // Restaurer vers self.conn
+        let backup = rusqlite::backup::Backup::new(&src_conn, &mut self.conn)
+            .map_err(|e| format!("Échec de l'initialisation de la restauration : {e}"))?;
+
+        backup
+            .run_to_completion(100, std::time::Duration::from_millis(10), None)
+            .map_err(|e| format!("Erreur lors de la restauration de la base : {e}"))?;
+
+        drop(backup);
+
+        // Appliquer les éventuelles migrations de schéma
+        self.initialize_and_migrate()?;
+
+        Ok(summary)
+    }
+
     fn connection_exists(&self, connection_id: i64) -> Result<bool, String> {
         let count: i64 = self
             .conn
@@ -1309,5 +1452,82 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_storage_export_and_import_with_wal_and_dpapi_preservation() {
+        let base_dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let orig_path = base_dir.join(format!("malvision_export_orig_{pid}.db"));
+        let export_path = base_dir.join(format!("malvision_export_target_{pid}.db"));
+        let restore_path = base_dir.join(format!("malvision_export_restored_{pid}.db"));
+
+        let _ = std::fs::remove_file(&orig_path);
+        let _ = std::fs::remove_file(&export_path);
+        let _ = std::fs::remove_file(&restore_path);
+
+        // 1. Peupler une base source
+        let mut src_store = Storage::open_at_path(&orig_path).unwrap();
+        let f1 = src_store.create_folder("Dossier Production", None).unwrap();
+        let c1 = src_store
+            .create_connection(sample_rdp_draft("Serveur Web", "192.168.1.10", Some(f1.id)))
+            .unwrap();
+        src_store.set_setting("theme_mode", "light").unwrap();
+
+        // 2. Exporter vers export_path
+        src_store.export_database(&export_path).unwrap();
+        assert!(export_path.exists());
+
+        // 3. Valider l'intégrité de l'export
+        let summary = Storage::validate_import_file(&export_path).unwrap();
+        assert_eq!(summary.folders_count, 1);
+        assert_eq!(summary.connections_count, 1);
+        assert_eq!(summary.dpapi_recoverable_count, 1);
+        assert_eq!(summary.dpapi_unrecoverable_count, 0);
+
+        // 4. Importer dans une nouvelle base cible
+        let mut dst_store = Storage::open_at_path(&restore_path).unwrap();
+        let import_res = dst_store.import_database(&export_path).unwrap();
+        assert_eq!(import_res.connections_count, 1);
+
+        // Vérifier les données restaurées
+        let folders = dst_store.list_folders().unwrap();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].name, "Dossier Production");
+
+        let conns = dst_store.list_connections().unwrap();
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].name, "Serveur Web");
+        assert_eq!(conns[0].host, "192.168.1.10");
+
+        let pwd = dst_store.load_decrypted_password(c1.id).unwrap().unwrap();
+        assert_eq!(pwd.as_str(), "MonSecretDPAPI!42");
+
+        let setting = dst_store.get_setting("theme_mode").unwrap();
+        assert_eq!(setting.as_deref(), Some("light"));
+
+        // Nettoyage
+        let _ = std::fs::remove_file(&orig_path);
+        let _ = std::fs::remove_file(&export_path);
+        let _ = std::fs::remove_file(&restore_path);
+        let _ = std::fs::remove_file(restore_path.with_extension("db.pre_import_bak"));
+    }
+
+    #[test]
+    fn test_storage_import_rejects_corrupted_or_invalid_file() {
+        let base_dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let fake_file = base_dir.join(format!("malvision_corrupt_{pid}.db"));
+
+        // Fichier texte non SQLite
+        std::fs::write(&fake_file, b"NOT A SQLITE DATABASE").unwrap();
+        let res = Storage::validate_import_file(&fake_file);
+        assert!(res.is_err());
+
+        // Fichier inexistant
+        let nonexistent = base_dir.join(format!("malvision_nonexistent_{pid}.db"));
+        assert!(Storage::validate_import_file(&nonexistent).is_err());
+
+        let _ = std::fs::remove_file(&fake_file);
     }
 }

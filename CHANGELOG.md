@@ -2,7 +2,50 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
-## [Jalon 3E] — Correction définitive du double-clic pleine largeur sur les lignes de connexion
+## [1.0.0] — Jalon 4 : Finalisation, Identité Graphique, Sauvegarde et Mises à Jour (2026-11-10)
+
+### Ajouté
+- **Identité graphique officielle & Ressources Windows PE** :
+  - Intégration du monogramme officiel géométrique « M » bicolore (Bleu Windows `#0078D4` et Cyan `#38BDF8`).
+  - Production et compilation via `build.rs` et `windres` d'une icône PE multirésolution complète (16×16, 24×24, 32×32, 48×48, 64×64, 128×128, 256×256) intégrée au binaire sans fichiers `.ico` externes.
+  - L'icône officielle s'affiche dans l'Explorateur Windows, la barre des tâches, Alt+Tab, la fenêtre principale et la zone de notification Windows (System Tray).
+  - Écran de démarrage (Splash screen) officiel non bloquant affiché pendant ~650 ms lors du démarrage normal (automatiquement contourné si l'application est démarrée minimisée dans le tray).
+  - Métadonnées de version PE complètes et rigoureuses : `ProductName: MALVISION`, `FileDescription: Malvision Remote Connection Manager`, `FileVersion: 1.0.0.0`, `ProductVersion: 1.0.0`, `InternalName: Malvision`, `OriginalFilename: Malvision.exe`.
+- **Centre de Paramètres moderne à 5 catégories avec volet latéral Fluent** :
+  - Réorganisation ergonomique sous forme de 5 onglets accessibles par clic souris dans la barre latérale gauche :
+    - **Général** : Thèmes (Sombre/Clair/Système), comportement de fermeture vers le tray, démarrage minimisé, connexions récentes, confirmation de fermeture.
+    - **Protocoles** : Détection automatique, configuration et tests de lancement pour AnyDesk et RustDesk, options RDP par défaut (presse-papiers, dynamic resolution, keyboard hook mode).
+    - **Données** : Sauvegardes SQLite et intégrité des secrets DPAPI.
+    - **Mises à jour** : Gestion du canal de mise à jour GitHub Releases, état de la dernière vérification, téléchargement sécurisé et notice portable.
+    - **À propos** : Rendu dynamique du monogramme officiel, numéro de version 1.0.0, informations légales et lien direct vers le dépôt GitHub.
+  - Navigation au clavier accessible : la touche Tabule (`Tab`) cycle exclusivement sur les contrôles visibles de la catégorie sélectionnée.
+- **Sauvegarde et Restauration transactionnelles SQLite (WAL & DPAPI)** :
+  - Module d'exportation `export_database` exploitant l'API de sauvegarde en ligne SQLite `rusqlite::backup::Backup`, garantissant une copie cohérente sans interrompre les sessions distantes ni bloquer le journal WAL.
+  - Sauvegarde préservant les mots de passe chiffrés par Windows DPAPI, permettant une restauration instantanée sans ressaisie des secrets sur la même machine/compte utilisateur.
+  - Module de validation d'import `validate_import_file` effectuant un contrôle d'intégrité SQLite (`PRAGMA integrity_check`), la validation du schéma relationnel et un comptage non destructif des secrets DPAPI déchiffrables et non déchiffrables.
+  - Restauration contrôlée `import_database` créant automatiquement une copie de sécurité `.pre_import_bak` avant remplacement, puis réinitialisant et actualisant en direct l'arborescence graphique.
+- **Vérification et téléchargement des mises à jour via GitHub Releases** :
+  - Client asynchrone WinHTTP natif en HTTPS interrogeant l'API publique `GET /repos/Malvirae/malvision/releases/latest` sans nécessiter de jeton d'authentification.
+  - Comparaison sémantique SemVer (`CURRENT = 1.0.0`) filtrant les versions antérieures, égales, ainsi que les versions identifiées comme brouillons (`draft`) ou pré-versions (`prerelease`).
+  - Vérification automatique en tâche de fond au démarrage (différée de 3 secondes pour ne pas ralentir le lancement) avec notification discrète dans la barre d'état.
+  - Bouton « Télécharger la mise à jour… » invitant à choisir l'emplacement de destination, téléchargeant l'asset binaire avec fichier temporaire `.tmp` et validant obligatoirement l'empreinte cryptographique SHA-256 officielle (extraite de `SHA256SUMS.txt` ou des Release Notes).
+  - Calcul cryptographique SHA-256 natif Windows CNG BCrypt (`BCRYPT_SHA256_ALGORITHM`) sans crate externe.
+- **Préparation de la distribution portable V1.0.0** :
+  - Binaire unique `Malvision.exe` d'environ 5 Mo, totalement autonome et prêt au déploiement sans installation.
+  - Fichier de sommes de contrôle `SHA256SUMS.txt` et modèle de Release Notes `RELEASE_NOTES_v1.0.0.md`.
+  - Durcissement de `.gitignore` excluant les bases de données SQLite, journaux WAL/SHM, fichiers temporaires et sauvegardes.
+
+### Testé
+- Suite de tests automatisés portée à 48 tests réussis (unitaires et intégration Win32 réels) :
+  - `test_storage_export_and_import_with_wal_and_dpapi_preservation`
+  - `test_storage_import_rejects_corrupted_or_invalid_file`
+  - `test_semver_parsing_and_comparisons`
+  - `test_parse_release_json_valid_and_ignores_prerelease`
+  - `test_extract_sha256_from_text`
+  - `test_write_and_verify_asset_bytes_sha256_success_and_tamper_detection`
+  - `test_compute_sha256_known_vector`
+  - `test_ui_settings_dialog_tabs_jalon4_categories_and_buttons`
+
 
 ### Corrigé
 - **Résolution de la cause racine du double-clic dans l'espace vide à droite du libellé** :

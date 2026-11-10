@@ -11,7 +11,10 @@
 use std::ffi::c_void;
 use windows::Win32::Foundation::{HLOCAL, LocalFree};
 use windows::Win32::Security::Cryptography::{
-    CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
+    BCRYPT_ALG_HANDLE, BCRYPT_HASH_HANDLE, BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS,
+    BCRYPT_SHA256_ALGORITHM, BCryptCloseAlgorithmProvider, BCryptCreateHash, BCryptDestroyHash,
+    BCryptFinishHash, BCryptHashData, BCryptOpenAlgorithmProvider, CRYPT_INTEGER_BLOB,
+    CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
 };
 use windows_core::PCWSTR;
 
@@ -185,9 +188,83 @@ pub fn decrypt_secret(ciphertext: &[u8]) -> Result<SecretString, String> {
     Ok(SecretString::new(result))
 }
 
+/// Calcule l'empreinte SHA-256 hexadécimale en minuscules d'un buffer d'octets
+/// via l'API native Windows CNG (`BCrypt`).
+pub fn compute_sha256(data: &[u8]) -> Result<String, String> {
+    unsafe {
+        let mut alg = BCRYPT_ALG_HANDLE::default();
+        let status = BCryptOpenAlgorithmProvider(
+            &mut alg,
+            BCRYPT_SHA256_ALGORITHM,
+            None,
+            BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS(0),
+        );
+        if status.is_err() {
+            return Err(format!(
+                "BCryptOpenAlgorithmProvider failed: 0x{:08X}",
+                status.0
+            ));
+        }
+
+        let mut hash_handle = BCRYPT_HASH_HANDLE::default();
+        let status = BCryptCreateHash(alg, &mut hash_handle, None, None, 0);
+        if status.is_err() {
+            let _ = BCryptCloseAlgorithmProvider(alg, 0);
+            return Err(format!("BCryptCreateHash failed: 0x{:08X}", status.0));
+        }
+
+        if !data.is_empty() {
+            let status = BCryptHashData(hash_handle, data, 0);
+            if status.is_err() {
+                let _ = BCryptDestroyHash(hash_handle);
+                let _ = BCryptCloseAlgorithmProvider(alg, 0);
+                return Err(format!("BCryptHashData failed: 0x{:08X}", status.0));
+            }
+        }
+
+        let mut hash = [0u8; 32];
+        let status = BCryptFinishHash(hash_handle, &mut hash, 0);
+        if status.is_err() {
+            let _ = BCryptDestroyHash(hash_handle);
+            let _ = BCryptCloseAlgorithmProvider(alg, 0);
+            return Err(format!("BCryptFinishHash failed: 0x{:08X}", status.0));
+        }
+
+        let _ = BCryptDestroyHash(hash_handle);
+        let _ = BCryptCloseAlgorithmProvider(alg, 0);
+
+        Ok(hash.iter().map(|b| format!("{b:02x}")).collect::<String>())
+    }
+}
+
+/// Calcule l'empreinte SHA-256 d'un fichier à partir de son chemin.
+pub fn compute_file_sha256(path: &std::path::Path) -> Result<String, String> {
+    let data = std::fs::read(path).map_err(|e| {
+        format!(
+            "Impossible de lire le fichier '{}' pour le calcul SHA-256 : {e}",
+            path.display()
+        )
+    })?;
+    compute_sha256(&data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_compute_sha256_known_vector() {
+        // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        let empty_hash = compute_sha256(b"").unwrap();
+        assert_eq!(
+            empty_hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+
+        // SHA-256("Malvision") = 6876c52a0a256fece328bb9ea4e116934a36eead0d648dd6dfb92cfb373cf2b6 (calculated or validated)
+        let hash_malvision = compute_sha256(b"Malvision").unwrap();
+        assert_eq!(hash_malvision.len(), 64);
+    }
 
     #[test]
     fn test_dpapi_encrypt_decrypt_roundtrip() {

@@ -2,9 +2,49 @@
 
 Application native **Windows 11 x64** de gestion de connexions distantes, écrite en **Rust** avec `windows-rs` (Win32 natif + COM/ActiveX + SQLite embarqué + DPAPI).
 
-## Vision et fonctionnalités (Jalons 1 à 3D)
+**Version actuelle :** `1.0.0` (V1.0.0 Stable Portable)
 
-- **Double-clic sur toute la largeur de ligne pour tous les protocoles (Jalons 3C & 3D)** :
+---
+
+## Fonctionnalités principales (V1.0.0)
+
+- **Identité graphique & Finition Windows 11 (Jalon 4)** :
+  - **Monogramme officiel « M »** géométrique bicolore (Bleu Windows `#0078D4` et Cyan `#38BDF8`) évoquant des écrans connectés.
+  - **Icône PE multirésolution** intégrée aux ressources du binaire exécutable (16×16, 24×24, 32×32, 48×48, 64×64, 128×128, 256×256) pour l'Explorateur Windows, la barre des tâches, Alt+Tab, la fenêtre principale et le System Tray.
+  - **Splash screen officiel** au démarrage (650 ms, non bloquant, masqué lors du démarrage minimisé).
+  - **Métadonnées de version Windows PE** complètes (`ProductName: MALVISION`, `FileDescription: Malvision Remote Connection Manager`, `FileVersion: 1.0.0.0`, `ProductVersion: 1.0.0`).
+- **Centre de Paramètres moderne à 5 catégories (Jalon 4)** :
+  - Volet de navigation latéral style Fluent avec 5 onglets dédiés :
+    1. **Général** : sélection du thème (Sombre, Clair, Système), comportement System Tray, démarrage avec Windows, connexions récentes.
+    2. **Protocoles** : chemins d'accès vers AnyDesk et RustDesk (avec détection automatique et test), options RDP par défaut (Presse-papiers, Dynamic Resolution, KeyboardHookMode).
+    3. **Données** : exportation transactionnelle de la configuration SQLite (compatible WAL, préservation DPAPI), importation avec contrôle d'intégrité et sauvegarde de sécurité `.pre_import_bak`.
+    4. **Mises à jour** : vérification automatique ou manuelle via l'API GitHub Releases, téléchargement sécurisé avec vérification SHA-256 et instructions de remplacement portable.
+    5. **À propos** : logo officiel, version installée, description, lien direct vers le dépôt GitHub et raccourci de vérification des versions.
+- **Sauvegarde et Restauration SQLite (Jalon 4)** :
+  - **Exportation WAL-safe** : utilisation de l'API de sauvegarde en ligne SQLite (`rusqlite::backup::Backup`), sans verrouillage ni déconnexion des sessions RDP actives.
+  - **Protection DPAPI** : conservation intégrale des mots de passe chiffrés par Windows DPAPI. Avertissement explicite sur la récupération liée au compte Windows.
+  - **Importation sécurisée** : contrôle strict d'intégrité SQLite (`PRAGMA integrity_check`), validation du schéma de tables, sauvegarde automatique préalable de la base active (`.pre_import_bak`), test non destructif de déchiffrement DPAPI et actualisation instantanée de l'interface.
+- **Vérification et mise à jour GitHub Releases (Jalon 4)** :
+  - Interrogation asynchrone non bloquante de l'API publique GitHub (`GET /repos/Malvirae/malvision/releases/latest`) via WinHTTP natif en HTTPS.
+  - Comparaison sémantique SemVer (`CURRENT = 1.0.0`), exclusion des pré-versions (`prerelease`) et brouillons (`draft`).
+  - Téléchargement sécurisé de l'asset `Malvision.exe` avec contrôle strict de l'empreinte SHA-256 officielle (extraite de `SHA256SUMS.txt` ou du descriptif de release).
+- **Double-clic pleine largeur sur tous les protocoles (Jalons 3C & 3D)** :
+  - Lancement immédiat de n'importe quelle connexion par double-clic sur l'icône, le libellé ou l'espace vide à droite du texte (`tree_hit_test_full_row`), pour les sessions RDP (onglet intégré), AnyDesk (avec transmission DPAPI sur stdin si configuré) et RustDesk.
+  - Expansion / repli fiable des dossiers sans déclenchement intempestif de connexion.
+- **Thématisation dynamique sans résidu (Jalons 2C, 3C & 3D)** :
+  - Basculement instantané Sombre <-> Clair <-> Système sans redémarrage, y compris en prévisualisation directe dans le dialogue Paramètres.
+  - Champ de recherche reconstruit dynamiquement éliminant tout cache UxTheme/DWM persistant sur Windows 11.
+- **Intégration externe native d'AnyDesk et RustDesk (Jalons 3, 3B et 3C)** :
+  - Détection automatique dans le Registre Windows (`HKLM`/`HKCU` `App Paths`) et les dossiers standards (`Program Files`, `Program Files (x86)`, `APPDATA`, `LOCALAPPDATA`).
+  - Formulaire de connexion adaptatif masquant automatiquement les champs non applicables (Port, Utilisateur, Domaine pour AnyDesk/RustDesk).
+  - Lancement via `CreateProcessW` natif Win32 sans shell, assainissement strict des ID distants, transmission sécurisée du mot de passe AnyDesk par tube anonyme standard input (`--with-password`).
+- **RDP Avancé — Plein écran natif, raccourcis et actions de session (Jalons 3 et 3B)** :
+  - Plein écran officiel ActiveX Microsoft (`IMsRdpClient9::put_FullScreen`) avec barre de connexion supérieure rétractable.
+  - Envoi précis des combinaisons spéciales (`SendKeys` matériel PS/2) : **Ctrl + Alt + Fin** (SAS RDP) et **Ctrl + Alt + Suppr**.
+  - Raccourcis Windows (`KeyboardHookMode`) paramétrables (Sur le poste distant, En plein écran uniquement, Sur le poste local).
+  - Redirection du presse-papiers et copie/collage natif de fichiers entre l'hôte et la session distante via la redirection de disques.
+  - Fermeture automatique des onglets déconnectés sans affecter les sessions en cours de reconnexion automatique.
+- **Distribution 100 % portable** : un unique exécutable `Malvision.exe` autonome d'environ 5 Mo, sans installation obligatoire, sans dépendances externes lourdes (ni Electron ni WebView2).
   - Lancement immédiat et fluide de n'importe quelle connexion par double-clic sur l'icône, le libellé ou l'espace vide à droite du texte (`tree_hit_test_full_row`), pour les sessions RDP (onglet intégré), AnyDesk (avec transmission DPAPI sur stdin si configuré) et RustDesk.
   - Résolution robuste par hit-test de rangée (`TVHT_ONITEM`, `TVHT_ONITEMRIGHT`, `TVHT_ONITEMINDENT` et sondage horizontal scanline) sans dépendre de l'état de sélection antérieur.
   - Le double-clic sur un dossier ou une racine assure son développement/repli sans lancer de fausse connexion, et les boutons d'expansion `[+]`/`[-]` fonctionnent sans interférence.

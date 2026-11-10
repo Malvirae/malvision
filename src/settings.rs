@@ -30,6 +30,10 @@ const KEY_RDP_KEYBOARD_HOOK_MODE: &str = "rdp_keyboard_hook_mode";
 const KEY_RESTORABLE_RDP_IDS: &str = "restorable_rdp_connection_ids";
 const KEY_ANYDESK_PATH: &str = "anydesk_path";
 const KEY_RUSTDESK_PATH: &str = "rustdesk_path";
+const KEY_CHECK_UPDATES_ON_STARTUP: &str = "check_updates_on_startup";
+const KEY_IGNORED_UPDATE_VERSION: &str = "ignored_update_version";
+const KEY_LAST_UPDATE_CHECK_TIME: &str = "last_update_check_time";
+const KEY_LAST_KNOWN_REMOTE_VERSION: &str = "last_known_remote_version";
 
 pub const DEFAULT_SIDEBAR_WIDTH: i32 = 260;
 pub const MIN_SIDEBAR_WIDTH: i32 = 200;
@@ -272,6 +276,10 @@ pub struct AppSettings {
     pub restorable_rdp_connection_ids: Vec<i64>,
     pub anydesk_path: String,
     pub rustdesk_path: String,
+    pub check_updates_on_startup: bool,
+    pub ignored_update_version: Option<String>,
+    pub last_update_check_time: Option<String>,
+    pub last_known_remote_version: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -292,6 +300,10 @@ impl Default for AppSettings {
             restorable_rdp_connection_ids: Vec::new(),
             anydesk_path: String::new(),
             rustdesk_path: String::new(),
+            check_updates_on_startup: true,
+            ignored_update_version: None,
+            last_update_check_time: None,
+            last_known_remote_version: None,
         }
     }
 }
@@ -416,6 +428,29 @@ impl AppSettings {
             .flatten()
             .unwrap_or_default();
 
+        let check_updates_on_startup = parse_bool_setting(
+            storage
+                .get_setting(KEY_CHECK_UPDATES_ON_STARTUP)
+                .ok()
+                .flatten(),
+            defaults.check_updates_on_startup,
+        );
+
+        let ignored_update_version = storage
+            .get_setting(KEY_IGNORED_UPDATE_VERSION)
+            .ok()
+            .flatten();
+
+        let last_update_check_time = storage
+            .get_setting(KEY_LAST_UPDATE_CHECK_TIME)
+            .ok()
+            .flatten();
+
+        let last_known_remote_version = storage
+            .get_setting(KEY_LAST_KNOWN_REMOTE_VERSION)
+            .ok()
+            .flatten();
+
         Self {
             sidebar_width,
             theme_mode,
@@ -432,6 +467,10 @@ impl AppSettings {
             restorable_rdp_connection_ids,
             anydesk_path,
             rustdesk_path,
+            check_updates_on_startup,
+            ignored_update_version,
+            last_update_check_time,
+            last_known_remote_version,
         }
     }
 
@@ -507,6 +546,23 @@ impl AppSettings {
         )?;
         storage.set_setting(KEY_ANYDESK_PATH, &self.anydesk_path)?;
         storage.set_setting(KEY_RUSTDESK_PATH, &self.rustdesk_path)?;
+        storage.set_setting(
+            KEY_CHECK_UPDATES_ON_STARTUP,
+            if self.check_updates_on_startup {
+                "1"
+            } else {
+                "0"
+            },
+        )?;
+        if let Some(ref ver) = self.ignored_update_version {
+            storage.set_setting(KEY_IGNORED_UPDATE_VERSION, ver)?;
+        }
+        if let Some(ref t) = self.last_update_check_time {
+            storage.set_setting(KEY_LAST_UPDATE_CHECK_TIME, t)?;
+        }
+        if let Some(ref ver) = self.last_known_remote_version {
+            storage.set_setting(KEY_LAST_KNOWN_REMOTE_VERSION, ver)?;
+        }
         Ok(())
     }
 
@@ -778,6 +834,10 @@ mod tests {
         );
         assert_eq!(settings.anydesk_path, "");
         assert_eq!(settings.rustdesk_path, "");
+        assert!(settings.check_updates_on_startup);
+        assert_eq!(settings.ignored_update_version, None);
+        assert_eq!(settings.last_update_check_time, None);
+        assert_eq!(settings.last_known_remote_version, None);
 
         // Modifier toutes les préférences et sauvegarder
         settings.theme_mode = ThemeMode::Light;
@@ -793,6 +853,10 @@ mod tests {
         settings.rdp_keyboard_hook_mode = RdpKeyboardHookMode::OnLocal;
         settings.anydesk_path = r"C:\Program Files (x86)\AnyDesk\AnyDesk.exe".to_string();
         settings.rustdesk_path = r"C:\Program Files\RustDesk\rustdesk.exe".to_string();
+        settings.check_updates_on_startup = false;
+        settings.ignored_update_version = Some("1.0.1".to_string());
+        settings.last_update_check_time = Some("2026-11-10 10:00:00".to_string());
+        settings.last_known_remote_version = Some("1.0.2".to_string());
         settings.save_all(&mut store).unwrap();
         settings.save_restorable_rdp_sessions(&mut store, &[10, 20, 10]);
 
@@ -821,6 +885,13 @@ mod tests {
         assert!(!reloaded.rdp_default_clipboard);
         assert!(!reloaded.rdp_default_dynamic_resolution);
         assert_eq!(reloaded.restorable_rdp_connection_ids, vec![10, 20]);
+        assert!(!reloaded.check_updates_on_startup);
+        assert_eq!(reloaded.ignored_update_version.as_deref(), Some("1.0.1"));
+        assert_eq!(
+            reloaded.last_update_check_time.as_deref(),
+            Some("2026-11-10 10:00:00")
+        );
+        assert_eq!(reloaded.last_known_remote_version.as_deref(), Some("1.0.2"));
 
         // Si close_to_tray est désactivé, start_minimized_to_tray doit être forcé à false
         let mut s2 = reloaded;

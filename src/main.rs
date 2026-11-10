@@ -8,6 +8,7 @@ mod sessions;
 mod settings;
 mod storage;
 mod ui;
+mod updater;
 
 use windows::Win32::System::Com::CoUninitialize;
 use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};

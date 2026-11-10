@@ -23,3 +23,13 @@ Thumbs.db
 *.secret
 *.key
 *.pem
+
+# SQLite databases, WAL, SHM & backups (DPAPI local data)
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.bak
+*.pre_import_bak
+*.tmp
+

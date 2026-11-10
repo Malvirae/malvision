@@ -19,8 +19,9 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::System::Threading::{CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW};
 use windows::Win32::UI::Shell::{
-    Common::COMDLG_FILTERSPEC, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FileOpenDialog, IFileDialog,
-    IFileOpenDialog, SIGDN_FILESYSPATH,
+    Common::COMDLG_FILTERSPEC, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT,
+    FOS_PATHMUSTEXIST, FileOpenDialog, FileSaveDialog, IFileDialog, IFileOpenDialog,
+    IFileSaveDialog, SIGDN_FILESYSPATH,
 };
 use windows_core::{Interface, PCWSTR, PWSTR, w};
 
@@ -497,6 +498,123 @@ pub fn browse_for_executable(parent_hwnd: HWND, title: &str) -> Option<PathBuf> 
 
             if dialog.Show(Some(parent_hwnd)).is_err() {
                 return None; // Annulé par l'utilisateur
+            }
+
+            let item = dialog.GetResult().ok()?;
+            let display_name_raw = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+            let path_str = display_name_raw.to_string().ok()?;
+            CoTaskMemFree(Some(display_name_raw.0 as *const _));
+
+            Some(PathBuf::from(path_str))
+        })();
+
+        if co_init.is_ok() {
+            CoUninitialize();
+        }
+        result
+    }
+}
+
+/// Ouvre le dialogue standard Windows « Enregistrer sous » (`IFileSaveDialog`)
+/// avec filtre personnalisé et extension par défaut.
+pub fn browse_for_save_file(
+    parent_hwnd: HWND,
+    title: &str,
+    default_filename: &str,
+    default_ext: &str,
+    filter_name: &str,
+    filter_spec: &str,
+) -> Option<PathBuf> {
+    unsafe {
+        let co_init = CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+
+        let result = (|| -> Option<PathBuf> {
+            let dialog: IFileSaveDialog =
+                CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+
+            let mut title_w: Vec<u16> = title.encode_utf16().collect();
+            title_w.push(0);
+            let _ = dialog.SetTitle(PCWSTR(title_w.as_ptr()));
+
+            let mut def_name_w: Vec<u16> = default_filename.encode_utf16().collect();
+            def_name_w.push(0);
+            let _ = dialog.SetFileName(PCWSTR(def_name_w.as_ptr()));
+
+            let mut def_ext_w: Vec<u16> = default_ext.encode_utf16().collect();
+            def_ext_w.push(0);
+            let _ = dialog.SetDefaultExtension(PCWSTR(def_ext_w.as_ptr()));
+
+            let _ =
+                dialog.SetOptions(FOS_OVERWRITEPROMPT | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+
+            let mut fname_w: Vec<u16> = filter_name.encode_utf16().collect();
+            fname_w.push(0);
+            let mut fspec_w: Vec<u16> = filter_spec.encode_utf16().collect();
+            fspec_w.push(0);
+
+            let filters = [COMDLG_FILTERSPEC {
+                pszName: PCWSTR(fname_w.as_ptr()),
+                pszSpec: PCWSTR(fspec_w.as_ptr()),
+            }];
+            let _ = dialog
+                .cast::<IFileDialog>()
+                .map(|d| d.SetFileTypes(&filters));
+
+            if dialog.Show(Some(parent_hwnd)).is_err() {
+                return None;
+            }
+
+            let item = dialog.GetResult().ok()?;
+            let display_name_raw = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+            let path_str = display_name_raw.to_string().ok()?;
+            CoTaskMemFree(Some(display_name_raw.0 as *const _));
+
+            Some(PathBuf::from(path_str))
+        })();
+
+        if co_init.is_ok() {
+            CoUninitialize();
+        }
+        result
+    }
+}
+
+/// Ouvre le dialogue standard Windows « Ouvrir » (`IFileOpenDialog`)
+/// avec filtre personnalisé.
+pub fn browse_for_open_file(
+    parent_hwnd: HWND,
+    title: &str,
+    filter_name: &str,
+    filter_spec: &str,
+) -> Option<PathBuf> {
+    unsafe {
+        let co_init = CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+
+        let result = (|| -> Option<PathBuf> {
+            let dialog: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+
+            let mut title_w: Vec<u16> = title.encode_utf16().collect();
+            title_w.push(0);
+            let _ = dialog.SetTitle(PCWSTR(title_w.as_ptr()));
+
+            let _ = dialog.SetOptions(FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+
+            let mut fname_w: Vec<u16> = filter_name.encode_utf16().collect();
+            fname_w.push(0);
+            let mut fspec_w: Vec<u16> = filter_spec.encode_utf16().collect();
+            fspec_w.push(0);
+
+            let filters = [COMDLG_FILTERSPEC {
+                pszName: PCWSTR(fname_w.as_ptr()),
+                pszSpec: PCWSTR(fspec_w.as_ptr()),
+            }];
+            let _ = dialog
+                .cast::<IFileDialog>()
+                .map(|d| d.SetFileTypes(&filters));
+
+            if dialog.Show(Some(parent_hwnd)).is_err() {
+                return None;
             }
 
             let item = dialog.GetResult().ok()?;
