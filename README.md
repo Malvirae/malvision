@@ -2,11 +2,20 @@
 
 Application native **Windows 11 x64** de gestion de connexions distantes, écrite en **Rust** avec `windows-rs` (Win32 natif + COM/ActiveX + SQLite embarqué + DPAPI).
 
-**Version actuelle :** `1.0.4` (V1.0.4 Stable Portable)
+**Version actuelle :** `1.0.5` (V1.0.5 Portable)
 
 ---
 
-## Fonctionnalités principales (V1.0.4)
+## Fonctionnalités principales (V1.0.5)
+
+- **Client FTP intégré & Gestion DPAPI des identifiants (V1.0.5)** :
+  - **Explorateur FTP natif intégré par onglet (`FtpSessionHost`)** reprenant fidèlement le design Fluent de Malvision (thèmes Sombre / Clair / Système mis à jour à chaud, GDI double-buffering HiDPI, badge `FTP`).
+  - **Moteur FTP Rust pur (RFC 959 / RFC 3659)** sans dépendance externe : modes passifs `EPSV`/`PASV` (repli NAT), `OPTS UTF8 ON`, `TYPE I`, listage `MLSD`/`LIST` (Unix & DOS), téléchargement atomique `.part`, annulation de transfert et protection stricte anti-injection CR/LF.
+  - **Interactions complètes** : barre d'adresse éditable, téléversement par sélecteur Win32 ou glisser-déposer (`WM_DROPFILES`), téléchargement, création de dossier, renommage, suppression et journal d'activité temps réel.
+  - **Identifiants flexibles & Windows DPAPI** : formulaire adaptatif (`FTP (Client intégré)`, port `21` par défaut, dossier initial facultatif, URL `ftp://`), et fenêtre modale de saisie à la connexion ou sur erreur d'authentification avec mémorisation DPAPI en un clic (schéma SQLite v5).
+
+- **Transmission automatique du mot de passe RustDesk (V1.0.5)** :
+  - Déchiffrement Windows DPAPI au lancement d'une session RustDesk et passage sécurisé via `--connect "<id>" --password "<mot_de_passe>"` avec échappement `CommandLineToArgvW` et effacement volatil du tampon mémoire après `CreateProcessW`.
 
 - **Mise à jour automatique en place avec remplacement et redémarrage (V1.0.4)** :
   - **Expérience « Un clic » moderne** : bouton proéminent **« Mettre à jour et redémarrer »** dans Paramètres > Mises à jour dès qu'une version supérieure est détectée.
@@ -180,6 +189,7 @@ Application native **Windows 11 x64** de gestion de connexions distantes, écrit
 - [`src/security.rs`](src/security.rs) : Chiffrement/déchiffrement des mots de passe via Windows DPAPI (`CryptProtectData` / `CryptUnprotectData`) et conteneur mémoire sécurisé `SecretString` à effacement volatil sur `Drop`.
 - [`src/storage.rs`](src/storage.rs) : Persistance locale SQLite embarquée (`malvision.db`) avec schéma v3, tables `folders`, `connections`, `recent_connections`, `settings`, journalisation WAL et intégrité référentielle.
 - [`src/settings.rs`](src/settings.rs) : Modèle et persistance de l'ensemble des réglages applicatifs (chemins AnyDesk/RustDesk, `RdpKeyboardHookMode`, System Tray, thèmes, Startup shortcut).
+- [`src/ftp.rs`](src/ftp.rs) : Moteur client FTP pur-Rust (RFC 959/3659, `EPSV`/`PASV`, `MLSD`/`LIST`, transferts `.part` annulables) et hôte graphique natif Win32/GDI par onglet (`FtpSessionHost`) avec glisser-déposer.
 - [`src/rdp.rs`](src/rdp.rs) : Hébergement ActiveX natif (`AtlAxWin`), interfaces Microsoft RDP `IMsRdpClient9`, `IMsRdpClientAdvancedSettings8`, `IMsRdpClientSecuredSettings2`, `IMsRdpClientNonScriptable` (`SendKeys` pour Ctrl+Alt+Del et Ctrl+Alt+Fin, `put_FullScreen`, `put_KeyboardHookMode`, `put_RedirectDrives`, `put_RedirectClipboard`), sink d'événements COM avec désactivation atomique.
 - [`src/sessions.rs`](src/sessions.rs) : Gestionnaire multi-sessions (`SessionManager`, `RdpSessionTab`) orchestrant l'ouverture, la commutation d'onglets, la transmission des raccourcis spéciaux de session et la fermeture automatique des onglets déconnectés.
 - [`src/ui.rs`](src/ui.rs) : Interface graphique Win32/GDI avec thématisation dynamique intégrale (Sombre / Clair / Système), arborescence `TreeView`, barre d'onglets avec bouton d'action contextuel `⚡`, menu de session popup, boîte de dialogue des Paramètres (avec sections RDP et Applications externes) et dialogue modal moderne.

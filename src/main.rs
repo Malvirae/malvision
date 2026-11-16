@@ -2,6 +2,7 @@
 
 mod bootstrap;
 mod external_apps;
+mod ftp;
 mod models;
 mod rdp;
 mod security;

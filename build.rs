@@ -7,6 +7,7 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=assets/branding/malvision-logo.png");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=CARGO_PKG_VERSION");
 
     let logo_path = Path::new("assets/branding/malvision-logo.png");
     let ico_path = Path::new("assets/branding/malvision.ico");
@@ -26,11 +27,18 @@ fn main() {
             .unwrap()
             .replace('\\', "/");
 
+        let pkg_ver = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "1.0.5".to_string());
+        let major = env::var("CARGO_PKG_VERSION_MAJOR").unwrap_or_else(|_| "1".to_string());
+        let minor = env::var("CARGO_PKG_VERSION_MINOR").unwrap_or_else(|_| "0".to_string());
+        let patch = env::var("CARGO_PKG_VERSION_PATCH").unwrap_or_else(|_| "5".to_string());
+        let file_ver_comma = format!("{major},{minor},{patch},0");
+        let file_ver_dot = format!("{major}.{minor}.{patch}.0");
+
         let rc_content = format!(
             r#"#pragma code_page(65001)
 1 VERSIONINFO
-FILEVERSION 1,0,4,0
-PRODUCTVERSION 1,0,4,0
+FILEVERSION {file_ver_comma}
+PRODUCTVERSION {file_ver_comma}
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -43,8 +51,8 @@ BEGIN
         BEGIN
             VALUE "ProductName", "MALVISION\0"
             VALUE "FileDescription", "Malvision Remote Connection Manager\0"
-            VALUE "FileVersion", "1.0.4.0\0"
-            VALUE "ProductVersion", "1.0.4\0"
+            VALUE "FileVersion", "{file_ver_dot}\0"
+            VALUE "ProductVersion", "{pkg_ver}\0"
             VALUE "InternalName", "Malvision\0"
             VALUE "OriginalFilename", "Malvision.exe\0"
             VALUE "LegalCopyright", "Copyright (c) 2026 Malvirae\0"
@@ -53,8 +61,8 @@ BEGIN
         BEGIN
             VALUE "ProductName", "MALVISION\0"
             VALUE "FileDescription", "Malvision Remote Connection Manager\0"
-            VALUE "FileVersion", "1.0.4.0\0"
-            VALUE "ProductVersion", "1.0.4\0"
+            VALUE "FileVersion", "{file_ver_dot}\0"
+            VALUE "ProductVersion", "{pkg_ver}\0"
             VALUE "InternalName", "Malvision\0"
             VALUE "OriginalFilename", "Malvision.exe\0"
             VALUE "LegalCopyright", "Copyright (c) 2026 Malvirae\0"
@@ -65,9 +73,8 @@ BEGIN
         VALUE "Translation", 0x0409, 1200, 0x040c, 1200
     END
 END
-1 ICON "{}"
+1 ICON "{ico_path_abs}"
 "#,
-            ico_path_abs
         );
 
         std::fs::write(&rc_path, rc_content).expect("Failed to write resource.rc");

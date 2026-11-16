@@ -226,16 +226,57 @@ pub fn build_anydesk_command_line(
     utf16
 }
 
+/// Échappe un argument pour la ligne de commande Windows selon les règles `CommandLineToArgvW` / CRT.
+pub fn quote_win32_arg(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for ch in arg.chars() {
+        if ch == '\\' {
+            backslashes += 1;
+        } else if ch == '"' {
+            for _ in 0..(backslashes * 2 + 1) {
+                out.push('\\');
+            }
+            backslashes = 0;
+            out.push('"');
+        } else {
+            for _ in 0..backslashes {
+                out.push('\\');
+            }
+            backslashes = 0;
+            out.push(ch);
+        }
+    }
+    for _ in 0..(backslashes * 2) {
+        out.push('\\');
+    }
+    out.push('"');
+    out
+}
+
 /// Construit la ligne de commande UTF-16 correctement échappée pour RustDesk :
-/// `"C:\Path\To\rustdesk.exe" --connect "<id>"`
-pub fn build_rustdesk_command_line(exe_path: &Path, remote_id: Option<&str>) -> Vec<u16> {
+/// `"C:\Path\To\rustdesk.exe" --connect "<id>" [--password "<pwd>"]`
+pub fn build_rustdesk_command_line(
+    exe_path: &Path,
+    remote_id: Option<&str>,
+    password: Option<&str>,
+) -> Vec<u16> {
     let mut cmd = format!("\"{}\"", exe_path.display());
     if let Some(id) = remote_id
         && let Ok(safe_id) = sanitize_remote_id(id)
     {
         cmd.push_str(&format!(" --connect \"{safe_id}\""));
+        if let Some(pwd) = password
+            && !pwd.is_empty()
+            && !pwd.chars().any(|c| c == '\r' || c == '\n' || c == '\0')
+        {
+            cmd.push_str(" --password ");
+            cmd.push_str(&quote_win32_arg(pwd));
+        }
     }
     let mut utf16: Vec<u16> = cmd.encode_utf16().collect();
+    crate::security::zeroize_string(&mut cmd);
     utf16.push(0);
     utf16
 }
@@ -448,10 +489,11 @@ pub fn launch_anydesk_connection(
     }
 }
 
-/// Lance une connexion RustDesk vers un identifiant ou alias distant.
+/// Lance une connexion RustDesk vers un identifiant ou alias distant, avec transmission éventuelle du mot de passe.
 pub fn launch_rustdesk_connection(
     configured_path: &str,
     remote_id: &str,
+    password: Option<&str>,
 ) -> Result<String, String> {
     let exe_path = if configured_path.trim().is_empty() {
         detect_rustdesk_path().ok_or_else(|| {
@@ -462,12 +504,23 @@ pub fn launch_rustdesk_connection(
     };
 
     let safe_id = sanitize_remote_id(remote_id)?;
-    let cmd_line = build_rustdesk_command_line(&exe_path, Some(&safe_id));
-    let pid = launch_external_process(&exe_path, &cmd_line)?;
+    let has_pwd = password.is_some_and(|p| !p.is_empty());
+    let mut cmd_line = build_rustdesk_command_line(&exe_path, Some(&safe_id), password);
+    let pid_res = launch_external_process(&exe_path, &cmd_line);
+    for u in &mut cmd_line {
+        unsafe { std::ptr::write_volatile(u, 0) };
+    }
+    let pid = pid_res?;
 
-    Ok(format!(
-        "Processus RustDesk lancé (PID {pid}) vers l'identifiant '{safe_id}'. La fenêtre RustDesk prend en charge la négociation et l'authentification."
-    ))
+    if has_pwd {
+        Ok(format!(
+            "Processus RustDesk lancé (PID {pid}) vers l'identifiant '{safe_id}' avec transmission du mot de passe enregistré (--connect --password)."
+        ))
+    } else {
+        Ok(format!(
+            "Processus RustDesk lancé (PID {pid}) vers l'identifiant '{safe_id}'. La fenêtre RustDesk prend en charge la négociation et l'authentification."
+        ))
+    }
 }
 
 /// Ouvre le dialogue standard Windows de sélection de fichier (`IFileOpenDialog`)
@@ -726,11 +779,18 @@ mod tests {
     #[test]
     fn test_build_rustdesk_command_line_encoding() {
         let exe = Path::new(r"C:\Program Files\RustDesk\rustdesk.exe");
-        let cmd = build_rustdesk_command_line(exe, Some("987654321"));
+        let cmd = build_rustdesk_command_line(exe, Some("987654321"), None);
         let decoded = String::from_utf16_lossy(&cmd[..cmd.len() - 1]);
         assert_eq!(
             decoded,
             r#""C:\Program Files\RustDesk\rustdesk.exe" --connect "987654321""#
+        );
+
+        let cmd_pwd = build_rustdesk_command_line(exe, Some("987654321"), Some(r#"Pa$w "0rd\"#));
+        let decoded_pwd = String::from_utf16_lossy(&cmd_pwd[..cmd_pwd.len() - 1]);
+        assert_eq!(
+            decoded_pwd,
+            r#""C:\Program Files\RustDesk\rustdesk.exe" --connect "987654321" --password "Pa$w \"0rd\\""#
         );
     }
 

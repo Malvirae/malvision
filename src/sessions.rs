@@ -17,6 +17,10 @@
 //!   lorsque le dernier onglet se ferme.
 //! - Protection contre les doubles destructions COM et la réentrance depuis les callbacks.
 
+use crate::ftp::{
+    FTP_EVT_AUTH_FAILED, FTP_EVT_CONNECTED, FTP_EVT_CONNECTING, FTP_EVT_DISCONNECTED,
+    FTP_EVT_ERROR, FTP_EVT_STATUS_TEXT, FtpSessionHost,
+};
 use crate::models::{ConnectionItem, Protocol};
 use crate::rdp::{
     RDP_EVT_AUTH_WARNING_DISMISSED, RDP_EVT_AUTH_WARNING_DISPLAYED, RDP_EVT_AUTO_RECONNECTING,
@@ -52,8 +56,51 @@ pub struct RdpEventOutcome {
     pub error_alert: Option<(String, String)>,
 }
 
-/// Représente une session RDP ouverte dans un onglet.
-pub struct RdpSessionTab {
+/// Hôte concret d'un onglet de session ouverte (RDP ActiveX ou Client FTP natif).
+pub enum SessionHost {
+    Rdp(RdpActiveXHost),
+    Ftp(FtpSessionHost),
+}
+
+impl SessionHost {
+    pub fn set_visible(&self, visible: bool) {
+        match self {
+            Self::Rdp(h) => h.set_visible(visible),
+            Self::Ftp(h) => h.set_visible(visible),
+        }
+    }
+
+    pub fn resize(&self, x: i32, y: i32, width: i32, height: i32) {
+        match self {
+            Self::Rdp(h) => h.resize(x, y, width, height),
+            Self::Ftp(h) => h.resize(x, y, width, height),
+        }
+    }
+
+    pub fn focus_control(&self) {
+        match self {
+            Self::Rdp(h) => h.focus_control(),
+            Self::Ftp(h) => h.focus_control(),
+        }
+    }
+
+    pub fn cleanup_before_drop(&mut self) {
+        match self {
+            Self::Rdp(h) => {
+                h.deactivate_events();
+                if h.is_active() {
+                    let _ = h.disconnect();
+                }
+            }
+            Self::Ftp(h) => {
+                h.disconnect();
+            }
+        }
+    }
+}
+
+/// Représente une session ouverte dans un onglet (RDP ou FTP).
+pub struct SessionTab {
     pub session_id: u32,
     pub connection_id: Option<i64>,
     pub title: String,
@@ -63,13 +110,16 @@ pub struct RdpSessionTab {
     pub auto_reconnecting: bool,
     pub status_detail: String,
     pub last_error: Option<String>,
-    pub host: RdpActiveXHost,
+    pub host: SessionHost,
 }
 
-/// Gestionnaire central des onglets de sessions RDP actives/ouvertes.
+#[allow(dead_code)]
+pub type RdpSessionTab = SessionTab;
+
+/// Gestionnaire central des onglets de sessions actives/ouvertes (RDP & FTP).
 pub struct SessionManager {
     next_session_id: u32,
-    tabs: Vec<RdpSessionTab>,
+    tabs: Vec<SessionTab>,
     active_session_id: Option<u32>,
 }
 
@@ -175,7 +225,7 @@ impl SessionManager {
             host.advise_cookie()
         );
 
-        let tab = RdpSessionTab {
+        let tab = SessionTab {
             session_id: host.session_id(),
             connection_id: Some(conn.id),
             title: conn.name.clone(),
@@ -185,7 +235,59 @@ impl SessionManager {
             auto_reconnecting: false,
             status_detail: detail,
             last_error: None,
-            host,
+            host: SessionHost::Rdp(host),
+        };
+
+        self.tabs.push(tab);
+        self.select_tab(session_id, viewport);
+        Ok(session_id)
+    }
+
+    /// Crée et démarre un nouvel onglet de session FTP intégrée dans `parent_hwnd`.
+    pub fn open_ftp_session(
+        &mut self,
+        parent_hwnd: HWND,
+        viewport: RECT,
+        conn: &ConnectionItem,
+        username: String,
+        password: SecretString,
+    ) -> Result<u32, String> {
+        let session_id = self.next_session_id;
+        self.next_session_id = self.next_session_id.wrapping_add(1).max(1);
+
+        let x = viewport.left;
+        let y = viewport.top;
+        let width = (viewport.right - viewport.left).max(400);
+        let height = (viewport.bottom - viewport.top).max(300);
+
+        let host = FtpSessionHost::create(
+            session_id,
+            parent_hwnd,
+            conn.host.clone(),
+            conn.port,
+            username,
+            password,
+            conn.domain.clone(),
+            x,
+            y,
+            width,
+            height,
+        )?;
+
+        let host_label = conn.endpoint_label();
+        let detail = format!("Connexion FTP en cours vers {host_label}...");
+
+        let tab = SessionTab {
+            session_id: host.session_id(),
+            connection_id: Some(conn.id),
+            title: conn.name.clone(),
+            protocol: conn.protocol,
+            host_label,
+            status: SessionStatus::Connecting,
+            auto_reconnecting: false,
+            status_detail: detail,
+            last_error: None,
+            host: SessionHost::Ftp(host),
         };
 
         self.tabs.push(tab);
@@ -229,10 +331,7 @@ impl SessionManager {
         // Retirer l'onglet de `self.tabs` AVANT tout appel COM pour garantir qu'aucun événement
         // réentrant ou déjà en file d'attente ne puisse tenter une double destruction.
         let mut removed = self.tabs.remove(idx);
-        removed.host.deactivate_events();
-        if removed.host.is_active() {
-            let _ = removed.host.disconnect();
-        }
+        removed.host.cleanup_before_drop();
         drop(removed);
 
         if self.active_session_id == Some(session_id) {
@@ -247,15 +346,12 @@ impl SessionManager {
         true
     }
 
-    /// Ferme proprement toutes les sessions RDP ouvertes (ex. fermeture de l'application).
+    /// Ferme proprement toutes les sessions ouvertes (ex. fermeture de l'application).
     pub fn close_all(&mut self) {
-        let drained: Vec<RdpSessionTab> = std::mem::take(&mut self.tabs);
+        let drained: Vec<SessionTab> = std::mem::take(&mut self.tabs);
         self.active_session_id = None;
         for mut tab in drained {
-            tab.host.deactivate_events();
-            if tab.host.is_active() {
-                let _ = tab.host.disconnect();
-            }
+            tab.host.cleanup_before_drop();
             drop(tab);
         }
     }
@@ -277,7 +373,10 @@ impl SessionManager {
         let Some(tab) = self.active_tab() else {
             return Err("Aucun onglet RDP actif pour envoyer Ctrl + Alt + Suppr.".to_string());
         };
-        tab.host.send_cad()
+        let SessionHost::Rdp(ref host) = tab.host else {
+            return Err("Cette action est réservée aux sessions RDP.".to_string());
+        };
+        host.send_cad()
     }
 
     /// Envoie Ctrl + Alt + Fin à la session RDP active (invoque l'écran de sécurité distant sous RDP).
@@ -285,7 +384,10 @@ impl SessionManager {
         let Some(tab) = self.active_tab() else {
             return Err("Aucun onglet RDP actif pour envoyer Ctrl + Alt + Fin.".to_string());
         };
-        tab.host.send_ctrl_alt_end()
+        let SessionHost::Rdp(ref host) = tab.host else {
+            return Err("Cette action est réservée aux sessions RDP.".to_string());
+        };
+        host.send_ctrl_alt_end()
     }
 
     /// Bascule la session RDP active entre mode plein écran et fenêtré.
@@ -293,16 +395,83 @@ impl SessionManager {
         let Some(tab) = self.active_tab() else {
             return Err("Aucun onglet RDP actif pour basculer le plein écran.".to_string());
         };
-        let new_state = !tab.host.is_full_screen();
-        tab.host.set_full_screen(new_state)?;
+        let SessionHost::Rdp(ref host) = tab.host else {
+            return Err("Le plein écran est réservé aux sessions RDP.".to_string());
+        };
+        let new_state = !host.is_full_screen();
+        host.set_full_screen(new_state)?;
         Ok(new_state)
     }
 
     /// Indique si la session RDP active est actuellement en plein écran.
     pub fn is_active_fullscreen(&self) -> bool {
         self.active_tab()
-            .map(|t| t.host.is_full_screen())
+            .map(|t| match t.host {
+                SessionHost::Rdp(ref h) => h.is_full_screen(),
+                SessionHost::Ftp(_) => false,
+            })
             .unwrap_or(false)
+    }
+
+    /// Traite un événement d'onglet FTP et met à jour son statut dans la barre d'état.
+    pub fn handle_ftp_event(&mut self, session_id: u32, event_code: usize) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.session_id == session_id) else {
+            return false;
+        };
+        let SessionHost::Ftp(ref ftp_host) = tab.host else {
+            return false;
+        };
+        if let Some(detail) = ftp_host.latest_status_detail() {
+            tab.status_detail = detail;
+        }
+        match event_code {
+            FTP_EVT_CONNECTING => {
+                tab.status = SessionStatus::Connecting;
+                tab.last_error = None;
+            }
+            FTP_EVT_CONNECTED => {
+                tab.status = SessionStatus::LoggedIn;
+                tab.last_error = None;
+            }
+            FTP_EVT_AUTH_FAILED | FTP_EVT_ERROR => {
+                tab.status = SessionStatus::Error;
+                tab.last_error = Some(tab.status_detail.clone());
+            }
+            FTP_EVT_DISCONNECTED => {
+                tab.status = SessionStatus::Disconnected;
+            }
+            FTP_EVT_STATUS_TEXT => {}
+            _ => {}
+        }
+        true
+    }
+
+    /// Reconnecte un onglet FTP avec de nouveaux identifiants saisis/mis à jour.
+    pub fn reconnect_ftp_credentials(
+        &mut self,
+        session_id: u32,
+        username: String,
+        password: SecretString,
+    ) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.session_id == session_id) else {
+            return false;
+        };
+        let SessionHost::Ftp(ref ftp_host) = tab.host else {
+            return false;
+        };
+        tab.status = SessionStatus::Connecting;
+        tab.last_error = None;
+        ftp_host.reconnect_with_credentials(username, password);
+        true
+    }
+
+    /// Réapplique le thème actif sur tous les onglets FTP natifs ouverts.
+    pub fn refresh_themes(&self) {
+        for tab in &self.tabs {
+            if let SessionHost::Ftp(ref ftp_host) = tab.host {
+                ftp_host.refresh_theme();
+            }
+        }
     }
 
     /// Traite un événement COM `IMsTscAxEvents` reçu pour `session_id` et ferme automatiquement
@@ -320,7 +489,10 @@ impl SessionManager {
         };
         let target = tab.host_label.clone();
         let title = tab.title.clone();
-        let real_conn_state = tab.host.connection_state();
+        let real_conn_state = match tab.host {
+            SessionHost::Rdp(ref h) => h.connection_state(),
+            SessionHost::Ftp(_) => return RdpEventOutcome::default(),
+        };
 
         match event_code {
             RDP_EVT_CONNECTING => {
@@ -457,7 +629,10 @@ impl SessionManager {
                 }
 
                 let disc_reason = param as i32;
-                let (ext_reason, desc) = tab.host.describe_disconnect(disc_reason);
+                let (ext_reason, desc) = match tab.host {
+                    SessionHost::Rdp(ref h) => h.describe_disconnect(disc_reason),
+                    SessionHost::Ftp(_) => (0, String::new()),
+                };
                 // Déconnexion volontaire, déconnexion depuis le bureau distant ou fermeture de session Windows distante :
                 // disc_reason 1 (locale), 2 (par le serveur/logoff), 3 (initiée par le serveur)
                 // avec ext_reason 0 (aucune erreur), 5 (remplacée), 11 (déconnectée par l'utilisateur) ou 12 (logoff distant).
@@ -520,7 +695,10 @@ impl SessionManager {
         let mut to_close = Vec::new();
 
         for tab in &mut self.tabs {
-            let real_state = tab.host.connection_state();
+            let SessionHost::Rdp(ref rdp_host) = tab.host else {
+                continue;
+            };
+            let real_state = rdp_host.connection_state();
             let target = &tab.host_label;
             match real_state {
                 1 => {
@@ -622,7 +800,7 @@ mod tests {
                 auto_reconnecting: false,
                 status_detail: "Prêt".to_string(),
                 last_error: None,
-                host: host1,
+                host: SessionHost::Rdp(host1),
             });
             mgr.tabs.push(RdpSessionTab {
                 session_id: 2,
@@ -634,7 +812,7 @@ mod tests {
                 auto_reconnecting: false,
                 status_detail: "Prêt".to_string(),
                 last_error: None,
-                host: host2,
+                host: SessionHost::Rdp(host2),
             });
 
             // Sélectionner l'onglet 1 puis l'onglet 2 : les deux HWNDs ActiveX doivent rester valides
@@ -702,7 +880,7 @@ mod tests {
                 auto_reconnecting: false,
                 status_detail: "Connecté".to_string(),
                 last_error: None,
-                host: host1,
+                host: SessionHost::Rdp(host1),
             });
             mgr.tabs.push(RdpSessionTab {
                 session_id: 20,
@@ -714,7 +892,7 @@ mod tests {
                 auto_reconnecting: false,
                 status_detail: "Connecté".to_string(),
                 last_error: None,
-                host: host2,
+                host: SessionHost::Rdp(host2),
             });
             mgr.tabs.push(RdpSessionTab {
                 session_id: 30,
@@ -726,7 +904,7 @@ mod tests {
                 auto_reconnecting: false,
                 status_detail: "Connecté".to_string(),
                 last_error: None,
-                host: host3,
+                host: SessionHost::Rdp(host3),
             });
             mgr.select_tab(20, viewport);
             assert_eq!(mgr.active_session_id(), Some(20));

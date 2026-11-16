@@ -1,8 +1,8 @@
 [package]
 name = "malvision"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2024"
-description = "Application native Windows 11 x64 de gestion de connexions distantes (RDP intégré, AnyDesk, RustDesk)"
+description = "Application native Windows 11 x64 de gestion de connexions distantes (RDP intégré, FTP intégré, AnyDesk, RustDesk)"
 authors = ["Malvirae"]
 publish = false
 

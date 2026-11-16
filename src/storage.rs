@@ -15,7 +15,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const CURRENT_SCHEMA_VERSION: i32 = 4;
+const CURRENT_SCHEMA_VERSION: i32 = 5;
 
 /// Résumé du diagnostic et du résultat d'un import de configuration SQLite.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,6 +322,76 @@ impl Storage {
 
             tx.commit()
                 .map_err(|e| format!("Échec de validation de la migration SQLite v4 : {e}"))?;
+        }
+
+        if version < 5 {
+            // Désactiver temporairement foreign_keys hors transaction pour recréer `connections`
+            // avec le protocole `'ftp'` autorisé dans la contrainte CHECK sans altérer les données existantes.
+            self.conn
+                .execute_batch("PRAGMA foreign_keys = OFF;")
+                .map_err(|e| format!("Échec préparation migration v5 (FK OFF) : {e}"))?;
+
+            let migration_res: Result<(), String> = (|| {
+                let tx = self
+                    .conn
+                    .transaction()
+                    .map_err(|e| format!("Échec ouverture transaction migration v5 : {e}"))?;
+
+                tx.execute_batch(
+                    "CREATE TABLE connections_v5 (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        folder_id INTEGER NULL REFERENCES folders(id) ON DELETE SET NULL,
+                        name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                        protocol TEXT NOT NULL CHECK(protocol IN ('rdp', 'anydesk', 'rustdesk', 'ftp')),
+                        host TEXT NOT NULL CHECK(length(trim(host)) > 0),
+                        port INTEGER NOT NULL DEFAULT 3389 CHECK(port BETWEEN 1 AND 65535),
+                        username TEXT NOT NULL DEFAULT '',
+                        domain TEXT NOT NULL DEFAULT '',
+                        description TEXT NOT NULL DEFAULT '',
+                        is_favorite INTEGER NOT NULL DEFAULT 0,
+                        save_password INTEGER NOT NULL DEFAULT 0,
+                        encrypted_password BLOB NULL,
+                        dynamic_resolution INTEGER NOT NULL DEFAULT 1,
+                        redirect_clipboard INTEGER NOT NULL DEFAULT 1,
+                        sort_order INTEGER NOT NULL DEFAULT 0,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        last_connected_at INTEGER NULL,
+                        is_priority INTEGER NOT NULL DEFAULT 0
+                    );
+
+                    INSERT INTO connections_v5 (
+                        id, folder_id, name, protocol, host, port, username, domain, description,
+                        is_favorite, save_password, encrypted_password, dynamic_resolution,
+                        redirect_clipboard, sort_order, created_at, updated_at, last_connected_at,
+                        is_priority
+                    )
+                    SELECT
+                        id, folder_id, name, protocol, host, port, username, domain, description,
+                        is_favorite, save_password, encrypted_password, dynamic_resolution,
+                        redirect_clipboard, sort_order, created_at, updated_at, last_connected_at,
+                        is_priority
+                    FROM connections;
+
+                    DROP TABLE connections;
+                    ALTER TABLE connections_v5 RENAME TO connections;
+
+                    CREATE INDEX IF NOT EXISTS idx_connections_folder ON connections(folder_id, sort_order, name);
+                    CREATE INDEX IF NOT EXISTS idx_connections_favorite ON connections(is_favorite, name);
+                    CREATE INDEX IF NOT EXISTS idx_connections_priority ON connections(is_priority, name);
+
+                    PRAGMA user_version = 5;",
+                )
+                .map_err(|e| format!("Échec de la migration SQLite v5 : {e}"))?;
+
+                tx.commit()
+                    .map_err(|e| format!("Échec de validation de la migration SQLite v5 : {e}"))?;
+                Ok(())
+            })();
+
+            let fk_on_res = self.conn.execute_batch("PRAGMA foreign_keys = ON;");
+            migration_res?;
+            fk_on_res.map_err(|e| format!("Échec réactivation foreign_keys post-v5 : {e}"))?;
         }
 
         if version > CURRENT_SCHEMA_VERSION {
@@ -819,6 +889,52 @@ impl Storage {
         draft.password.clear();
         tx.commit()
             .map_err(|e| format!("Validation mise à jour connexion : {e}"))?;
+
+        self.get_connection(connection_id)?
+            .ok_or_else(|| "Connexion mise à jour introuvable.".to_string())
+    }
+
+    /// Enregistre ou met à jour uniquement les identifiants (nom d'utilisateur et mot de passe chiffré via Windows DPAPI)
+    /// d'une connexion existante (utile notamment lors de la connexion FTP interactive).
+    pub fn update_connection_credentials(
+        &mut self,
+        connection_id: i64,
+        username: &str,
+        mut password: SecretString,
+    ) -> Result<ConnectionItem, String> {
+        if !self.connection_exists(connection_id)? {
+            password.clear();
+            return Err(format!("La connexion #{connection_id} n'existe pas."));
+        }
+
+        let clean_user = username.trim().to_string();
+        let encrypted_blob: Option<Vec<u8>> = if !password.is_empty() {
+            Some(encrypt_secret(password.as_str())?)
+        } else {
+            None
+        };
+        password.clear();
+
+        let save_pwd_flag = i32::from(encrypted_blob.is_some());
+        let now = unix_timestamp();
+
+        self.conn
+            .execute(
+                "UPDATE connections SET
+                    username = ?1,
+                    save_password = ?2,
+                    encrypted_password = ?3,
+                    updated_at = ?4
+                 WHERE id = ?5",
+                params![
+                    clean_user,
+                    save_pwd_flag,
+                    encrypted_blob,
+                    now,
+                    connection_id
+                ],
+            )
+            .map_err(|e| format!("Erreur sauvegarde des identifiants DPAPI : {e}"))?;
 
         self.get_connection(connection_id)?
             .ok_or_else(|| "Connexion mise à jour introuvable.".to_string())
@@ -1609,7 +1725,7 @@ mod tests {
     #[test]
     fn test_schema_migration_and_settings() {
         let mut store = Storage::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 4);
+        assert_eq!(store.schema_version().unwrap(), 5);
         assert_eq!(
             store.get_setting("theme_mode").unwrap().as_deref(),
             Some("dark")
@@ -2179,14 +2295,52 @@ mod tests {
             ).unwrap();
         }
 
-        // Ouvrir avec Malvision Storage : la migration v4 doit s'exécuter
-        let store = Storage::open_at_path(&db_path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 4);
+        // Ouvrir avec Malvision Storage : les migrations v4 puis v5 doivent s'exécuter
+        let mut store = Storage::open_at_path(&db_path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 5);
 
         let conns = store.list_connections().unwrap();
         assert_eq!(conns.len(), 1);
         assert_eq!(conns[0].name, "Old Server");
         assert!(!conns[0].is_priority); // Par défaut false
+
+        // Vérifier qu'on peut maintenant créer une connexion FTP et sauvegarder ses identifiants via DPAPI
+        let ftp_draft = ConnectionDraft {
+            folder_id: None,
+            name: "FTP Migration Check".to_string(),
+            protocol: Protocol::Ftp,
+            host: "ftp.local".to_string(),
+            port: 21,
+            username: "".to_string(),
+            domain: "/www".to_string(),
+            description: "Test migration v5".to_string(),
+            is_favorite: false,
+            is_priority: true,
+            save_password: false,
+            password: SecretString::new(String::new()),
+            keep_existing_password: false,
+            dynamic_resolution: false,
+            redirect_clipboard: false,
+        };
+        let created_ftp = store.create_connection(ftp_draft).unwrap();
+        assert_eq!(created_ftp.protocol, Protocol::Ftp);
+        assert!(!created_ftp.has_saved_password);
+
+        let updated_ftp = store
+            .update_connection_credentials(
+                created_ftp.id,
+                "webdeploy",
+                SecretString::new("FtpSecret#2026".to_string()),
+            )
+            .unwrap();
+        assert_eq!(updated_ftp.username, "webdeploy");
+        assert!(updated_ftp.save_password);
+        assert!(updated_ftp.has_saved_password);
+        let dec = store
+            .load_decrypted_password(updated_ftp.id)
+            .unwrap()
+            .expect("Mot de passe FTP déchiffré");
+        assert_eq!(dec.as_str(), "FtpSecret#2026");
 
         drop(store);
         let _ = std::fs::remove_dir_all(&temp_dir);

@@ -2,6 +2,25 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
+## [1.0.5] — Client FTP intégré & Transmission mot de passe RustDesk (2026-11-16)
+
+### Ajouté & Corrigé
+- **Client FTP intégré (`Protocol::Ftp`) aux codes esthétiques de Malvision** :
+  - Création de `src/ftp.rs` avec moteur FTP pur-Rust sans dépendance externe : connexion avec timeout, `OPTS UTF8 ON`, `TYPE I`, modes passifs `EPSV`/`PASV` avec repli d'IP NAT, listage `MLSD` et `LIST` (Unix & DOS), téléchargement atomique `.part`, suivi de progression, annulation instantanée et contrôle anti-injection CR/LF/NUL.
+  - Nouvel hôte Win32 natif par onglet `FtpSessionHost` orchestré dans `SessionManager` (`SessionHost::Ftp`) : barre d'outils Fluent, barre d'adresse éditable avec badge `FTP`, vue explorateur GDI double-bufferisée HiDPI, menu contextuel, navigation clavier, glisser-déposer de fichiers (`WM_DROPFILES`), panneau d'activité/transferts et actualisation à chaud des thèmes Sombre/Clair/Système.
+  - Formulaire de connexion adaptatif mis à jour (`FTP (Client intégré)`, port `21` par défaut, dossier initial facultatif, prise en charge de `ftp://host:port/chemin`) et dialogue modal dédié pour saisir/mettre à jour les identifiants à la connexion ou en cas d'échec d'authentification (`530`) avec option d'enregistrement DPAPI.
+  - Migration de base SQLite v4 -> v5 ajoutant `'ftp'` dans la contrainte `CHECK(protocol ...)` tout en préservant les données et historiques existants, ainsi que `Storage::update_connection_credentials()`.
+- **Transmission automatique du mot de passe RustDesk enregistré** :
+  - Déchiffrement du mot de passe DPAPI enregistré lors du lancement d'une connexion RustDesk et passage sécurisé via `--connect "<id>" --password "<mot_de_passe>"` avec échappement `quote_win32_arg` et effacement volatil du buffer UTF-16 (`write_volatile`) dans `src/external_apps.rs` et `src/ui.rs`.
+- **Robustesse rendu GDI (`DrawTextW`)** :
+  - Ajout d'un retour anticipé sur chaîne vide dans `draw_text_line`, `draw_text_multiline`, `draw_filled_badge` et `draw_text_right`, évitant une exception Win32 (`0xc000041d`) lorsqu'une cellule vide est dessinée.
+
+### Testé
+- Suite complète étendue à **99 tests unitaires et d'intégration (100 % passants)** :
+  - Tests unitaires et bout-en-bout client FTP contre serveur mock TCP (`EPSV`/`PASV`, `MLSD`/`LIST`, téléchargement/téléversement, sécurité CR/LF).
+  - Tests de migration SQLite v4 -> v5 et mise à jour des identifiants DPAPI (`update_connection_credentials`).
+  - Tests Win32 réels de formulaire FTP (`test_ui_ftp_connection_dialog_layout_and_dpapi_save_real_win32`), d'onglet FTP live (`test_ui_ftp_session_host_connects_to_mock_server_and_logs_in`) et de transmission du mot de passe RustDesk (`test_build_rustdesk_command_line_encoding`, `test_ui_rustdesk_dpapi_password_forwarding_wiring`).
+
 ## [1.0.4] — Mise à jour automatique avec remplacement et redémarrage (2026-11-10)
 
 ### Ajouté & Amélioré

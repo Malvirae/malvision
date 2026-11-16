@@ -8,6 +8,7 @@ use crate::security::SecretString;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
     Rdp,
+    Ftp,
     AnyDesk,
     RustDesk,
 }
@@ -16,6 +17,7 @@ impl Protocol {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Rdp => "rdp",
+            Self::Ftp => "ftp",
             Self::AnyDesk => "anydesk",
             Self::RustDesk => "rustdesk",
         }
@@ -24,6 +26,7 @@ impl Protocol {
     pub fn display_name(self) -> &'static str {
         match self {
             Self::Rdp => "RDP",
+            Self::Ftp => "FTP",
             Self::AnyDesk => "AnyDesk",
             Self::RustDesk => "RustDesk",
         }
@@ -32,6 +35,7 @@ impl Protocol {
     pub fn badge_prefix(self) -> &'static str {
         match self {
             Self::Rdp => "[RDP]",
+            Self::Ftp => "[FTP]",
             Self::AnyDesk => "[ANY]",
             Self::RustDesk => "[RST]",
         }
@@ -40,6 +44,7 @@ impl Protocol {
     pub fn from_db_str(s: &str) -> Result<Self, String> {
         match s.trim().to_ascii_lowercase().as_str() {
             "rdp" => Ok(Self::Rdp),
+            "ftp" => Ok(Self::Ftp),
             "anydesk" => Ok(Self::AnyDesk),
             "rustdesk" => Ok(Self::RustDesk),
             other => Err(format!("Protocole inconnu en base de données : '{other}'.")),
@@ -87,11 +92,18 @@ pub struct ConnectionItem {
 }
 
 impl ConnectionItem {
-    /// Retourne une étiquette d'adresse lisible (ex. `192.168.1.10:3389` ou l'ID AnyDesk/RustDesk).
+    /// Retourne une étiquette d'adresse lisible (ex. `192.168.1.10:3389`, `ftp.serveur.fr:2121` ou l'ID AnyDesk/RustDesk).
     pub fn endpoint_label(&self) -> String {
         match self.protocol {
             Protocol::Rdp => {
                 if self.port == 3389 {
+                    self.host.clone()
+                } else {
+                    format!("{}:{}", self.host, self.port)
+                }
+            }
+            Protocol::Ftp => {
+                if self.port == 21 {
                     self.host.clone()
                 } else {
                     format!("{}:{}", self.host, self.port)
@@ -142,6 +154,9 @@ impl ConnectionDraft {
                 Protocol::Rdp => {
                     "L'adresse hôte RDP (IPv4, IPv6 ou DNS) ne peut pas être vide.".to_string()
                 }
+                Protocol::Ftp => {
+                    "L'adresse hôte FTP (IPv4, IPv6 ou DNS) ne peut pas être vide.".to_string()
+                }
                 Protocol::AnyDesk => {
                     "L'identifiant ou alias AnyDesk ne peut pas être vide.".to_string()
                 }
@@ -167,6 +182,24 @@ impl ConnectionDraft {
                     self.port = parsed_port;
                 }
             }
+            Protocol::Ftp => {
+                if self.port == 0 {
+                    return Err("Le port FTP doit être compris entre 1 et 65535.".to_string());
+                }
+                let (parsed_host, parsed_port, initial_path) = parse_ftp_target(&self.host)?;
+                if parsed_host.contains(char::is_whitespace) {
+                    return Err("L'adresse d'hôte FTP ne doit pas contenir d'espaces.".to_string());
+                }
+                self.host = parsed_host;
+                if parsed_port != 21 && self.port == 21 {
+                    self.port = parsed_port;
+                }
+                if self.domain.trim().is_empty()
+                    && let Some(p) = initial_path
+                {
+                    self.domain = p;
+                }
+            }
             Protocol::AnyDesk | Protocol::RustDesk => {
                 if self.port == 0 {
                     self.port = 3389;
@@ -178,8 +211,9 @@ impl ConnectionDraft {
         self.domain = self.domain.trim().to_string();
         self.description = self.description.trim().to_string();
 
-        // Si l'utilisateur a saisi `DOMAINE\utilisateur` dans le champ utilisateur et laissé domaine vide
-        if self.domain.is_empty() && self.username.contains('\\') {
+        // Si l'utilisateur a saisi `DOMAINE\utilisateur` dans le champ utilisateur et laissé domaine vide (RDP uniquement)
+        if self.protocol == Protocol::Rdp && self.domain.is_empty() && self.username.contains('\\')
+        {
             let (d, u) = split_domain_username(&self.username);
             self.domain = d;
             self.username = u;
@@ -192,6 +226,65 @@ impl ConnectionDraft {
 
         Ok(())
     }
+}
+
+/// Analyse une cible FTP saisie (`ftp://hôte:port/chemin`, `hôte:port`, `[::1]:2121`, `ftp.exemple.fr`)
+/// en extrayant `(hôte, port, chemin_initial_éventuel)` avec port `21` par défaut.
+pub fn parse_ftp_target(input: &str) -> Result<(String, u16, Option<String>), String> {
+    let mut s = input.trim();
+    if s.len() >= 6 && s[..6].eq_ignore_ascii_case("ftp://") {
+        s = &s[6..];
+    }
+    let (host_port, initial_path) = if let Some((hp, path)) = s.split_once('/') {
+        let p = format!("/{}", path.trim_start_matches('/'));
+        (hp.trim(), if p == "/" { None } else { Some(p) })
+    } else {
+        (s, None)
+    };
+
+    if host_port.is_empty() {
+        return Err("L'adresse hôte FTP (IPv4, IPv6 ou DNS) ne peut pas être vide.".to_string());
+    }
+
+    if let Some(rest) = host_port.strip_prefix('[') {
+        let Some((ipv6, after)) = rest.split_once(']') else {
+            return Err("Crochet fermant ']' manquant dans l'adresse IPv6 FTP.".to_string());
+        };
+        if ipv6.is_empty() {
+            return Err("Adresse IPv6 FTP invalide.".to_string());
+        }
+        if after.is_empty() {
+            return Ok((ipv6.to_string(), 21, initial_path));
+        }
+        if let Some(port_str) = after.strip_prefix(':') {
+            let port = port_str
+                .parse::<u16>()
+                .map_err(|_| format!("Port FTP invalide : '{port_str}'."))?;
+            if port == 0 {
+                return Err("Le port FTP doit être compris entre 1 et 65535.".to_string());
+            }
+            return Ok((ipv6.to_string(), port, initial_path));
+        }
+        return Err("Format d'adresse IPv6 FTP invalide.".to_string());
+    }
+
+    if host_port.matches(':').count() == 1
+        && let Some((h, port_str)) = host_port.rsplit_once(':')
+    {
+        if h.trim().is_empty() {
+            return Err("L'adresse hôte FTP ne peut pas être vide.".to_string());
+        }
+        let port = port_str
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| format!("Port FTP invalide : '{port_str}'."))?;
+        if port == 0 {
+            return Err("Le port FTP doit être compris entre 1 et 65535.".to_string());
+        }
+        return Ok((h.trim().to_string(), port, initial_path));
+    }
+
+    Ok((host_port.to_string(), 21, initial_path))
 }
 
 /// Entrée d'historique des connexions récemment lancées.
@@ -649,5 +742,32 @@ mod tests {
                 "Switch Core",
             ]
         );
+    }
+
+    #[test]
+    fn test_validate_connection_draft_ftp() {
+        let mut draft = ConnectionDraft {
+            folder_id: None,
+            name: "Serveur Web Prod".to_string(),
+            protocol: Protocol::Ftp,
+            host: "ftp://files.example.com:2121/public_html".to_string(),
+            port: 21,
+            username: "deploy".to_string(),
+            domain: String::new(),
+            description: "Déploiement web".to_string(),
+            is_favorite: true,
+            is_priority: false,
+            save_password: true,
+            password: SecretString::new("S3cretFTP!".to_string()),
+            keep_existing_password: false,
+            dynamic_resolution: false,
+            redirect_clipboard: false,
+        };
+        draft.validate_and_normalize().expect("Validation FTP OK");
+        assert_eq!(draft.host, "files.example.com");
+        assert_eq!(draft.port, 2121);
+        assert_eq!(draft.domain, "/public_html");
+        assert_eq!(draft.protocol.as_str(), "ftp");
+        assert_eq!(draft.protocol.badge_prefix(), "[FTP]");
     }
 }

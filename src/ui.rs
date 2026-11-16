@@ -2,6 +2,9 @@
 //! arborescence multi-niveaux custom-draw avec glisser-déposer, recherche, favoris,
 //! formulaires modaux sombres DPI-aware et onglets RDP simultanés).
 
+use crate::ftp::{
+    FTP_EVT_AUTH_FAILED, WM_FTP_EVENT, WM_FTP_REQUEST_CREDENTIALS, unpack_ftp_event_wparam,
+};
 use crate::models::{ConnectionDraft, ConnectionItem, Folder, Protocol};
 use crate::rdp::{WM_RDP_EVENT, unpack_rdp_event_wparam};
 use crate::security::SecretString;
@@ -95,7 +98,7 @@ pub fn set_active_theme_dark(is_dark: bool) {
 }
 
 #[inline]
-fn active_theme_colors() -> crate::settings::ThemeColors {
+pub(crate) fn active_theme_colors() -> crate::settings::ThemeColors {
     if is_active_theme_dark() {
         crate::settings::ThemeColors::DARK
     } else {
@@ -104,23 +107,23 @@ fn active_theme_colors() -> crate::settings::ThemeColors {
 }
 
 #[inline]
-fn col_bg_deep() -> u32 {
+pub(crate) fn col_bg_deep() -> u32 {
     active_theme_colors().bg_deep
 }
 #[inline]
-fn col_bg_sidebar() -> u32 {
+pub(crate) fn col_bg_sidebar() -> u32 {
     active_theme_colors().bg_sidebar
 }
 #[inline]
-fn col_bg_surface() -> u32 {
+pub(crate) fn col_bg_surface() -> u32 {
     active_theme_colors().bg_surface
 }
 #[inline]
-fn col_bg_hover() -> u32 {
+pub(crate) fn col_bg_hover() -> u32 {
     active_theme_colors().bg_hover
 }
 #[inline]
-fn col_bg_input() -> u32 {
+pub(crate) fn col_bg_input() -> u32 {
     active_theme_colors().bg_input
 }
 #[inline]
@@ -132,15 +135,15 @@ fn col_bg_input_disabled() -> u32 {
     }
 }
 #[inline]
-fn col_accent() -> u32 {
+pub(crate) fn col_accent() -> u32 {
     active_theme_colors().accent
 }
 #[inline]
-fn col_accent_hover() -> u32 {
+pub(crate) fn col_accent_hover() -> u32 {
     active_theme_colors().accent_hover
 }
 #[inline]
-fn col_accent_pressed() -> u32 {
+pub(crate) fn col_accent_pressed() -> u32 {
     if is_active_theme_dark() {
         0x009E5A00
     } else {
@@ -148,7 +151,7 @@ fn col_accent_pressed() -> u32 {
     }
 }
 #[inline]
-fn col_border() -> u32 {
+pub(crate) fn col_border() -> u32 {
     active_theme_colors().border
 }
 #[inline]
@@ -160,11 +163,11 @@ fn col_border_subtle() -> u32 {
     }
 }
 #[inline]
-fn col_text_primary() -> u32 {
+pub(crate) fn col_text_primary() -> u32 {
     active_theme_colors().text_primary
 }
 #[inline]
-fn col_text_muted() -> u32 {
+pub(crate) fn col_text_muted() -> u32 {
     active_theme_colors().text_muted
 }
 #[inline]
@@ -176,24 +179,25 @@ fn col_text_secondary() -> u32 {
     }
 }
 #[inline]
-fn col_status_ok() -> u32 {
+pub(crate) fn col_status_ok() -> u32 {
     active_theme_colors().status_ok
 }
 #[inline]
-fn col_status_warn() -> u32 {
+pub(crate) fn col_status_warn() -> u32 {
     active_theme_colors().status_warn
 }
 #[inline]
-fn col_status_err() -> u32 {
+pub(crate) fn col_status_err() -> u32 {
     active_theme_colors().status_err
 }
 
-const COL_TEXT_ON_ACCENT: u32 = 0x00F6F3F0; // Blanc pur sur boutons primaires et badges colorés
+pub(crate) const COL_TEXT_ON_ACCENT: u32 = 0x00F6F3F0; // Blanc pur sur boutons primaires et badges colorés
 const COL_GOLD_STAR: u32 = 0x00249CE8; // Doré lisible sur fond sombre et clair
 const COL_PRIORITY_TRIANGLE: u32 = 0x008AC834; // Vert émeraude #34C88A pour le triangle prioritaire creux
-const COL_FOLDER_AMBER: u32 = 0x003294DC; // Ambre dossier lisible sur fond sombre et clair
+pub(crate) const COL_FOLDER_AMBER: u32 = 0x003294DC; // Ambre dossier lisible sur fond sombre et clair
 const COL_PROTO_ANYDESK: u32 = 0x003943D8; // #D84339 Badge AnyDesk
 const COL_PROTO_RUSTDESK: u32 = 0x008A9616; // #16968A Badge RustDesk
+pub(crate) const COL_PROTO_FTP: u32 = 0x00A66C2D; // #2D6CA6 Badge FTP bleu ardoise discret
 
 const SIDEBAR_HEADER_HEIGHT: i32 = 152;
 const SIDEBAR_FOOTER_HEIGHT: i32 = 46;
@@ -359,18 +363,18 @@ struct HitZone {
 
 pub struct GdiPalette {
     pub dpi: DpiMetrics,
-    font_title: HFONT,
-    font_subtitle: HFONT,
-    font_ui: HFONT,
-    font_ui_bold: HFONT,
-    font_small: HFONT,
-    brush_bg_deep: HBRUSH,
-    brush_bg_sidebar: HBRUSH,
-    brush_bg_surface: HBRUSH,
-    brush_bg_hover: HBRUSH,
-    brush_bg_input: HBRUSH,
-    brush_accent: HBRUSH,
-    brush_accent_hover: HBRUSH,
+    pub(crate) font_title: HFONT,
+    pub(crate) font_subtitle: HFONT,
+    pub(crate) font_ui: HFONT,
+    pub(crate) font_ui_bold: HFONT,
+    pub(crate) font_small: HFONT,
+    pub(crate) brush_bg_deep: HBRUSH,
+    pub(crate) brush_bg_sidebar: HBRUSH,
+    pub(crate) brush_bg_surface: HBRUSH,
+    pub(crate) brush_bg_hover: HBRUSH,
+    pub(crate) brush_bg_input: HBRUSH,
+    pub(crate) brush_accent: HBRUSH,
+    pub(crate) brush_accent_hover: HBRUSH,
 }
 
 impl GdiPalette {
@@ -413,7 +417,7 @@ impl GdiPalette {
         }
     }
 
-    unsafe fn create_for_window(hwnd: HWND) -> Self {
+    pub(crate) unsafe fn create_for_window(hwnd: HWND) -> Self {
         unsafe { Self::create_for_dpi(DpiMetrics::for_window(hwnd)) }
     }
 
@@ -817,6 +821,7 @@ pub struct AppWindowState {
     pub dashboard_scroll_y: i32,
     pub dashboard_content_height: i32,
     is_programmatic_tree_update: bool,
+    ftp_prompt_open: bool,
 }
 
 impl AppWindowState {
@@ -1065,6 +1070,7 @@ impl AppWindowState {
                 dashboard_scroll_y: 0,
                 dashboard_content_height: 0,
                 is_programmatic_tree_update: false,
+                ftp_prompt_open: false,
             };
 
             if !cfg!(test) {
@@ -1112,6 +1118,7 @@ impl AppWindowState {
                     RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
                 );
             }
+            self.sessions.refresh_themes();
             self.recreate_search_edit();
             let _ = RedrawWindow(
                 Some(self.hwnd),
@@ -2017,6 +2024,7 @@ impl AppWindowState {
                             Protocol::Rdp => (col_accent(), "RDP"),
                             Protocol::AnyDesk => (COL_PROTO_ANYDESK, "ANY"),
                             Protocol::RustDesk => (COL_PROTO_RUSTDESK, "RST"),
+                            Protocol::Ftp => (COL_PROTO_FTP, "FTP"),
                         };
                         let badge_rc = RECT {
                             left: indent + 12,
@@ -3017,6 +3025,7 @@ impl AppWindowState {
                         Protocol::Rdp => col_accent(),
                         Protocol::AnyDesk => 0x003B46D9, // Rouge AnyDesk discret
                         Protocol::RustDesk => 0x00B5721E, // Bleu-vert RustDesk
+                        Protocol::Ftp => COL_PROTO_FTP,  // Bleu ardoise FTP
                     };
                     draw_filled_badge(
                         hdc,
@@ -3048,7 +3057,22 @@ impl AppWindowState {
                     // Sous-texte : hôte:port + utilisateur
                     let _ = SelectObject(hdc, self.palette.font_small.into());
                     let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
-                    let user_info = if conn.username.is_empty() {
+                    let user_info = if conn.protocol == Protocol::Ftp {
+                        if conn.username.is_empty() && conn.domain.is_empty() {
+                            conn.endpoint_label()
+                        } else if conn.domain.is_empty() {
+                            format!("{}  •  {}", conn.endpoint_label(), conn.username)
+                        } else if conn.username.is_empty() {
+                            format!("{}  •  {}", conn.endpoint_label(), conn.domain)
+                        } else {
+                            format!(
+                                "{}  •  {}  •  {}",
+                                conn.endpoint_label(),
+                                conn.username,
+                                conn.domain
+                            )
+                        }
+                    } else if conn.username.is_empty() {
                         conn.endpoint_label()
                     } else if conn.domain.is_empty() {
                         format!("{}  •  {}", conn.endpoint_label(), conn.username)
@@ -3191,6 +3215,7 @@ impl AppWindowState {
                         Protocol::Rdp => (col_accent(), "RDP"),
                         Protocol::AnyDesk => (COL_PROTO_ANYDESK, "ANY"),
                         Protocol::RustDesk => (COL_PROTO_RUSTDESK, "RST"),
+                        Protocol::Ftp => (COL_PROTO_FTP, "FTP"),
                     };
                     let badge_rc = RECT {
                         left: card_rc.left + 8,
@@ -3389,8 +3414,11 @@ impl AppWindowState {
 // PRIMITIVES GRAPHIQUES GDI & ICÔNES VECTORIELLES SOBRES
 // =============================================================================
 
-unsafe fn draw_text_line(hdc: HDC, text: &str, mut rc: RECT) {
+pub(crate) unsafe fn draw_text_line(hdc: HDC, text: &str, mut rc: RECT) {
     unsafe {
+        if text.is_empty() {
+            return;
+        }
         let mut wide: Vec<u16> = text.encode_utf16().collect();
         let _ = DrawTextW(
             hdc,
@@ -3403,6 +3431,9 @@ unsafe fn draw_text_line(hdc: HDC, text: &str, mut rc: RECT) {
 
 unsafe fn draw_text_multiline(hdc: HDC, text: &str, mut rc: RECT) {
     unsafe {
+        if text.is_empty() {
+            return;
+        }
         let mut wide: Vec<u16> = text.encode_utf16().collect();
         let _ = DrawTextW(
             hdc,
@@ -3413,7 +3444,7 @@ unsafe fn draw_text_multiline(hdc: HDC, text: &str, mut rc: RECT) {
     }
 }
 
-unsafe fn draw_rounded_box(hdc: HDC, rc: RECT, fill_col: u32, border_col: u32) {
+pub(crate) unsafe fn draw_rounded_box(hdc: HDC, rc: RECT, fill_col: u32, border_col: u32) {
     unsafe {
         let brush = CreateSolidBrush(COLORREF(fill_col));
         let pen = CreatePen(PS_SOLID, 1, COLORREF(border_col));
@@ -3427,7 +3458,7 @@ unsafe fn draw_rounded_box(hdc: HDC, rc: RECT, fill_col: u32, border_col: u32) {
     }
 }
 
-unsafe fn draw_rounded_button(
+pub(crate) unsafe fn draw_rounded_button(
     hdc: HDC,
     rc: RECT,
     fill_col: u32,
@@ -3451,11 +3482,14 @@ unsafe fn draw_rounded_button(
     }
 }
 
-unsafe fn draw_filled_badge(hdc: HDC, rc: RECT, bg_col: u32, text: &str, font: HFONT) {
+pub(crate) unsafe fn draw_filled_badge(hdc: HDC, rc: RECT, bg_col: u32, text: &str, font: HFONT) {
     unsafe {
         draw_rounded_box(hdc, rc, bg_col, bg_col);
         let _ = SelectObject(hdc, font.into());
         let _ = SetTextColor(hdc, COLORREF(COL_TEXT_ON_ACCENT));
+        if text.is_empty() {
+            return;
+        }
         let mut wide: Vec<u16> = text.encode_utf16().collect();
         let mut trc = rc;
         let _ = DrawTextW(
@@ -3467,7 +3501,7 @@ unsafe fn draw_filled_badge(hdc: HDC, rc: RECT, bg_col: u32, text: &str, font: H
     }
 }
 
-unsafe fn draw_status_dot(hdc: HDC, cx: i32, cy: i32, color: u32) {
+pub(crate) unsafe fn draw_status_dot(hdc: HDC, cx: i32, cy: i32, color: u32) {
     unsafe {
         let rc = RECT {
             left: cx - 4,
@@ -3479,7 +3513,7 @@ unsafe fn draw_status_dot(hdc: HDC, cx: i32, cy: i32, color: u32) {
     }
 }
 
-unsafe fn draw_horizontal_line(hdc: HDC, x1: i32, x2: i32, y: i32, color: u32) {
+pub(crate) unsafe fn draw_horizontal_line(hdc: HDC, x1: i32, x2: i32, y: i32, color: u32) {
     unsafe {
         let pen = CreatePen(PS_SOLID, 1, COLORREF(color));
         let old = SelectObject(hdc, pen.into());
@@ -3565,7 +3599,7 @@ unsafe fn draw_icon_chevron(hdc: HDC, cx: i32, cy: i32, expanded: bool, color: u
 }
 
 /// Dessine une icône de dossier vectorielle sobre de `16x14` à `(x, y)`.
-unsafe fn draw_icon_folder(hdc: HDC, x: i32, y: i32, expanded: bool, fill_col: u32) {
+pub(crate) unsafe fn draw_icon_folder(hdc: HDC, x: i32, y: i32, expanded: bool, fill_col: u32) {
     unsafe {
         let tab_rc = RECT {
             left: x,
@@ -4326,9 +4360,28 @@ impl AppWindowState {
                 }
             }
             Protocol::RustDesk => {
+                let saved_pwd = if conn.has_saved_password {
+                    match self.storage.load_decrypted_password(conn.id) {
+                        Ok(secret_opt) => secret_opt,
+                        Err(err) => {
+                            show_warning_dialog(
+                                self.hwnd,
+                                "Mot de passe DPAPI non déchiffrable",
+                                &format!(
+                                    "{err}\n\nRustDesk va démarrer et vous demandera le mot de passe manuellement."
+                                ),
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                let pwd_str = saved_pwd.as_ref().map(|s| s.as_str());
                 match crate::external_apps::launch_rustdesk_connection(
                     &self.settings.rustdesk_path,
                     &conn.host,
+                    pwd_str,
                 ) {
                     Ok(info_msg) => {
                         self.status_override = Some(info_msg);
@@ -4344,6 +4397,169 @@ impl AppWindowState {
                         show_error_dialog(self.hwnd, "Erreur de lancement RustDesk", &msg);
                     }
                 }
+            }
+            Protocol::Ftp => {
+                let saved_pwd = if conn.has_saved_password {
+                    match self.storage.load_decrypted_password(conn.id) {
+                        Ok(secret_opt) => secret_opt,
+                        Err(err) => {
+                            show_warning_dialog(
+                                self.hwnd,
+                                "Mot de passe DPAPI non déchiffrable",
+                                &format!(
+                                    "{err}\n\nVeuillez saisir vos identifiants FTP pour cette connexion."
+                                ),
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let (ftp_user, ftp_pwd) = if let Some(secret) = saved_pwd {
+                    if !conn.username.trim().is_empty() {
+                        (conn.username.clone(), secret)
+                    } else if let Some((u, p, save)) = run_ftp_credentials_dialog(
+                        self.hwnd,
+                        &format!("Connexion FTP — {}", conn.name),
+                        &conn.endpoint_label(),
+                        &conn.username,
+                        true,
+                        true,
+                        &self.palette,
+                    ) {
+                        if save {
+                            let pwd_copy = SecretString::new(p.as_str().to_string());
+                            if let Err(err) = self
+                                .storage
+                                .update_connection_credentials(conn.id, &u, pwd_copy)
+                            {
+                                show_warning_dialog(
+                                    self.hwnd,
+                                    "Enregistrement DPAPI impossible",
+                                    &err,
+                                );
+                            } else {
+                                self.rebuild_treeview();
+                            }
+                        }
+                        (u, p)
+                    } else {
+                        self.status_override =
+                            Some(format!("Connexion FTP « {} » annulée.", conn.name));
+                        self.invalidate_canvas();
+                        return;
+                    }
+                } else if conn.username.trim().eq_ignore_ascii_case("anonymous")
+                    && !conn.save_password
+                {
+                    (
+                        "anonymous".to_string(),
+                        SecretString::new("anonymous@malvision.local".to_string()),
+                    )
+                } else if let Some((u, p, save)) = run_ftp_credentials_dialog(
+                    self.hwnd,
+                    &format!("Connexion FTP — {}", conn.name),
+                    &conn.endpoint_label(),
+                    &conn.username,
+                    true,
+                    conn.save_password,
+                    &self.palette,
+                ) {
+                    if save {
+                        let pwd_copy = SecretString::new(p.as_str().to_string());
+                        if let Err(err) = self
+                            .storage
+                            .update_connection_credentials(conn.id, &u, pwd_copy)
+                        {
+                            show_warning_dialog(self.hwnd, "Enregistrement DPAPI impossible", &err);
+                        } else {
+                            self.rebuild_treeview();
+                        }
+                    }
+                    (u, p)
+                } else {
+                    self.status_override =
+                        Some(format!("Connexion FTP « {} » annulée.", conn.name));
+                    self.invalidate_canvas();
+                    return;
+                };
+
+                let viewport = self.rdp_viewport_rect();
+                match self
+                    .sessions
+                    .open_ftp_session(self.hwnd, viewport, &conn, ftp_user, ftp_pwd)
+                {
+                    Ok(_sid) => {
+                        self.status_override = None;
+                        self.invalidate_canvas();
+                    }
+                    Err(err) => {
+                        let msg = format!(
+                            "Impossible d'ouvrir le client FTP pour {} : {err}",
+                            conn.endpoint_label()
+                        );
+                        self.status_override = Some(msg.clone());
+                        self.invalidate_canvas();
+                        show_error_dialog(self.hwnd, "Erreur client FTP", &msg);
+                    }
+                }
+            }
+        }
+    }
+
+    fn prompt_and_reconnect_ftp(&mut self, session_id: u32) {
+        if self.ftp_prompt_open {
+            return;
+        }
+        let Some(tab) = self
+            .sessions
+            .tabs()
+            .iter()
+            .find(|t| t.session_id == session_id)
+        else {
+            return;
+        };
+        let conn_id = tab.connection_id;
+        let endpoint = tab.host_label.clone();
+        let tab_title = tab.title.clone();
+        let conn_opt = conn_id.and_then(|cid| self.storage.get_connection(cid).ok().flatten());
+        let default_user = conn_opt
+            .as_ref()
+            .map(|c| c.username.clone())
+            .unwrap_or_default();
+        let default_save = conn_opt.as_ref().is_some_and(|c| c.save_password);
+
+        self.ftp_prompt_open = true;
+        let creds_opt = run_ftp_credentials_dialog(
+            self.hwnd,
+            &format!("Identifiants FTP — {tab_title}"),
+            &endpoint,
+            &default_user,
+            conn_id.is_some(),
+            default_save,
+            &self.palette,
+        );
+        self.ftp_prompt_open = false;
+
+        if let Some((user, pwd, save)) = creds_opt {
+            if save && let Some(cid) = conn_id {
+                let pwd_copy = SecretString::new(pwd.as_str().to_string());
+                if let Err(err) = self
+                    .storage
+                    .update_connection_credentials(cid, &user, pwd_copy)
+                {
+                    show_warning_dialog(self.hwnd, "Enregistrement DPAPI impossible", &err);
+                } else {
+                    self.rebuild_treeview();
+                }
+            }
+            if self
+                .sessions
+                .reconnect_ftp_credentials(session_id, user, pwd)
+            {
+                self.invalidate_canvas();
             }
         }
     }
@@ -5792,7 +6008,7 @@ unsafe fn draw_owner_combobox_item(dis: &DRAWITEMSTRUCT, font: HFONT) {
 }
 
 /// Crée un champ `WC_EDITW` sans bordure blanche, centré dans un conteneur arrondi sombre `box_rc`.
-unsafe fn create_dark_edit(
+pub(crate) unsafe fn create_dark_edit(
     parent: HWND,
     hinstance: windows::Win32::Foundation::HINSTANCE,
     box_rc: RECT,
@@ -6027,6 +6243,8 @@ struct ConnectionDialogState {
     host_box_rect_full: RECT,
     password_label_text: String,
     password_label_rect: RECT,
+    domain_label_text: String,
+    domain_label_rect: RECT,
     notice_text: Option<String>,
     notice_rect: RECT,
     labels: Vec<ConnDialogLabel>,
@@ -6102,14 +6320,24 @@ fn build_folder_choices(
 fn update_dialog_protocol_layout(state: &mut ConnectionDialogState, hwnd: HWND, proto: Protocol) {
     state.current_protocol = proto;
     let is_rdp = proto == Protocol::Rdp;
+    let uses_host_creds = matches!(proto, Protocol::Rdp | Protocol::Ftp);
     unsafe {
-        let _ = ShowWindow(state.ed_port, if is_rdp { SW_SHOW } else { SW_HIDE });
-        let _ = ShowWindow(state.ed_user, if is_rdp { SW_SHOW } else { SW_HIDE });
-        let _ = ShowWindow(state.ed_domain, if is_rdp { SW_SHOW } else { SW_HIDE });
+        let _ = ShowWindow(
+            state.ed_port,
+            if uses_host_creds { SW_SHOW } else { SW_HIDE },
+        );
+        let _ = ShowWindow(
+            state.ed_user,
+            if uses_host_creds { SW_SHOW } else { SW_HIDE },
+        );
+        let _ = ShowWindow(
+            state.ed_domain,
+            if uses_host_creds { SW_SHOW } else { SW_HIDE },
+        );
         let _ = ShowWindow(state.chk_dyn_res, if is_rdp { SW_SHOW } else { SW_HIDE });
         let _ = ShowWindow(state.chk_clipboard, if is_rdp { SW_SHOW } else { SW_HIDE });
 
-        let host_rc = if is_rdp {
+        let host_rc = if uses_host_creds {
             state.host_box_rect_normal
         } else {
             state.host_box_rect_full
@@ -6127,7 +6355,14 @@ fn update_dialog_protocol_layout(state: &mut ConnectionDialogState, hwnd: HWND, 
             Protocol::Rdp => {
                 state.host_label_text = "Hôte RDP (IP / DNS) * :".to_string();
                 state.password_label_text = "Mot de passe :".to_string();
+                state.domain_label_text = "Domaine (facultatif) :".to_string();
                 state.notice_text = None;
+            }
+            Protocol::Ftp => {
+                state.host_label_text = "Hôte FTP (IP / DNS) * :".to_string();
+                state.password_label_text = "Mot de passe :".to_string();
+                state.domain_label_text = "Dossier initial (facultatif) :".to_string();
+                state.notice_text = Some("Client FTP intégré : explorateur natif, mode passif, glisser-déposer et identifiants DPAPI.".to_string());
             }
             Protocol::AnyDesk => {
                 state.host_label_text = "ID ou Alias AnyDesk * :".to_string();
@@ -6137,7 +6372,7 @@ fn update_dialog_protocol_layout(state: &mut ConnectionDialogState, hwnd: HWND, 
             Protocol::RustDesk => {
                 state.host_label_text = "ID RustDesk * :".to_string();
                 state.password_label_text = "Mot de passe permanent :".to_string();
-                state.notice_text = Some("Note RustDesk : l'authentification distante reste gérée directement par le client RustDesk.".to_string());
+                state.notice_text = Some("Note RustDesk : le mot de passe enregistré est transmis automatiquement au lancement (--password).".to_string());
             }
         }
 
@@ -6271,10 +6506,15 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                 let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                 draw_text_line(hdc, &state.host_label_text, state.host_label_rect);
 
-                // Libellé dynamique de mot de passe (RDP / AnyDesk / RustDesk)
+                // Libellé dynamique de mot de passe et domaine/dossier initial
                 draw_text_line(hdc, &state.password_label_text, state.password_label_rect);
+                let uses_host_creds =
+                    matches!(state.current_protocol, Protocol::Rdp | Protocol::Ftp);
+                if uses_host_creds {
+                    draw_text_line(hdc, &state.domain_label_text, state.domain_label_rect);
+                }
 
-                // Notice informative spécifique (RustDesk / AnyDesk)
+                // Notice informative spécifique (FTP / RustDesk / AnyDesk)
                 if let Some(ref notice) = state.notice_text {
                     let _ = SelectObject(hdc, state.font_small.into());
                     let _ = SetTextColor(hdc, COLORREF(col_accent()));
@@ -6283,7 +6523,7 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
 
                 // Tous les autres libellés dessinés directement en mode TRANSPARENT
                 for lbl in &state.labels {
-                    if lbl.rdp_only && state.current_protocol != Protocol::Rdp {
+                    if lbl.rdp_only && !uses_host_creds {
                         continue;
                     }
                     let f = if lbl.bold {
@@ -6308,7 +6548,7 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                 // Conteneurs sombres arrondis autour de chaque champ WC_EDITW
                 let focus_hwnd = GetFocus();
                 for eb in &state.edit_boxes {
-                    if eb.rdp_only && state.current_protocol != Protocol::Rdp {
+                    if eb.rdp_only && !uses_host_creds {
                         continue;
                     }
                     let enabled = IsWindowEnabled(eb.hwnd).as_bool();
@@ -6320,7 +6560,7 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                     };
                     let border = if focused { col_accent() } else { col_border() };
                     let rect = if eb.hwnd == state.ed_host {
-                        if state.current_protocol == Protocol::Rdp {
+                        if uses_host_creds {
                             state.host_box_rect_normal
                         } else {
                             state.host_box_rect_full
@@ -6388,8 +6628,20 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                         let proto = match sel {
                             1 => Protocol::AnyDesk,
                             2 => Protocol::RustDesk,
+                            3 => Protocol::Ftp,
                             _ => Protocol::Rdp,
                         };
+                        let cur_port = get_window_text(state.ed_port);
+                        let cur_port_trim = cur_port.trim();
+                        if proto == Protocol::Ftp
+                            && (cur_port_trim.is_empty() || cur_port_trim == "3389")
+                        {
+                            set_window_text(state.ed_port, "21");
+                        } else if proto == Protocol::Rdp
+                            && (cur_port_trim.is_empty() || cur_port_trim == "21")
+                        {
+                            set_window_text(state.ed_port, "3389");
+                        }
                         update_dialog_protocol_layout(state, hwnd, proto);
                     } else if id == IDC_DLG_SAVE_PASS {
                         let checked = SendMessageW(
@@ -6413,6 +6665,7 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                         let protocol = match proto_idx {
                             1 => Protocol::AnyDesk,
                             2 => Protocol::RustDesk,
+                            3 => Protocol::Ftp,
                             _ => Protocol::Rdp,
                         };
 
@@ -6432,15 +6685,22 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                         };
 
                         let port_str = get_window_text(state.ed_port);
-                        let port = if protocol == Protocol::Rdp {
+                        let port = if matches!(protocol, Protocol::Rdp | Protocol::Ftp) {
                             match port_str.trim().parse::<u16>() {
                                 Ok(p) if p > 0 => p,
                                 _ => {
-                                    show_warning_dialog(
-                                        hwnd,
-                                        "Port RDP invalide",
-                                        "Le port RDP doit être un entier compris entre 1 et 65535.",
-                                    );
+                                    let (title, msg) = if protocol == Protocol::Ftp {
+                                        (
+                                            "Port FTP invalide",
+                                            "Le port FTP doit être un entier compris entre 1 et 65535.",
+                                        )
+                                    } else {
+                                        (
+                                            "Port RDP invalide",
+                                            "Le port RDP doit être un entier compris entre 1 et 65535.",
+                                        )
+                                    };
+                                    show_warning_dialog(hwnd, title, msg);
                                     return LRESULT(0);
                                 }
                             }
@@ -6679,6 +6939,7 @@ fn run_connection_form_dialog(
             current_protocol: initial_proto,
             host_label_text: match initial_proto {
                 Protocol::Rdp => "Hôte RDP (IP / DNS) * :".to_string(),
+                Protocol::Ftp => "Hôte FTP (IP / DNS) * :".to_string(),
                 Protocol::AnyDesk => "ID ou Alias AnyDesk * :".to_string(),
                 Protocol::RustDesk => "ID RustDesk * :".to_string(),
             },
@@ -6691,18 +6952,33 @@ fn run_connection_form_dialog(
             host_box_rect_normal,
             host_box_rect_full,
             password_label_text: match initial_proto {
-                Protocol::Rdp => "Mot de passe :".to_string(),
+                Protocol::Rdp | Protocol::Ftp => "Mot de passe :".to_string(),
                 Protocol::AnyDesk => "Accès sans surveillance :".to_string(),
                 Protocol::RustDesk => "Mot de passe permanent :".to_string(),
             },
             password_label_rect,
+            domain_label_text: if initial_proto == Protocol::Ftp {
+                "Dossier initial (facultatif) :".to_string()
+            } else {
+                "Domaine (facultatif) :".to_string()
+            },
+            domain_label_rect: RECT {
+                left: pad_x,
+                top: dpi.scale(294),
+                right: field_left - dpi.scale(8),
+                bottom: dpi.scale(294) + field_h,
+            },
             notice_text: match initial_proto {
                 Protocol::Rdp => None,
+                Protocol::Ftp => Some(
+                    "Client FTP intégré : explorateur natif, mode passif, glisser-déposer et identifiants DPAPI."
+                        .to_string(),
+                ),
                 Protocol::AnyDesk => Some(
                     "Note AnyDesk : mot de passe transmis sur stdin (--with-password).".to_string(),
                 ),
                 Protocol::RustDesk => Some(
-                    "Note RustDesk : l'authentification reste gérée par le client RustDesk."
+                    "Note RustDesk : le mot de passe enregistré est transmis automatiquement (--password)."
                         .to_string(),
                 ),
             },
@@ -6812,6 +7088,7 @@ fn run_connection_form_dialog(
             w!("RDP (Intégré dans Malvision)"),
             w!("AnyDesk (Client externe)"),
             w!("RustDesk (Client externe)"),
+            w!("FTP (Client intégré)"),
         ] {
             let _ = SendMessageW(
                 cb_proto,
@@ -6948,15 +7225,8 @@ fn run_connection_form_dialog(
             rdp_only: true,
         });
 
-        // 6. Domaine
+        // 6. Domaine / Dossier initial FTP (libellé géré dynamiquement par WM_PAINT)
         let y_dom = dpi.scale(294);
-        add_label(
-            &mut dlg_state.labels,
-            "Domaine (facultatif) :",
-            y_dom,
-            field_h,
-            true,
-        );
         let rc_dom = RECT {
             left: field_left,
             top: y_dom,
@@ -7174,6 +7444,7 @@ fn run_connection_form_dialog(
                 Protocol::Rdp => 0,
                 Protocol::AnyDesk => 1,
                 Protocol::RustDesk => 2,
+                Protocol::Ftp => 3,
             };
             let _ = SendMessageW(cb_proto, CB_SETCURSEL, Some(WPARAM(p_idx)), Some(LPARAM(0)));
             set_window_text(ed_host, &ex.host);
@@ -7443,7 +7714,7 @@ unsafe extern "system" fn prompt_dlg_wnd_proc(
     }
 }
 
-fn run_text_prompt_dialog(
+pub(crate) fn run_text_prompt_dialog(
     owner: HWND,
     title: &str,
     prompt_label: &str,
@@ -7592,6 +7863,440 @@ fn run_text_prompt_dialog(
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = UpdateWindow(hwnd);
         let _ = SetFocus(Some(ed_input));
+
+        run_modal_loop(owner, hwnd, &tab_order);
+
+        state.result.take()
+    }
+}
+
+struct FtpCredsDialogState {
+    owner: HWND,
+    dpi: DpiMetrics,
+    font_ui: HFONT,
+    font_bold: HFONT,
+    font_subtitle: HFONT,
+    font_small: HFONT,
+    brush_bg: HBRUSH,
+    brush_input: HBRUSH,
+    header_title: String,
+    endpoint_label: String,
+    user_label_rc: RECT,
+    pass_label_rc: RECT,
+    user_box_rc: RECT,
+    pass_box_rc: RECT,
+    divider_y: i32,
+    ed_user: HWND,
+    ed_pass: HWND,
+    chk_save: HWND,
+    result: Option<(String, SecretString, bool)>,
+}
+
+unsafe extern "system" fn ftp_creds_dlg_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_ERASEBKGND => LRESULT(1),
+            WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const FtpCredsDialogState;
+                if !ptr.is_null() {
+                    let hdc = HDC(wparam.0 as *mut _);
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_sidebar()));
+                    return LRESULT((*ptr).brush_bg.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_CTLCOLOREDIT => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const FtpCredsDialogState;
+                if !ptr.is_null() {
+                    let hdc = HDC(wparam.0 as *mut _);
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_input()));
+                    return LRESULT((*ptr).brush_input.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_DRAWITEM => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const FtpCredsDialogState;
+                let dis = lparam.0 as *const DRAWITEMSTRUCT;
+                if !ptr.is_null() && !dis.is_null() {
+                    let state = &*ptr;
+                    let d = &*dis;
+                    if d.CtlType == ODT_BUTTON {
+                        let id = d.CtlID as usize;
+                        if id == IDC_DLG_OK || id == IDC_DLG_CANCEL {
+                            draw_owner_button(d, id == IDC_DLG_OK, state.font_ui, state.font_bold);
+                        } else {
+                            draw_owner_checkbox(d, state.font_ui, state.dpi);
+                        }
+                        return LRESULT(1);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_PAINT => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const FtpCredsDialogState;
+                if ptr.is_null() {
+                    return DefWindowProcW(hwnd, msg, wparam, lparam);
+                }
+                let state = &*ptr;
+                let mut ps = PAINTSTRUCT::default();
+                let hdc_screen = BeginPaint(hwnd, &mut ps);
+                let mut rc = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rc);
+                let w = (rc.right - rc.left).max(1);
+                let h = (rc.bottom - rc.top).max(1);
+
+                let hdc = CreateCompatibleDC(Some(hdc_screen));
+                let hbm = CreateCompatibleBitmap(hdc_screen, w, h);
+                let old_bm = SelectObject(hdc, hbm.into());
+                let _ = SetBkMode(hdc, TRANSPARENT);
+                let _ = FillRect(hdc, &rc, state.brush_bg);
+
+                let pad_x = state.dpi.scale(24);
+                let _ = SelectObject(hdc, state.font_subtitle.into());
+                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                draw_text_line(
+                    hdc,
+                    &state.header_title,
+                    RECT {
+                        left: pad_x,
+                        top: state.dpi.scale(16),
+                        right: w - pad_x,
+                        bottom: state.dpi.scale(40),
+                    },
+                );
+
+                let _ = SelectObject(hdc, state.font_small.into());
+                let _ = SetTextColor(hdc, COLORREF(col_accent()));
+                draw_text_line(
+                    hdc,
+                    &state.endpoint_label,
+                    RECT {
+                        left: pad_x,
+                        top: state.dpi.scale(40),
+                        right: w - pad_x,
+                        bottom: state.dpi.scale(58),
+                    },
+                );
+
+                let _ = SelectObject(hdc, state.font_ui.into());
+                let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
+                draw_text_line(hdc, "Nom d'utilisateur :", state.user_label_rc);
+                draw_text_line(hdc, "Mot de passe :", state.pass_label_rc);
+
+                let focused = GetFocus();
+                draw_rounded_box(
+                    hdc,
+                    state.user_box_rc,
+                    col_bg_input(),
+                    if focused == state.ed_user {
+                        col_accent()
+                    } else {
+                        col_border()
+                    },
+                );
+                draw_rounded_box(
+                    hdc,
+                    state.pass_box_rc,
+                    col_bg_input(),
+                    if focused == state.ed_pass {
+                        col_accent()
+                    } else {
+                        col_border()
+                    },
+                );
+                draw_horizontal_line(hdc, pad_x, w - pad_x, state.divider_y, col_border());
+
+                let _ = windows::Win32::Graphics::Gdi::BitBlt(
+                    hdc_screen,
+                    0,
+                    0,
+                    w,
+                    h,
+                    Some(hdc),
+                    0,
+                    0,
+                    windows::Win32::Graphics::Gdi::SRCCOPY,
+                );
+                let _ = SelectObject(hdc, old_bm);
+                let _ = DeleteObject(hbm.into());
+                let _ = DeleteDC(hdc);
+                let _ = EndPaint(hwnd, &ps);
+                LRESULT(0)
+            }
+            WM_COMMAND => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut FtpCredsDialogState;
+                if !ptr.is_null() {
+                    let state = &mut *ptr;
+                    let id = wparam.0 & 0xFFFF;
+                    let code = ((wparam.0 >> 16) & 0xFFFF) as u32;
+                    if code == EN_SETFOCUS || code == EN_KILLFOCUS {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        return LRESULT(0);
+                    }
+                    if id == IDC_DLG_OK || id == 1 {
+                        let user = get_window_text(state.ed_user).trim().to_string();
+                        if user.is_empty() {
+                            show_warning_dialog(
+                                hwnd,
+                                "Identifiant requis",
+                                "Veuillez saisir un nom d'utilisateur FTP (ex: ftpuser ou anonymous).",
+                            );
+                            return LRESULT(0);
+                        }
+                        let raw_pwd = get_window_text(state.ed_pass);
+                        let save_creds = if !state.chk_save.0.is_null() {
+                            SendMessageW(
+                                state.chk_save,
+                                BM_GETCHECK,
+                                Some(WPARAM(0)),
+                                Some(LPARAM(0)),
+                            )
+                            .0 != 0
+                        } else {
+                            false
+                        };
+                        set_window_text(state.ed_pass, "");
+                        state.result = Some((user, SecretString::new(raw_pwd), save_creds));
+                        let owner = state.owner;
+                        close_modal_dialog(hwnd, owner);
+                    } else if id == IDC_DLG_CANCEL || id == 2 {
+                        set_window_text(state.ed_pass, "");
+                        let owner = state.owner;
+                        close_modal_dialog(hwnd, owner);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_CLOSE => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut FtpCredsDialogState;
+                if !ptr.is_null() {
+                    set_window_text((*ptr).ed_pass, "");
+                    let owner = (*ptr).owner;
+                    close_modal_dialog(hwnd, owner);
+                } else {
+                    let _ = DestroyWindow(hwnd);
+                }
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+fn run_ftp_credentials_dialog(
+    owner: HWND,
+    title: &str,
+    endpoint: &str,
+    initial_user: &str,
+    show_save_checkbox: bool,
+    initial_save_checked: bool,
+    palette: &GdiPalette,
+) -> Option<(String, SecretString, bool)> {
+    unsafe {
+        let hinstance = GetModuleHandleW(None).unwrap_or_default();
+        let class_name = w!("MalvisionFtpCredsDlgClass");
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(ftp_creds_dlg_wnd_proc),
+            hInstance: hinstance.into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hbrBackground: palette.brush_bg_sidebar,
+            lpszClassName: class_name,
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+
+        let dpi = if owner.is_invalid() {
+            palette.dpi
+        } else {
+            DpiMetrics::for_window(owner)
+        };
+        let client_w = dpi.scale(480);
+        let client_h = dpi.scale(if show_save_checkbox { 310 } else { 276 });
+        let dlg_style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+        let (win_w, win_h) = calc_dialog_window_size(dlg_style, client_w, client_h);
+
+        let mut owner_rc = RECT::default();
+        let _ = GetWindowRect(owner, &mut owner_rc);
+        let x = owner_rc.left + ((owner_rc.right - owner_rc.left) - win_w) / 2;
+        let y = owner_rc.top + ((owner_rc.bottom - owner_rc.top) - win_h) / 2;
+
+        let title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            class_name,
+            PCWSTR(title_w.as_ptr()),
+            dlg_style,
+            x.max(40),
+            y.max(40),
+            win_w,
+            win_h,
+            Some(owner),
+            None,
+            Some(hinstance.into()),
+            None,
+        )
+        .ok()?;
+
+        let dark_mode: i32 = i32::from(is_active_theme_dark());
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark_mode as *const i32 as *const c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+
+        let pad_x = dpi.scale(24);
+        let user_label_rc = RECT {
+            left: pad_x,
+            top: dpi.scale(68),
+            right: client_w - pad_x,
+            bottom: dpi.scale(90),
+        };
+        let user_box_rc = RECT {
+            left: pad_x,
+            top: dpi.scale(92),
+            right: client_w - pad_x,
+            bottom: dpi.scale(126),
+        };
+        let pass_label_rc = RECT {
+            left: pad_x,
+            top: dpi.scale(136),
+            right: client_w - pad_x,
+            bottom: dpi.scale(158),
+        };
+        let pass_box_rc = RECT {
+            left: pad_x,
+            top: dpi.scale(160),
+            right: client_w - pad_x,
+            bottom: dpi.scale(194),
+        };
+        let divider_y = dpi.scale(if show_save_checkbox { 240 } else { 208 });
+
+        let mut state = Box::new(FtpCredsDialogState {
+            owner,
+            dpi,
+            font_ui: palette.font_ui,
+            font_bold: palette.font_ui_bold,
+            font_subtitle: palette.font_subtitle,
+            font_small: palette.font_small,
+            brush_bg: palette.brush_bg_sidebar,
+            brush_input: palette.brush_bg_input,
+            header_title: "Identifiants FTP requis".to_string(),
+            endpoint_label: format!("Serveur : {endpoint}"),
+            user_label_rc,
+            pass_label_rc,
+            user_box_rc,
+            pass_box_rc,
+            divider_y,
+            ed_user: HWND::default(),
+            ed_pass: HWND::default(),
+            chk_save: HWND::default(),
+            result: None,
+        });
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&mut *state) as *mut _ as isize);
+
+        let ed_user = create_dark_edit(
+            hwnd,
+            hinstance.into(),
+            user_box_rc,
+            IDC_DLG_USER,
+            false,
+            palette.font_ui,
+            dpi,
+        );
+        set_window_text(ed_user, initial_user);
+        state.ed_user = ed_user;
+
+        let ed_pass = create_dark_edit(
+            hwnd,
+            hinstance.into(),
+            pass_box_rc,
+            IDC_DLG_PASS,
+            true,
+            palette.font_ui,
+            dpi,
+        );
+        state.ed_pass = ed_pass;
+
+        let mut tab_order = vec![ed_user, ed_pass];
+
+        if show_save_checkbox {
+            let chk_save = create_dark_checkbox(
+                hwnd,
+                hinstance.into(),
+                w!("Enregistrer ces identifiants (chiffrés via Windows DPAPI)"),
+                RECT {
+                    left: pad_x,
+                    top: dpi.scale(206),
+                    right: client_w - pad_x,
+                    bottom: dpi.scale(230),
+                },
+                IDC_DLG_SAVE_PASS,
+                palette.font_ui,
+            );
+            let _ = SendMessageW(
+                chk_save,
+                BM_SETCHECK,
+                Some(WPARAM(usize::from(initial_save_checked))),
+                Some(LPARAM(0)),
+            );
+            state.chk_save = chk_save;
+            tab_order.push(chk_save);
+        }
+
+        let btn_w = dpi.scale(120);
+        let btn_h = dpi.scale(36);
+        let btn_y = divider_y + dpi.scale(16);
+        let btn_gap = dpi.scale(12);
+        let rc_cancel = RECT {
+            left: client_w - pad_x - btn_w,
+            top: btn_y,
+            right: client_w - pad_x,
+            bottom: btn_y + btn_h,
+        };
+        let rc_ok = RECT {
+            left: rc_cancel.left - btn_gap - btn_w,
+            top: btn_y,
+            right: rc_cancel.left - btn_gap,
+            bottom: btn_y + btn_h,
+        };
+
+        let btn_ok = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Se connecter"),
+            rc_ok,
+            IDC_DLG_OK,
+            palette.font_ui_bold,
+        );
+        let btn_cancel = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Annuler"),
+            rc_cancel,
+            IDC_DLG_CANCEL,
+            palette.font_ui,
+        );
+        tab_order.push(btn_ok);
+        tab_order.push(btn_cancel);
+
+        let _ = EnableWindow(owner, false);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = UpdateWindow(hwnd);
+        if initial_user.trim().is_empty() {
+            let _ = SetFocus(Some(ed_user));
+        } else {
+            let _ = SetFocus(Some(ed_pass));
+        }
 
         run_modal_loop(owner, hwnd, &tab_order);
 
@@ -10833,7 +11538,7 @@ unsafe fn ensure_main_window_frame_styles(hwnd: HWND) {
     }
 }
 
-unsafe fn get_window_text(hwnd: HWND) -> String {
+pub(crate) unsafe fn get_window_text(hwnd: HWND) -> String {
     unsafe {
         let len = GetWindowTextLengthW(hwnd);
         if len <= 0 {
@@ -10848,7 +11553,7 @@ unsafe fn get_window_text(hwnd: HWND) -> String {
     }
 }
 
-unsafe fn set_window_text(hwnd: HWND, text: &str) {
+pub(crate) unsafe fn set_window_text(hwnd: HWND, text: &str) {
     unsafe {
         let mut wide: Vec<u16> = text.encode_utf16().collect();
         wide.push(0);
@@ -10856,7 +11561,7 @@ unsafe fn set_window_text(hwnd: HWND, text: &str) {
     }
 }
 
-fn show_error_dialog(hwnd: HWND, title: &str, message: &str) {
+pub(crate) fn show_error_dialog(hwnd: HWND, title: &str, message: &str) {
     if cfg!(test) {
         return;
     }
@@ -10910,7 +11615,7 @@ fn show_info_dialog(hwnd: HWND, title: &str, message: &str) {
     }
 }
 
-fn confirm_dialog(hwnd: HWND, title: &str, message: &str) -> bool {
+pub(crate) fn confirm_dialog(hwnd: HWND, title: &str, message: &str) -> bool {
     unsafe {
         let mut title_w: Vec<u16> = title.encode_utf16().collect();
         title_w.push(0);
@@ -11613,6 +12318,31 @@ unsafe extern "system" fn main_wnd_proc(
                 }
                 LRESULT(0)
             }
+            WM_FTP_EVENT => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+                if !ptr.is_null() {
+                    let (session_id, event_code) = unpack_ftp_event_wparam(wparam);
+                    if (*ptr).sessions.handle_ftp_event(session_id, event_code) {
+                        (*ptr).invalidate_canvas();
+                    }
+                    if event_code == FTP_EVT_AUTH_FAILED {
+                        let _ = PostMessageW(
+                            Some(hwnd),
+                            WM_FTP_REQUEST_CREDENTIALS,
+                            WPARAM(session_id as usize),
+                            LPARAM(0),
+                        );
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_FTP_REQUEST_CREDENTIALS => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+                if !ptr.is_null() {
+                    (*ptr).prompt_and_reconnect_ftp(wparam.0 as u32);
+                }
+                LRESULT(0)
+            }
             WM_TIMER => {
                 if wparam.0 == IDT_RDP_STATE_POLL {
                     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
@@ -11803,11 +12533,13 @@ pub fn run_app() -> Result<(), String> {
                     let state = &mut *ptr;
                     let focus_hwnd = GetFocus();
 
-                    if let Some(active_tab) = state.sessions.active_tab() {
-                        let ax_hwnd = active_tab.host.hwnd();
+                    if let Some(active_tab) = state.sessions.active_tab()
+                        && let crate::sessions::SessionHost::Rdp(ref rdp_host) = active_tab.host
+                    {
+                        let ax_hwnd = rdp_host.hwnd();
                         let focus_in_rdp =
                             focus_hwnd == ax_hwnd || IsChild(ax_hwnd, focus_hwnd).as_bool();
-                        if focus_in_rdp && active_tab.host.translate_accelerator(&msg) {
+                        if focus_in_rdp && rdp_host.translate_accelerator(&msg) {
                             handled = true;
                         }
                     }
@@ -14483,5 +15215,313 @@ mod tests {
             let _ = DeleteObject(hbm.into());
             let _ = DeleteDC(hdc);
         }
+    }
+
+    unsafe extern "system" fn ftp_dialog_driver_timer(
+        hwnd: HWND,
+        _msg: u32,
+        id_event: usize,
+        _dw_time: u32,
+    ) {
+        unsafe {
+            let Ok(dlg) = FindWindowExW(None, None, w!("MalvisionConnectionFormDlgClass"), None)
+            else {
+                return;
+            };
+            if dlg.0.is_null() || !IsWindow(Some(dlg)).as_bool() {
+                return;
+            }
+            let _ = KillTimer(Some(hwnd), id_event);
+
+            let cb_proto = GetDlgItem(Some(dlg), IDC_DLG_PROTO as i32).unwrap_or_default();
+            let ed_name = GetDlgItem(Some(dlg), IDC_DLG_NAME as i32).unwrap_or_default();
+            let ed_host = GetDlgItem(Some(dlg), IDC_DLG_HOST as i32).unwrap_or_default();
+            let ed_port = GetDlgItem(Some(dlg), IDC_DLG_PORT as i32).unwrap_or_default();
+            let ed_user = GetDlgItem(Some(dlg), IDC_DLG_USER as i32).unwrap_or_default();
+            let ed_domain = GetDlgItem(Some(dlg), IDC_DLG_DOMAIN as i32).unwrap_or_default();
+            let ed_pass = GetDlgItem(Some(dlg), IDC_DLG_PASS as i32).unwrap_or_default();
+            let chk_save = GetDlgItem(Some(dlg), IDC_DLG_SAVE_PASS as i32).unwrap_or_default();
+            let chk_dyn = GetDlgItem(Some(dlg), IDC_DLG_DYN_RES as i32).unwrap_or_default();
+            let chk_clip = GetDlgItem(Some(dlg), IDC_DLG_CLIPBOARD as i32).unwrap_or_default();
+
+            // Sélectionner FTP (indice 3) -> port bascule automatiquement 3389 -> 21
+            let _ = SendMessageW(cb_proto, CB_SETCURSEL, Some(WPARAM(3)), Some(LPARAM(0)));
+            let _ = SendMessageW(
+                dlg,
+                WM_COMMAND,
+                Some(WPARAM((1 << 16) | IDC_DLG_PROTO)),
+                Some(LPARAM(cb_proto.0 as isize)),
+            );
+
+            assert_eq!(get_window_text(ed_port), "21");
+            assert!(IsWindowVisible(ed_port).as_bool(), "Port visible pour FTP");
+            assert!(
+                IsWindowVisible(ed_user).as_bool(),
+                "Utilisateur visible pour FTP"
+            );
+            assert!(
+                IsWindowVisible(ed_domain).as_bool(),
+                "Dossier initial visible pour FTP"
+            );
+            assert!(
+                !IsWindowVisible(chk_dyn).as_bool(),
+                "SmartSizing RDP doit être masqué sous FTP"
+            );
+            assert!(
+                !IsWindowVisible(chk_clip).as_bool(),
+                "Presse-papiers RDP doit être masqué sous FTP"
+            );
+
+            // Remplir une connexion FTP complète avec identifiants DPAPI
+            set_window_text(ed_name, "NAS Stockage FTP");
+            set_window_text(ed_host, "ftp://ftp.exemple.local:2121/pub/releases");
+            set_window_text(ed_port, "2121");
+            set_window_text(ed_user, "deploy");
+            set_window_text(ed_domain, "/pub/releases");
+
+            let _ = SendMessageW(chk_save, BM_SETCHECK, Some(WPARAM(1)), Some(LPARAM(0)));
+            let _ = SendMessageW(
+                dlg,
+                WM_COMMAND,
+                Some(WPARAM(IDC_DLG_SAVE_PASS)),
+                Some(LPARAM(chk_save.0 as isize)),
+            );
+            assert!(IsWindowEnabled(ed_pass).as_bool());
+            set_window_text(ed_pass, "FtpSuperSecret!99");
+
+            let btn_ok = GetDlgItem(Some(dlg), IDC_DLG_OK as i32).unwrap_or_default();
+            let _ = SendMessageW(btn_ok, BM_CLICK, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
+    }
+
+    #[test]
+    fn test_ui_ftp_connection_dialog_layout_and_dpapi_save_real_win32() {
+        let _guard = WIN32_UI_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db_path = create_temp_test_db_path("ftp_dlg");
+        unsafe {
+            let hwnd = create_isolated_test_main_window(&db_path);
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+
+            let timer_fn: TIMERPROC = Some(ftp_dialog_driver_timer);
+            let _ = SetTimer(Some(hwnd), 9801, 25, timer_fn);
+            (*ptr).open_connection_dialog(None, None);
+            let _ = KillTimer(Some(hwnd), 9801);
+
+            let conns = (*ptr).storage.list_connections().unwrap();
+            assert_eq!(conns.len(), 1);
+            let ftp = &conns[0];
+            assert_eq!(ftp.protocol, Protocol::Ftp);
+            assert_eq!(ftp.name, "NAS Stockage FTP");
+            assert_eq!(ftp.host, "ftp.exemple.local");
+            assert_eq!(ftp.port, 2121);
+            assert_eq!(ftp.username, "deploy");
+            assert_eq!(ftp.domain, "/pub/releases");
+            assert!(ftp.save_password);
+            assert!(ftp.has_saved_password);
+
+            let decrypted = (*ptr)
+                .storage
+                .load_decrypted_password(ftp.id)
+                .unwrap()
+                .expect("Le mot de passe FTP chiffré via DPAPI doit être récupérable");
+            assert_eq!(decrypted.as_str(), "FtpSuperSecret!99");
+
+            let _ = SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_ui_rustdesk_dpapi_password_forwarding_wiring() {
+        let _guard = WIN32_UI_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db_path = create_temp_test_db_path("rustdesk_pwd_wiring");
+        unsafe {
+            let hwnd = create_isolated_test_main_window(&db_path);
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+
+            let draft = ConnectionDraft {
+                folder_id: None,
+                name: "Poste RustDesk Test".to_string(),
+                protocol: Protocol::RustDesk,
+                host: "123 456 789".to_string(),
+                port: 21118,
+                username: String::new(),
+                domain: String::new(),
+                description: String::new(),
+                is_favorite: false,
+                is_priority: false,
+                save_password: true,
+                password: SecretString::new("RustDeskPwd#2026".to_string()),
+                keep_existing_password: false,
+                dynamic_resolution: false,
+                redirect_clipboard: false,
+            };
+            let saved = (*ptr).storage.create_connection(draft).unwrap();
+            let decrypted = (*ptr)
+                .storage
+                .load_decrypted_password(saved.id)
+                .unwrap()
+                .expect("Mot de passe RustDesk DPAPI présent");
+            let mut cmd_w = crate::external_apps::build_rustdesk_command_line(
+                std::path::Path::new(r"C:\Program Files\RustDesk\rustdesk.exe"),
+                Some(&saved.host),
+                Some(decrypted.as_str()),
+            );
+            let end = cmd_w.iter().position(|&c| c == 0).unwrap_or(cmd_w.len());
+            let cmd = String::from_utf16_lossy(&cmd_w[..end]);
+            cmd_w.fill(0);
+            assert!(cmd.contains("--connect \"123 456 789\""));
+            assert!(cmd.contains("--password \"RustDeskPwd#2026\""));
+
+            let _ = SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_ui_ftp_session_host_connects_to_mock_server_and_logs_in() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        use windows::Win32::UI::WindowsAndMessaging::{PM_REMOVE, PeekMessageW};
+
+        let _guard = WIN32_UI_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv_handle = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let mut writer = stream.try_clone().unwrap();
+                let mut reader = BufReader::new(stream);
+                let _ = writer.write_all(b"220 Malvision Mock FTP Ready\r\n");
+                let _ = writer.flush();
+
+                let mut pending_data: Option<TcpListener> = None;
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    let cmd = line.trim().to_string();
+                    line.clear();
+                    if cmd.starts_with("OPTS ") {
+                        let _ = writer.write_all(b"200 UTF8 OK\r\n");
+                    } else if cmd.starts_with("USER ") {
+                        let _ = writer.write_all(b"331 Password required\r\n");
+                    } else if cmd.starts_with("PASS ") {
+                        let _ = writer.write_all(b"230 Login successful\r\n");
+                    } else if cmd.starts_with("TYPE ") {
+                        let _ = writer.write_all(b"200 Type set to I\r\n");
+                    } else if cmd == "PWD" {
+                        let _ = writer.write_all(b"257 \"/home/test\" is current directory\r\n");
+                    } else if cmd == "EPSV" {
+                        let _ = writer.write_all(b"502 EPSV disabled\r\n");
+                    } else if cmd == "PASV" {
+                        let data_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                        let dport = data_listener.local_addr().unwrap().port();
+                        let resp = format!(
+                            "227 Entering Passive Mode (127,0,0,1,{},{})\r\n",
+                            dport >> 8,
+                            dport & 0xFF
+                        );
+                        pending_data = Some(data_listener);
+                        let _ = writer.write_all(resp.as_bytes());
+                    } else if cmd.starts_with("MLSD") || cmd.starts_with("LIST") {
+                        if let Some(dl) = pending_data.take() {
+                            let _ = writer.write_all(b"150 Opening data connection\r\n");
+                            let _ = writer.flush();
+                            if let Ok((mut ds, _)) = dl.accept() {
+                                let _ = ds
+                                    .write_all(b"drwxr-xr-x 1 user group 0 Nov 16 12:00 docs\r\n");
+                                let _ = ds.flush();
+                            }
+                            let _ = writer.write_all(b"226 Transfer complete\r\n");
+                        } else {
+                            let _ = writer.write_all(b"550 No passive socket\r\n");
+                        }
+                    } else if cmd == "QUIT" {
+                        let _ = writer.write_all(b"221 Bye\r\n");
+                        let _ = writer.flush();
+                        break;
+                    } else {
+                        let _ = writer.write_all(b"200 OK\r\n");
+                    }
+                    let _ = writer.flush();
+                }
+            }
+        });
+
+        let db_path = create_temp_test_db_path("ftp_session_tab");
+        unsafe {
+            let hwnd = create_isolated_test_main_window(&db_path);
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+
+            let draft = ConnectionDraft {
+                folder_id: None,
+                name: "Mock FTP Tab".to_string(),
+                protocol: Protocol::Ftp,
+                host: "127.0.0.1".to_string(),
+                port,
+                username: "tester".to_string(),
+                domain: String::new(),
+                description: String::new(),
+                is_favorite: false,
+                is_priority: false,
+                save_password: true,
+                password: SecretString::new("secret".to_string()),
+                keep_existing_password: false,
+                dynamic_resolution: false,
+                redirect_clipboard: false,
+            };
+            let conn = (*ptr).storage.create_connection(draft).unwrap();
+            let viewport = (*ptr).rdp_viewport_rect();
+            let sid = (*ptr)
+                .sessions
+                .open_ftp_session(
+                    hwnd,
+                    viewport,
+                    &conn,
+                    "tester".to_string(),
+                    SecretString::new("secret".to_string()),
+                )
+                .expect("L'onglet FtpSessionHost doit démarrer");
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut msg = MSG::default();
+            while std::time::Instant::now() < deadline {
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                if let Some(tab) = (*ptr).sessions.tabs().iter().find(|t| t.session_id == sid)
+                    && tab.status == SessionStatus::LoggedIn
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            }
+
+            let tab = (*ptr)
+                .sessions
+                .tabs()
+                .iter()
+                .find(|t| t.session_id == sid)
+                .expect("Onglet FTP présent");
+            assert_eq!(
+                tab.status,
+                SessionStatus::LoggedIn,
+                "La session FTP intégrée doit atteindre SessionStatus::LoggedIn"
+            );
+
+            let _ = (*ptr).sessions.close_tab(sid, viewport);
+            let _ = SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
+        let _ = srv_handle.join();
+        let _ = std::fs::remove_file(&db_path);
     }
 }
