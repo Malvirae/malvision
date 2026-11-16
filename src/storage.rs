@@ -15,7 +15,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const CURRENT_SCHEMA_VERSION: i32 = 5;
+const CURRENT_SCHEMA_VERSION: i32 = 6;
 
 /// Résumé du diagnostic et du résultat d'un import de configuration SQLite.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -392,6 +392,76 @@ impl Storage {
             let fk_on_res = self.conn.execute_batch("PRAGMA foreign_keys = ON;");
             migration_res?;
             fk_on_res.map_err(|e| format!("Échec réactivation foreign_keys post-v5 : {e}"))?;
+        }
+
+        if version < 6 {
+            // Désactiver temporairement foreign_keys hors transaction pour recréer `connections`
+            // avec le protocole `'ssh'` autorisé dans la contrainte CHECK sans altérer les données existantes.
+            self.conn
+                .execute_batch("PRAGMA foreign_keys = OFF;")
+                .map_err(|e| format!("Échec préparation migration v6 (FK OFF) : {e}"))?;
+
+            let migration_res: Result<(), String> = (|| {
+                let tx = self
+                    .conn
+                    .transaction()
+                    .map_err(|e| format!("Échec ouverture transaction migration v6 : {e}"))?;
+
+                tx.execute_batch(
+                    "CREATE TABLE connections_v6 (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        folder_id INTEGER NULL REFERENCES folders(id) ON DELETE SET NULL,
+                        name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                        protocol TEXT NOT NULL CHECK(protocol IN ('rdp', 'anydesk', 'rustdesk', 'ftp', 'ssh')),
+                        host TEXT NOT NULL CHECK(length(trim(host)) > 0),
+                        port INTEGER NOT NULL DEFAULT 3389 CHECK(port BETWEEN 1 AND 65535),
+                        username TEXT NOT NULL DEFAULT '',
+                        domain TEXT NOT NULL DEFAULT '',
+                        description TEXT NOT NULL DEFAULT '',
+                        is_favorite INTEGER NOT NULL DEFAULT 0,
+                        save_password INTEGER NOT NULL DEFAULT 0,
+                        encrypted_password BLOB NULL,
+                        dynamic_resolution INTEGER NOT NULL DEFAULT 1,
+                        redirect_clipboard INTEGER NOT NULL DEFAULT 1,
+                        sort_order INTEGER NOT NULL DEFAULT 0,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        last_connected_at INTEGER NULL,
+                        is_priority INTEGER NOT NULL DEFAULT 0
+                    );
+
+                    INSERT INTO connections_v6 (
+                        id, folder_id, name, protocol, host, port, username, domain, description,
+                        is_favorite, save_password, encrypted_password, dynamic_resolution,
+                        redirect_clipboard, sort_order, created_at, updated_at, last_connected_at,
+                        is_priority
+                    )
+                    SELECT
+                        id, folder_id, name, protocol, host, port, username, domain, description,
+                        is_favorite, save_password, encrypted_password, dynamic_resolution,
+                        redirect_clipboard, sort_order, created_at, updated_at, last_connected_at,
+                        is_priority
+                    FROM connections;
+
+                    DROP TABLE connections;
+                    ALTER TABLE connections_v6 RENAME TO connections;
+
+                    CREATE INDEX IF NOT EXISTS idx_connections_folder ON connections(folder_id, sort_order, name);
+                    CREATE INDEX IF NOT EXISTS idx_connections_favorite ON connections(is_favorite, name);
+                    CREATE INDEX IF NOT EXISTS idx_connections_priority ON connections(is_priority, name);
+
+                    PRAGMA user_version = 6;",
+                )
+                .map_err(|e| format!("Échec de la migration SQLite v6 : {e}"))?;
+
+                tx.commit()
+                    .map_err(|e| format!("Échec de validation de la migration SQLite v6 : {e}"))?;
+                Ok(())
+            })();
+
+            let fk_on_res = self.conn.execute_batch("PRAGMA foreign_keys = ON;");
+            migration_res?;
+            fk_on_res.map_err(|e| format!("Échec réactivation foreign_keys post-v6 : {e}"))?;
         }
 
         if version > CURRENT_SCHEMA_VERSION {
@@ -1725,7 +1795,7 @@ mod tests {
     #[test]
     fn test_schema_migration_and_settings() {
         let mut store = Storage::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert_eq!(store.schema_version().unwrap(), 6);
         assert_eq!(
             store.get_setting("theme_mode").unwrap().as_deref(),
             Some("dark")
@@ -2297,7 +2367,7 @@ mod tests {
 
         // Ouvrir avec Malvision Storage : les migrations v4 puis v5 doivent s'exécuter
         let mut store = Storage::open_at_path(&db_path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert_eq!(store.schema_version().unwrap(), 6);
 
         let conns = store.list_connections().unwrap();
         assert_eq!(conns.len(), 1);

@@ -30,6 +30,9 @@ use crate::rdp::{
 };
 use crate::security::SecretString;
 use crate::settings::RdpKeyboardHookMode;
+use crate::ssh::{
+    SSH_EVT_CONNECTED, SSH_EVT_CONNECTING, SSH_EVT_DISCONNECTED, SSH_EVT_ERROR, SshSessionHost,
+};
 use windows::Win32::Foundation::{HWND, RECT};
 
 /// État courant d'un onglet de session RDP.
@@ -60,6 +63,7 @@ pub struct RdpEventOutcome {
 pub enum SessionHost {
     Rdp(RdpActiveXHost),
     Ftp(FtpSessionHost),
+    Ssh(SshSessionHost),
 }
 
 impl SessionHost {
@@ -67,6 +71,7 @@ impl SessionHost {
         match self {
             Self::Rdp(h) => h.set_visible(visible),
             Self::Ftp(h) => h.set_visible(visible),
+            Self::Ssh(h) => h.set_visible(visible),
         }
     }
 
@@ -74,6 +79,7 @@ impl SessionHost {
         match self {
             Self::Rdp(h) => h.resize(x, y, width, height),
             Self::Ftp(h) => h.resize(x, y, width, height),
+            Self::Ssh(h) => h.resize(x, y, width, height),
         }
     }
 
@@ -81,6 +87,7 @@ impl SessionHost {
         match self {
             Self::Rdp(h) => h.focus_control(),
             Self::Ftp(h) => h.focus_control(),
+            Self::Ssh(h) => h.focus_control(),
         }
     }
 
@@ -93,6 +100,9 @@ impl SessionHost {
                 }
             }
             Self::Ftp(h) => {
+                h.disconnect();
+            }
+            Self::Ssh(h) => {
                 h.disconnect();
             }
         }
@@ -408,7 +418,7 @@ impl SessionManager {
         self.active_tab()
             .map(|t| match t.host {
                 SessionHost::Rdp(ref h) => h.is_full_screen(),
-                SessionHost::Ftp(_) => false,
+                SessionHost::Ftp(_) | SessionHost::Ssh(_) => false,
             })
             .unwrap_or(false)
     }
@@ -465,13 +475,98 @@ impl SessionManager {
         true
     }
 
-    /// Réapplique le thème actif sur tous les onglets FTP natifs ouverts.
+    /// Réapplique le thème actif sur tous les onglets FTP et SSH natifs ouverts.
     pub fn refresh_themes(&self) {
         for tab in &self.tabs {
-            if let SessionHost::Ftp(ref ftp_host) = tab.host {
-                ftp_host.refresh_theme();
+            match tab.host {
+                SessionHost::Ftp(ref ftp_host) => ftp_host.refresh_theme(),
+                SessionHost::Ssh(ref ssh_host) => ssh_host.refresh_theme(),
+                SessionHost::Rdp(_) => {}
             }
         }
+    }
+
+    /// Crée et démarre un nouvel onglet de terminal SSH intégré dans `parent_hwnd`.
+    pub fn open_ssh_session(
+        &mut self,
+        parent_hwnd: HWND,
+        viewport: RECT,
+        conn: &ConnectionItem,
+        password: SecretString,
+    ) -> Result<u32, String> {
+        let session_id = self.next_session_id;
+        self.next_session_id = self.next_session_id.wrapping_add(1).max(1);
+
+        let x = viewport.left;
+        let y = viewport.top;
+        let width = (viewport.right - viewport.left).max(400);
+        let height = (viewport.bottom - viewport.top).max(300);
+
+        let host = SshSessionHost::create(
+            session_id,
+            parent_hwnd,
+            conn.host.clone(),
+            conn.port,
+            conn.username.clone(),
+            password,
+            conn.domain.clone(),
+            x,
+            y,
+            width,
+            height,
+        )?;
+
+        let host_label = conn.endpoint_label();
+        let detail = format!("Connexion SSH en cours vers {host_label}...");
+
+        let tab = SessionTab {
+            session_id: host.session_id(),
+            connection_id: Some(conn.id),
+            title: conn.name.clone(),
+            protocol: conn.protocol,
+            host_label,
+            status: SessionStatus::Connecting,
+            auto_reconnecting: false,
+            status_detail: detail,
+            last_error: None,
+            host: SessionHost::Ssh(host),
+        };
+
+        self.tabs.push(tab);
+        self.select_tab(session_id, viewport);
+        Ok(session_id)
+    }
+
+    /// Traite un événement d'onglet SSH et met à jour son statut dans la barre d'état.
+    pub fn handle_ssh_event(&mut self, session_id: u32, event_code: usize) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.session_id == session_id) else {
+            return false;
+        };
+        let SessionHost::Ssh(ref ssh_host) = tab.host else {
+            return false;
+        };
+        if let Some(detail) = ssh_host.latest_status_detail() {
+            tab.status_detail = detail;
+        }
+        match event_code {
+            SSH_EVT_CONNECTING => {
+                tab.status = SessionStatus::Connecting;
+                tab.last_error = None;
+            }
+            SSH_EVT_CONNECTED => {
+                tab.status = SessionStatus::LoggedIn;
+                tab.last_error = None;
+            }
+            SSH_EVT_ERROR => {
+                tab.status = SessionStatus::Error;
+                tab.last_error = Some(tab.status_detail.clone());
+            }
+            SSH_EVT_DISCONNECTED => {
+                tab.status = SessionStatus::Disconnected;
+            }
+            _ => {}
+        }
+        true
     }
 
     /// Traite un événement COM `IMsTscAxEvents` reçu pour `session_id` et ferme automatiquement
@@ -491,7 +586,7 @@ impl SessionManager {
         let title = tab.title.clone();
         let real_conn_state = match tab.host {
             SessionHost::Rdp(ref h) => h.connection_state(),
-            SessionHost::Ftp(_) => return RdpEventOutcome::default(),
+            SessionHost::Ftp(_) | SessionHost::Ssh(_) => return RdpEventOutcome::default(),
         };
 
         match event_code {
@@ -631,7 +726,7 @@ impl SessionManager {
                 let disc_reason = param as i32;
                 let (ext_reason, desc) = match tab.host {
                     SessionHost::Rdp(ref h) => h.describe_disconnect(disc_reason),
-                    SessionHost::Ftp(_) => (0, String::new()),
+                    SessionHost::Ftp(_) | SessionHost::Ssh(_) => (0, String::new()),
                 };
                 // Déconnexion volontaire, déconnexion depuis le bureau distant ou fermeture de session Windows distante :
                 // disc_reason 1 (locale), 2 (par le serveur/logoff), 3 (initiée par le serveur)

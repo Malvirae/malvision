@@ -2,11 +2,17 @@
 
 Application native **Windows 11 x64** de gestion de connexions distantes, écrite en **Rust** avec `windows-rs` (Win32 natif + COM/ActiveX + SQLite embarqué + DPAPI).
 
-**Version actuelle :** `1.0.5` (V1.0.5 Portable)
+**Version actuelle :** `1.0.6` (V1.0.6 Portable)
 
 ---
 
-## Fonctionnalités principales (V1.0.5)
+## Fonctionnalités principales (V1.0.6)
+
+- **Terminal SSH intégré ConPTY & OpenSSH Windows (V1.0.6)** :
+  - Nouveau protocole `SSH (Terminal intégré)` dans le choix des connexions (badge `SSH`, port `22`, clé privée SSH facultative, URL `ssh://user@host:port`).
+  - Terminal VT100/ANSI GDI double-bufferisé avec pseudo-console Windows native (`CreatePseudoConsole` / `ResizePseudoConsole`), couleurs 16/256/RGB, scrollback molette, sélection souris, copier/coller (`Ctrl+Shift+C` / `Ctrl+Shift+V`) et thèmes Sombre/Clair/Système à chaud.
+  - Authentification DPAPI sécurisée via `SSH_ASKPASS` et pipe nommé éphémère à usage unique sans exposition du mot de passe en ligne de commande.
+- **Client FTP amélioré (V1.0.6)** : keep-alive `NOOP` et reprise dans le dernier dossier visité, sélection multiple (`Ctrl`/`Shift`/`Ctrl+A`), glisser-déposer direct entre les panneaux Local et FTP, et correction du doublon `..`.
 
 - **Client FTP intégré & Gestion DPAPI des identifiants (V1.0.5)** :
   - **Explorateur FTP natif intégré par onglet (`FtpSessionHost`)** reprenant fidèlement le design Fluent de Malvision (thèmes Sombre / Clair / Système mis à jour à chaud, GDI double-buffering HiDPI, badge `FTP`).
@@ -190,6 +196,7 @@ Application native **Windows 11 x64** de gestion de connexions distantes, écrit
 - [`src/storage.rs`](src/storage.rs) : Persistance locale SQLite embarquée (`malvision.db`) avec schéma v3, tables `folders`, `connections`, `recent_connections`, `settings`, journalisation WAL et intégrité référentielle.
 - [`src/settings.rs`](src/settings.rs) : Modèle et persistance de l'ensemble des réglages applicatifs (chemins AnyDesk/RustDesk, `RdpKeyboardHookMode`, System Tray, thèmes, Startup shortcut).
 - [`src/ftp.rs`](src/ftp.rs) : Moteur client FTP pur-Rust (RFC 959/3659, `EPSV`/`PASV`, `MLSD`/`LIST`, transferts `.part` annulables) et hôte graphique natif Win32/GDI par onglet (`FtpSessionHost`) avec glisser-déposer.
+- [`src/ssh.rs`](src/ssh.rs) : Terminal SSH intégré via Windows ConPTY (`CreatePseudoConsole`), parseur VT100/ANSI (`VtTerminal`), rendu GDI double-bufferisé et relais `SSH_ASKPASS` chiffré via pipe nommé.
 - [`src/rdp.rs`](src/rdp.rs) : Hébergement ActiveX natif (`AtlAxWin`), interfaces Microsoft RDP `IMsRdpClient9`, `IMsRdpClientAdvancedSettings8`, `IMsRdpClientSecuredSettings2`, `IMsRdpClientNonScriptable` (`SendKeys` pour Ctrl+Alt+Del et Ctrl+Alt+Fin, `put_FullScreen`, `put_KeyboardHookMode`, `put_RedirectDrives`, `put_RedirectClipboard`), sink d'événements COM avec désactivation atomique.
 - [`src/sessions.rs`](src/sessions.rs) : Gestionnaire multi-sessions (`SessionManager`, `RdpSessionTab`) orchestrant l'ouverture, la commutation d'onglets, la transmission des raccourcis spéciaux de session et la fermeture automatique des onglets déconnectés.
 - [`src/ui.rs`](src/ui.rs) : Interface graphique Win32/GDI avec thématisation dynamique intégrale (Sombre / Clair / Système), arborescence `TreeView`, barre d'onglets avec bouton d'action contextuel `⚡`, menu de session popup, boîte de dialogue des Paramètres (avec sections RDP et Applications externes) et dialogue modal moderne.

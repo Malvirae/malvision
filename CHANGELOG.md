@@ -2,6 +2,21 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
+## [1.0.6] — Terminal SSH intégré & Améliorations FTP (2026-11-16)
+
+### Ajouté & Amélioré
+- **Connexion SSH intégrée (`Protocol::Ssh`)** :
+  - Nouveau module `src/ssh.rs` avec terminal VT100/ANSI GDI double-bufferisé (`VtTerminal`, couleurs 16/256/TrueColor, écran alternatif, scrollback) adossé à Windows ConPTY (`CreatePseudoConsole` / `ResizePseudoConsole`) et OpenSSH client Windows (`ssh.exe`).
+  - Authentification DPAPI sécurisée sans exposition en ligne de commande grâce au mode auxiliaire `SSH_ASKPASS` (`MALVISION_SSH_ASKPASS_PIPE`) transmis via pipe nommé éphémère à usage unique.
+  - Intégration complète dans le formulaire de connexion (`SSH (Terminal intégré)`, port `22`, clé privée facultative, prise en charge `ssh://user@host:port`), l'arborescence, les cartes d'accueil, les onglets multi-sessions et la migration SQLite v5 -> v6.
+- **Améliorations du client FTP (`src/ftp.rs`)** :
+  - Suppression de l'entrée `..` (Dossier parent) en double lors de la navigation distante.
+  - Keep-alive `NOOP` toutes les 20 s et reconnexion automatique/manuelle dans le dernier répertoire visité (`last_remote_dir`).
+  - Sélection multiple (`Clic`, `Ctrl + Clic`, `Shift + Clic`, `Ctrl + A`) et glisser-déposer direct entre le panneau local et le panneau FTP.
+
+### Testé
+- Suite étendue à **107 tests unitaires et d'intégration (100 % passants)**, `cargo fmt --check` et `cargo clippy --all-targets -- -D warnings` sans avertissement.
+
 ## [1.0.5] — Client FTP intégré & Transmission mot de passe RustDesk (2026-11-16)
 
 ### Ajouté & Corrigé

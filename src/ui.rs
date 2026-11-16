@@ -13,6 +13,7 @@ use crate::settings::{
     AppSettings, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, RdpKeyboardHookMode, ResolvedTheme,
     ThemeMode, apply_startup_shortcut, sync_settings_with_real_startup_shortcut,
 };
+use crate::ssh::{WM_SSH_EVENT, unpack_ssh_event_wparam};
 use crate::storage::Storage;
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -198,6 +199,7 @@ pub(crate) const COL_FOLDER_AMBER: u32 = 0x003294DC; // Ambre dossier lisible su
 const COL_PROTO_ANYDESK: u32 = 0x003943D8; // #D84339 Badge AnyDesk
 const COL_PROTO_RUSTDESK: u32 = 0x008A9616; // #16968A Badge RustDesk
 pub(crate) const COL_PROTO_FTP: u32 = 0x00A66C2D; // #2D6CA6 Badge FTP bleu ardoise discret
+pub(crate) const COL_PROTO_SSH: u32 = 0x008E577C; // #7C578E Badge SSH prune discret
 
 const SIDEBAR_HEADER_HEIGHT: i32 = 152;
 const SIDEBAR_FOOTER_HEIGHT: i32 = 46;
@@ -2025,6 +2027,7 @@ impl AppWindowState {
                             Protocol::AnyDesk => (COL_PROTO_ANYDESK, "ANY"),
                             Protocol::RustDesk => (COL_PROTO_RUSTDESK, "RST"),
                             Protocol::Ftp => (COL_PROTO_FTP, "FTP"),
+                            Protocol::Ssh => (COL_PROTO_SSH, "SSH"),
                         };
                         let badge_rc = RECT {
                             left: indent + 12,
@@ -3026,6 +3029,7 @@ impl AppWindowState {
                         Protocol::AnyDesk => 0x003B46D9, // Rouge AnyDesk discret
                         Protocol::RustDesk => 0x00B5721E, // Bleu-vert RustDesk
                         Protocol::Ftp => COL_PROTO_FTP,  // Bleu ardoise FTP
+                        Protocol::Ssh => COL_PROTO_SSH,  // Prune discret SSH
                     };
                     draw_filled_badge(
                         hdc,
@@ -3057,7 +3061,7 @@ impl AppWindowState {
                     // Sous-texte : hôte:port + utilisateur
                     let _ = SelectObject(hdc, self.palette.font_small.into());
                     let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
-                    let user_info = if conn.protocol == Protocol::Ftp {
+                    let user_info = if matches!(conn.protocol, Protocol::Ftp | Protocol::Ssh) {
                         if conn.username.is_empty() && conn.domain.is_empty() {
                             conn.endpoint_label()
                         } else if conn.domain.is_empty() {
@@ -3216,6 +3220,7 @@ impl AppWindowState {
                         Protocol::AnyDesk => (COL_PROTO_ANYDESK, "ANY"),
                         Protocol::RustDesk => (COL_PROTO_RUSTDESK, "RST"),
                         Protocol::Ftp => (COL_PROTO_FTP, "FTP"),
+                        Protocol::Ssh => (COL_PROTO_SSH, "SSH"),
                     };
                     let badge_rc = RECT {
                         left: card_rc.left + 8,
@@ -4503,6 +4508,36 @@ impl AppWindowState {
                         self.status_override = Some(msg.clone());
                         self.invalidate_canvas();
                         show_error_dialog(self.hwnd, "Erreur client FTP", &msg);
+                    }
+                }
+            }
+            Protocol::Ssh => {
+                let saved_pwd = if conn.has_saved_password {
+                    self.storage
+                        .load_decrypted_password(conn.id)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| SecretString::new(String::new()))
+                } else {
+                    SecretString::new(String::new())
+                };
+                let viewport = self.rdp_viewport_rect();
+                match self
+                    .sessions
+                    .open_ssh_session(self.hwnd, viewport, &conn, saved_pwd)
+                {
+                    Ok(_sid) => {
+                        self.status_override = None;
+                        self.invalidate_canvas();
+                    }
+                    Err(err) => {
+                        let msg = format!(
+                            "Impossible d'ouvrir le terminal SSH pour {} : {err}",
+                            conn.endpoint_label()
+                        );
+                        self.status_override = Some(msg.clone());
+                        self.invalidate_canvas();
+                        show_error_dialog(self.hwnd, "Erreur terminal SSH", &msg);
                     }
                 }
             }
@@ -6320,7 +6355,7 @@ fn build_folder_choices(
 fn update_dialog_protocol_layout(state: &mut ConnectionDialogState, hwnd: HWND, proto: Protocol) {
     state.current_protocol = proto;
     let is_rdp = proto == Protocol::Rdp;
-    let uses_host_creds = matches!(proto, Protocol::Rdp | Protocol::Ftp);
+    let uses_host_creds = matches!(proto, Protocol::Rdp | Protocol::Ftp | Protocol::Ssh);
     unsafe {
         let _ = ShowWindow(
             state.ed_port,
@@ -6363,6 +6398,12 @@ fn update_dialog_protocol_layout(state: &mut ConnectionDialogState, hwnd: HWND, 
                 state.password_label_text = "Mot de passe :".to_string();
                 state.domain_label_text = "Dossier initial (facultatif) :".to_string();
                 state.notice_text = Some("Client FTP intégré : explorateur natif, mode passif, glisser-déposer et identifiants DPAPI.".to_string());
+            }
+            Protocol::Ssh => {
+                state.host_label_text = "Hôte SSH (IP / DNS) * :".to_string();
+                state.password_label_text = "Mot de passe :".to_string();
+                state.domain_label_text = "Clé privée SSH (facultatif) :".to_string();
+                state.notice_text = Some("Terminal SSH intégré (ConPTY + OpenSSH Windows) avec mot de passe chiffré DPAPI.".to_string());
             }
             Protocol::AnyDesk => {
                 state.host_label_text = "ID ou Alias AnyDesk * :".to_string();
@@ -6508,8 +6549,10 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
 
                 // Libellé dynamique de mot de passe et domaine/dossier initial
                 draw_text_line(hdc, &state.password_label_text, state.password_label_rect);
-                let uses_host_creds =
-                    matches!(state.current_protocol, Protocol::Rdp | Protocol::Ftp);
+                let uses_host_creds = matches!(
+                    state.current_protocol,
+                    Protocol::Rdp | Protocol::Ftp | Protocol::Ssh
+                );
                 if uses_host_creds {
                     draw_text_line(hdc, &state.domain_label_text, state.domain_label_rect);
                 }
@@ -6629,16 +6672,27 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                             1 => Protocol::AnyDesk,
                             2 => Protocol::RustDesk,
                             3 => Protocol::Ftp,
+                            4 => Protocol::Ssh,
                             _ => Protocol::Rdp,
                         };
                         let cur_port = get_window_text(state.ed_port);
                         let cur_port_trim = cur_port.trim();
                         if proto == Protocol::Ftp
-                            && (cur_port_trim.is_empty() || cur_port_trim == "3389")
+                            && (cur_port_trim.is_empty()
+                                || cur_port_trim == "3389"
+                                || cur_port_trim == "22")
                         {
                             set_window_text(state.ed_port, "21");
+                        } else if proto == Protocol::Ssh
+                            && (cur_port_trim.is_empty()
+                                || cur_port_trim == "3389"
+                                || cur_port_trim == "21")
+                        {
+                            set_window_text(state.ed_port, "22");
                         } else if proto == Protocol::Rdp
-                            && (cur_port_trim.is_empty() || cur_port_trim == "21")
+                            && (cur_port_trim.is_empty()
+                                || cur_port_trim == "21"
+                                || cur_port_trim == "22")
                         {
                             set_window_text(state.ed_port, "3389");
                         }
@@ -6666,6 +6720,7 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                             1 => Protocol::AnyDesk,
                             2 => Protocol::RustDesk,
                             3 => Protocol::Ftp,
+                            4 => Protocol::Ssh,
                             _ => Protocol::Rdp,
                         };
 
@@ -6685,20 +6740,26 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                         };
 
                         let port_str = get_window_text(state.ed_port);
-                        let port = if matches!(protocol, Protocol::Rdp | Protocol::Ftp) {
+                        let port = if matches!(
+                            protocol,
+                            Protocol::Rdp | Protocol::Ftp | Protocol::Ssh
+                        ) {
                             match port_str.trim().parse::<u16>() {
                                 Ok(p) if p > 0 => p,
                                 _ => {
-                                    let (title, msg) = if protocol == Protocol::Ftp {
-                                        (
+                                    let (title, msg) = match protocol {
+                                        Protocol::Ftp => (
                                             "Port FTP invalide",
                                             "Le port FTP doit être un entier compris entre 1 et 65535.",
-                                        )
-                                    } else {
-                                        (
+                                        ),
+                                        Protocol::Ssh => (
+                                            "Port SSH invalide",
+                                            "Le port SSH doit être un entier compris entre 1 et 65535.",
+                                        ),
+                                        _ => (
                                             "Port RDP invalide",
                                             "Le port RDP doit être un entier compris entre 1 et 65535.",
-                                        )
+                                        ),
                                     };
                                     show_warning_dialog(hwnd, title, msg);
                                     return LRESULT(0);
@@ -6834,7 +6895,7 @@ fn run_connection_form_dialog(
             DpiMetrics::for_window(owner)
         };
         let client_w = dpi.scale(680);
-        let client_h = dpi.scale(660);
+        let client_h = dpi.scale(676);
         let dlg_style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
         let (win_w, win_h) = calc_dialog_window_size(dlg_style, client_w, client_h);
 
@@ -6865,6 +6926,37 @@ fn run_connection_form_dialog(
             None,
         )
         .ok()?;
+
+        // Appliquer l'icône Malvision sur la fenêtre de dialogue (héritée de la fenêtre principale)
+        const WM_GETICON: u32 = 0x007F;
+        let owner_icon_sm = SendMessageW(owner, WM_GETICON, Some(WPARAM(0)), Some(LPARAM(0))).0;
+        let owner_icon_lg = SendMessageW(owner, WM_GETICON, Some(WPARAM(1)), Some(LPARAM(0))).0;
+        if owner_icon_sm != 0 {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(0)),
+                Some(LPARAM(owner_icon_sm)),
+            );
+        } else {
+            let fallback_icon = create_malvision_app_icon();
+            if !fallback_icon.is_invalid() {
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(fallback_icon.0 as isize)),
+                );
+            }
+        }
+        if owner_icon_lg != 0 {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(1)),
+                Some(LPARAM(owner_icon_lg)),
+            );
+        }
 
         let dark_mode: i32 = i32::from(is_active_theme_dark());
         let _ = DwmSetWindowAttribute(
@@ -6940,6 +7032,7 @@ fn run_connection_form_dialog(
             host_label_text: match initial_proto {
                 Protocol::Rdp => "Hôte RDP (IP / DNS) * :".to_string(),
                 Protocol::Ftp => "Hôte FTP (IP / DNS) * :".to_string(),
+                Protocol::Ssh => "Hôte SSH (IP / DNS) * :".to_string(),
                 Protocol::AnyDesk => "ID ou Alias AnyDesk * :".to_string(),
                 Protocol::RustDesk => "ID RustDesk * :".to_string(),
             },
@@ -6952,15 +7045,15 @@ fn run_connection_form_dialog(
             host_box_rect_normal,
             host_box_rect_full,
             password_label_text: match initial_proto {
-                Protocol::Rdp | Protocol::Ftp => "Mot de passe :".to_string(),
+                Protocol::Rdp | Protocol::Ftp | Protocol::Ssh => "Mot de passe :".to_string(),
                 Protocol::AnyDesk => "Accès sans surveillance :".to_string(),
                 Protocol::RustDesk => "Mot de passe permanent :".to_string(),
             },
             password_label_rect,
-            domain_label_text: if initial_proto == Protocol::Ftp {
-                "Dossier initial (facultatif) :".to_string()
-            } else {
-                "Domaine (facultatif) :".to_string()
+            domain_label_text: match initial_proto {
+                Protocol::Ftp => "Dossier initial (facultatif) :".to_string(),
+                Protocol::Ssh => "Clé privée SSH (facultatif) :".to_string(),
+                _ => "Domaine (facultatif) :".to_string(),
             },
             domain_label_rect: RECT {
                 left: pad_x,
@@ -6972,6 +7065,10 @@ fn run_connection_form_dialog(
                 Protocol::Rdp => None,
                 Protocol::Ftp => Some(
                     "Client FTP intégré : explorateur natif, mode passif, glisser-déposer et identifiants DPAPI."
+                        .to_string(),
+                ),
+                Protocol::Ssh => Some(
+                    "Terminal SSH intégré (ConPTY + OpenSSH Windows) avec mot de passe chiffré DPAPI."
                         .to_string(),
                 ),
                 Protocol::AnyDesk => Some(
@@ -6986,12 +7083,12 @@ fn run_connection_form_dialog(
             labels: Vec::new(),
             edit_boxes: Vec::new(),
             divider_y1: dpi.scale(70),
-            divider_y2: dpi.scale(588),
+            divider_y2: dpi.scale(604),
             security_banner_rc: RECT {
                 left: pad_x,
-                top: dpi.scale(538),
+                top: dpi.scale(554),
                 right: field_right,
-                bottom: dpi.scale(574),
+                bottom: dpi.scale(590),
             },
             folder_options: Vec::new(),
             has_existing_pwd: existing.is_some_and(|e| e.has_saved_password),
@@ -7079,7 +7176,7 @@ fn run_connection_form_dialog(
             hwnd,
             hinstance.into(),
             rc_proto,
-            dpi.scale(160),
+            dpi.scale(240),
             IDC_DLG_PROTO,
             palette.font_ui,
             dpi,
@@ -7089,6 +7186,7 @@ fn run_connection_form_dialog(
             w!("AnyDesk (Client externe)"),
             w!("RustDesk (Client externe)"),
             w!("FTP (Client intégré)"),
+            w!("SSH (Terminal intégré)"),
         ] {
             let _ = SendMessageW(
                 cb_proto,
@@ -7390,7 +7488,7 @@ fn run_connection_form_dialog(
         // 10. Boutons d'action Enregistrer / Annuler
         let btn_w = dpi.scale(130);
         let btn_h = dpi.scale(36);
-        let btn_y = dpi.scale(604);
+        let btn_y = dpi.scale(620);
         let btn_gap = dpi.scale(12);
         let rc_cancel = RECT {
             left: field_right - btn_w,
@@ -7445,6 +7543,7 @@ fn run_connection_form_dialog(
                 Protocol::AnyDesk => 1,
                 Protocol::RustDesk => 2,
                 Protocol::Ftp => 3,
+                Protocol::Ssh => 4,
             };
             let _ = SendMessageW(cb_proto, CB_SETCURSEL, Some(WPARAM(p_idx)), Some(LPARAM(0)));
             set_window_text(ed_host, &ex.host);
@@ -12343,6 +12442,16 @@ unsafe extern "system" fn main_wnd_proc(
                 }
                 LRESULT(0)
             }
+            WM_SSH_EVENT => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+                if !ptr.is_null() {
+                    let (session_id, event_code) = unpack_ssh_event_wparam(wparam);
+                    if (*ptr).sessions.handle_ssh_event(session_id, event_code) {
+                        (*ptr).invalidate_canvas();
+                    }
+                }
+                LRESULT(0)
+            }
             WM_TIMER => {
                 if wparam.0 == IDT_RDP_STATE_POLL {
                     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
@@ -15522,6 +15631,113 @@ mod tests {
             let _ = SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
         }
         let _ = srv_handle.join();
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    unsafe extern "system" fn ssh_dialog_driver_timer(
+        hwnd: HWND,
+        _msg: u32,
+        id_event: usize,
+        _dw_time: u32,
+    ) {
+        unsafe {
+            let Ok(dlg) = FindWindowExW(None, None, w!("MalvisionConnectionFormDlgClass"), None)
+            else {
+                return;
+            };
+            if dlg.0.is_null() || !IsWindow(Some(dlg)).as_bool() {
+                return;
+            }
+            let _ = KillTimer(Some(hwnd), id_event);
+
+            let cb_proto = GetDlgItem(Some(dlg), IDC_DLG_PROTO as i32).unwrap_or_default();
+            let ed_name = GetDlgItem(Some(dlg), IDC_DLG_NAME as i32).unwrap_or_default();
+            let ed_host = GetDlgItem(Some(dlg), IDC_DLG_HOST as i32).unwrap_or_default();
+            let ed_port = GetDlgItem(Some(dlg), IDC_DLG_PORT as i32).unwrap_or_default();
+            let ed_user = GetDlgItem(Some(dlg), IDC_DLG_USER as i32).unwrap_or_default();
+            let ed_domain = GetDlgItem(Some(dlg), IDC_DLG_DOMAIN as i32).unwrap_or_default();
+            let ed_pass = GetDlgItem(Some(dlg), IDC_DLG_PASS as i32).unwrap_or_default();
+            let chk_save = GetDlgItem(Some(dlg), IDC_DLG_SAVE_PASS as i32).unwrap_or_default();
+            let chk_dyn = GetDlgItem(Some(dlg), IDC_DLG_DYN_RES as i32).unwrap_or_default();
+            let chk_clip = GetDlgItem(Some(dlg), IDC_DLG_CLIPBOARD as i32).unwrap_or_default();
+
+            // Sélectionner SSH (indice 4) -> port bascule automatiquement 3389 -> 22
+            let _ = SendMessageW(cb_proto, CB_SETCURSEL, Some(WPARAM(4)), Some(LPARAM(0)));
+            let _ = SendMessageW(
+                dlg,
+                WM_COMMAND,
+                Some(WPARAM((1 << 16) | IDC_DLG_PROTO)),
+                Some(LPARAM(cb_proto.0 as isize)),
+            );
+
+            assert_eq!(get_window_text(ed_port), "22");
+            assert!(IsWindowVisible(ed_port).as_bool(), "Port visible pour SSH");
+            assert!(
+                IsWindowVisible(ed_user).as_bool(),
+                "Utilisateur visible pour SSH"
+            );
+            assert!(
+                IsWindowVisible(ed_domain).as_bool(),
+                "Clé privée visible pour SSH"
+            );
+            assert!(!IsWindowVisible(chk_dyn).as_bool());
+            assert!(!IsWindowVisible(chk_clip).as_bool());
+
+            set_window_text(ed_name, "Debian SSH Prod");
+            set_window_text(ed_host, "ssh://root@debian.example.local:2222");
+            set_window_text(ed_domain, "~/.ssh/id_ed25519");
+
+            let _ = SendMessageW(chk_save, BM_SETCHECK, Some(WPARAM(1)), Some(LPARAM(0)));
+            let _ = SendMessageW(
+                dlg,
+                WM_COMMAND,
+                Some(WPARAM(IDC_DLG_SAVE_PASS)),
+                Some(LPARAM(chk_save.0 as isize)),
+            );
+            set_window_text(ed_pass, "SshSecret#2026");
+
+            let btn_ok = GetDlgItem(Some(dlg), IDC_DLG_OK as i32).unwrap_or_default();
+            let _ = SendMessageW(btn_ok, BM_CLICK, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
+    }
+
+    #[test]
+    fn test_ui_ssh_connection_dialog_layout_and_dpapi_save_real_win32() {
+        let _guard = WIN32_UI_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db_path = create_temp_test_db_path("ssh_dlg");
+        unsafe {
+            let hwnd = create_isolated_test_main_window(&db_path);
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+            assert!(!ptr.is_null());
+
+            let timer_fn: TIMERPROC = Some(ssh_dialog_driver_timer);
+            let _ = SetTimer(Some(hwnd), 9802, 25, timer_fn);
+            (*ptr).open_connection_dialog(None, None);
+            let _ = KillTimer(Some(hwnd), 9802);
+
+            let conns = (*ptr).storage.list_connections().unwrap();
+            assert_eq!(conns.len(), 1);
+            let ssh = &conns[0];
+            assert_eq!(ssh.protocol, Protocol::Ssh);
+            assert_eq!(ssh.name, "Debian SSH Prod");
+            assert_eq!(ssh.host, "debian.example.local");
+            assert_eq!(ssh.port, 2222);
+            assert_eq!(ssh.username, "root");
+            assert_eq!(ssh.domain, "~/.ssh/id_ed25519");
+            assert!(ssh.save_password);
+            assert!(ssh.has_saved_password);
+
+            let decrypted = (*ptr)
+                .storage
+                .load_decrypted_password(ssh.id)
+                .unwrap()
+                .expect("Mot de passe SSH chiffré DPAPI");
+            assert_eq!(decrypted.as_str(), "SshSecret#2026");
+
+            let _ = SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
         let _ = std::fs::remove_file(&db_path);
     }
 }

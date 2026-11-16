@@ -23,6 +23,7 @@ use crate::ui::{
     draw_rounded_box, draw_rounded_button, draw_text_line, get_window_text, run_text_prompt_dialog,
     set_window_text, show_error_dialog,
 };
+use std::collections::BTreeSet;
 use std::ffi::c_void;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -42,8 +43,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::Storage::FileSystem::GetLogicalDrives;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-    VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_F2, VK_F5, VK_HOME, VK_RETURN, VK_UP,
+    GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT,
+    TrackMouseEvent, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_F2, VK_F5, VK_HOME,
+    VK_RETURN, VK_SHIFT, VK_UP,
 };
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -586,6 +588,14 @@ impl FtpClient {
         self.read_response()
     }
 
+    pub fn noop(&mut self) -> Result<(), String> {
+        let (code, msg) = self.send_raw_command("NOOP")?;
+        if code / 100 != 2 {
+            return Err(format!("NOOP refusé ({msg})"));
+        }
+        Ok(())
+    }
+
     pub fn pwd(&mut self) -> Result<String, String> {
         let (code, msg) = self.send_raw_command("PWD")?;
         if code != 257 {
@@ -1059,11 +1069,16 @@ struct FtpWndState {
     local_entries: Vec<FtpEntry>,
     local_error: Option<String>,
     local_path_dirty: bool,
-    local_selected_idx: Option<usize>,
+    local_selected: BTreeSet<usize>,
+    local_anchor_idx: Option<usize>,
     local_scroll_offset: i32,
     row_height: i32,
-    selected_idx: Option<usize>,
+    remote_selected: BTreeSet<usize>,
+    remote_anchor_idx: Option<usize>,
     scroll_offset: i32,
+    drag_candidate: Option<(FtpPane, usize, POINT, bool)>,
+    dragging_transfer: Option<FtpPane>,
+    drag_hover_target: Option<FtpPane>,
     last_transfer_active: bool,
     hovered_zone: Option<FtpUiZone>,
     hit_zones: Vec<FtpHitZone>,
@@ -1264,20 +1279,68 @@ fn refresh_local_entries(state: &mut FtpWndState) {
             }
         }
     }
-    if state
-        .local_selected_idx
-        .is_some_and(|i| i >= state.local_entries.len())
-    {
-        state.local_selected_idx = None;
+    let len = state.local_entries.len();
+    state.local_selected.retain(|&i| i < len);
+    if state.local_anchor_idx.is_some_and(|i| i >= len) {
+        state.local_anchor_idx = None;
     }
     state.local_path_dirty = true;
+}
+
+fn apply_row_selection(
+    selected: &mut BTreeSet<usize>,
+    anchor: &mut Option<usize>,
+    idx: usize,
+    ctrl: bool,
+    shift: bool,
+    entries: &[FtpEntry],
+) {
+    if idx >= entries.len() {
+        return;
+    }
+    if shift {
+        let start = anchor.unwrap_or(idx).min(entries.len().saturating_sub(1));
+        selected.clear();
+        let (lo, hi) = if start <= idx {
+            (start, idx)
+        } else {
+            (idx, start)
+        };
+        for (i, entry) in entries.iter().enumerate().take(hi + 1).skip(lo) {
+            if lo == hi || entry.kind != FtpEntryKind::ParentDir {
+                selected.insert(i);
+            }
+        }
+        if selected.is_empty() {
+            selected.insert(idx);
+        }
+        if anchor.is_none() {
+            *anchor = Some(idx);
+        }
+    } else if ctrl {
+        if selected.contains(&idx) {
+            selected.remove(&idx);
+        } else {
+            selected.insert(idx);
+            *anchor = Some(idx);
+        }
+    } else {
+        selected.clear();
+        selected.insert(idx);
+        *anchor = Some(idx);
+    }
+}
+
+fn is_mod_key_down(vk: u16) -> bool {
+    unsafe { (GetKeyState(i32::from(vk)) as u16 & 0x8000) != 0 }
 }
 
 fn local_navigate_to(state: &mut FtpWndState, target: PathBuf) {
     if target.is_dir() {
         state.local_dir = target;
         state.local_showing_drives = false;
-        state.local_selected_idx = None;
+        state.local_selected.clear();
+        state.local_anchor_idx = None;
         state.local_scroll_offset = 0;
         refresh_local_entries(state);
     } else {
@@ -1298,7 +1361,8 @@ fn local_navigate_up(state: &mut FtpWndState) {
     } else {
         state.local_showing_drives = true;
     }
-    state.local_selected_idx = None;
+    state.local_selected.clear();
+    state.local_anchor_idx = None;
     state.local_scroll_offset = 0;
     refresh_local_entries(state);
 }
@@ -1351,6 +1415,22 @@ fn post_notify(
     }
 }
 
+fn is_connection_lost_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("421")
+        || lower.contains("connexion ftp fermée")
+        || lower.contains("erreur d'envoi commande ftp")
+        || lower.contains("erreur flush socket ftp")
+        || lower.contains("erreur de lecture ftp")
+        || lower.contains("broken pipe")
+        || lower.contains("connection reset")
+        || lower.contains("connection aborted")
+        || lower.contains("10053")
+        || lower.contains("10054")
+        || lower.contains("timed out")
+        || lower.contains("unexpected end of file")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_ftp_worker(
     session_id: u32,
@@ -1373,556 +1453,712 @@ fn spawn_ftp_worker(
         };
         let mut active_pass = initial_pass;
         let mut client: Option<FtpClient> = None;
+        let mut last_remote_dir: Option<String> = if initial_remote_dir.trim().is_empty() {
+            None
+        } else {
+            Some(initial_remote_dir.trim().to_string())
+        };
 
-        let refresh_dir =
-            |c: &mut FtpClient, cur_dir: &mut String| -> Result<Vec<FtpEntry>, String> {
-                if cur_dir.trim().is_empty() {
-                    *cur_dir = c.pwd().unwrap_or_else(|_| "/".to_string());
+        // FtpClient::list() insère déjà une unique entrée ".." (ParentDir) si cur_dir != "/".
+        let refresh_dir = |c: &mut FtpClient,
+                           cur_dir: &mut String,
+                           last_dir: &mut Option<String>|
+         -> Result<Vec<FtpEntry>, String> {
+            if cur_dir.trim().is_empty() {
+                *cur_dir = c.pwd().unwrap_or_else(|_| "/".to_string());
+            }
+            let entries = c.list(cur_dir)?;
+            *last_dir = Some(cur_dir.clone());
+            Ok(entries)
+        };
+
+        let connect_and_resume = |client_slot: &mut Option<FtpClient>,
+                                  last_dir: &mut Option<String>,
+                                  user: &str,
+                                  pass: &SecretString,
+                                  silent_keepalive: bool|
+         -> bool {
+            if let Some(mut old) = client_slot.take() {
+                old.quit();
+            }
+            if !silent_keepalive {
+                if let Ok(mut st) = shared.lock() {
+                    st.is_connecting = true;
+                    st.is_connected = false;
+                    st.is_busy = true;
+                    st.auth_failed = false;
+                    st.error_banner = None;
+                    st.status_detail = format!("Connexion FTP vers {host}:{port}...");
                 }
-                let list = c.list(cur_dir)?;
-                let mut entries = Vec::with_capacity(list.len() + 1);
-                if cur_dir != "/" {
-                    entries.push(FtpEntry {
-                        name: "..".to_string(),
-                        kind: FtpEntryKind::ParentDir,
-                        size: None,
-                        modified: String::new(),
-                        permissions: String::new(),
-                    });
+                post_notify(
+                    container_hwnd_raw,
+                    main_hwnd_raw,
+                    session_id,
+                    FTP_EVT_CONNECTING,
+                );
+            }
+
+            let log_shared = Arc::clone(&shared);
+            match FtpClient::connect(&host, port, user, pass, |is_err, line| {
+                if !silent_keepalive || is_err {
+                    push_ftp_log(&log_shared, line.to_string(), is_err, false);
                 }
-                entries.extend(list);
-                Ok(entries)
-            };
-
-        while let Ok(cmd) = cmd_rx.recv() {
-            match cmd {
-                FtpWorkerCommand::Connect => {
-                    if let Some(mut old) = client.take() {
-                        old.quit();
-                    }
-                    if let Ok(mut st) = shared.lock() {
-                        st.is_connecting = true;
-                        st.is_connected = false;
-                        st.is_busy = true;
-                        st.auth_failed = false;
-                        st.error_banner = None;
-                        st.status_detail = format!("Connexion FTP vers {host}:{port}...");
-                    }
-                    post_notify(
-                        container_hwnd_raw,
-                        main_hwnd_raw,
-                        session_id,
-                        FTP_EVT_CONNECTING,
-                    );
-
-                    let log_shared = Arc::clone(&shared);
-                    match FtpClient::connect(
-                        &host,
-                        port,
-                        &active_user,
-                        &active_pass,
-                        |is_err, line| {
-                            push_ftp_log(&log_shared, line.to_string(), is_err, false);
-                        },
-                    ) {
-                        Ok(mut c) => {
-                            let mut target_dir = if !initial_remote_dir.trim().is_empty() {
-                                match c.cwd(initial_remote_dir.trim()) {
-                                    Ok(d) => d,
-                                    Err(err) => {
-                                        push_ftp_log(
-                                            &shared,
-                                            format!("Dossier initial ignoré : {err}"),
-                                            true,
-                                            false,
-                                        );
-                                        c.pwd().unwrap_or_else(|_| "/".to_string())
-                                    }
-                                }
-                            } else {
+            }) {
+                Ok(mut c) => {
+                    let mut target_dir = if let Some(ref resume_dir) = *last_dir {
+                        match c.cwd(resume_dir) {
+                            Ok(d) => d,
+                            Err(err) => {
+                                push_ftp_log(
+                                    &shared,
+                                    format!(
+                                        "Dossier précédent « {resume_dir} » indisponible : {err}"
+                                    ),
+                                    true,
+                                    false,
+                                );
                                 c.pwd().unwrap_or_else(|_| "/".to_string())
-                            };
-
-                            let entries = match refresh_dir(&mut c, &mut target_dir) {
-                                Ok(e) => e,
-                                Err(err) => {
-                                    push_ftp_log(&shared, err, true, false);
-                                    Vec::new()
-                                }
-                            };
-                            client = Some(c);
-
-                            if let Ok(mut st) = shared.lock() {
-                                st.is_connecting = false;
-                                st.is_connected = true;
-                                st.is_busy = false;
-                                st.auth_failed = false;
-                                st.current_dir = target_dir.clone();
-                                st.path_dirty = true;
-                                st.entries = entries;
-                                st.status_detail = format!(
-                                    "Connecté FTP ({active_user}@{host}:{port}) — {target_dir}"
-                                );
                             }
-                            push_ftp_log(
-                                &shared,
-                                format!("Session FTP ouverte dans {target_dir}"),
-                                false,
-                                true,
-                            );
-                            post_notify(
-                                container_hwnd_raw,
-                                main_hwnd_raw,
-                                session_id,
-                                FTP_EVT_CONNECTED,
-                            );
                         }
-                        Err((auth_err, clean_err)) => {
-                            if let Ok(mut st) = shared.lock() {
-                                st.is_connecting = false;
-                                st.is_connected = false;
-                                st.is_busy = false;
-                                st.auth_failed = auth_err;
-                                st.error_banner = Some(clean_err.clone());
-                                st.status_detail = format!("Erreur FTP : {clean_err}");
-                            }
-                            push_ftp_log(&shared, clean_err, true, false);
-                            post_notify(
-                                container_hwnd_raw,
-                                main_hwnd_raw,
-                                session_id,
-                                if auth_err {
-                                    FTP_EVT_AUTH_FAILED
-                                } else {
-                                    FTP_EVT_ERROR
-                                },
-                            );
-                        }
-                    }
-                }
-                FtpWorkerCommand::ReconnectWithCredentials { username, password } => {
-                    active_user = if username.trim().is_empty() {
-                        "anonymous".to_string()
                     } else {
-                        username.trim().to_string()
+                        c.pwd().unwrap_or_else(|_| "/".to_string())
                     };
-                    active_pass = password;
+
+                    let entries = match refresh_dir(&mut c, &mut target_dir, last_dir) {
+                        Ok(e) => e,
+                        Err(err) => {
+                            push_ftp_log(&shared, err, true, false);
+                            Vec::new()
+                        }
+                    };
+                    *client_slot = Some(c);
+
                     if let Ok(mut st) = shared.lock() {
-                        st.username = active_user.clone();
-                    }
-                    // Relancer la connexion immédiatement avec les nouveaux identifiants
-                    if let Some(mut old) = client.take() {
-                        old.quit();
-                    }
-                    if let Ok(mut st) = shared.lock() {
-                        st.is_connecting = true;
-                        st.is_connected = false;
-                        st.is_busy = true;
+                        st.is_connecting = false;
+                        st.is_connected = true;
+                        st.is_busy = false;
                         st.auth_failed = false;
                         st.error_banner = None;
+                        st.current_dir = target_dir.clone();
+                        st.path_dirty = true;
+                        st.entries = entries;
                         st.status_detail =
-                            format!("Reconnexion FTP ({active_user}@{host}:{port})...");
+                            format!("Connecté FTP ({user}@{host}:{port}) — {target_dir}");
                     }
+                    push_ftp_log(
+                        &shared,
+                        if silent_keepalive {
+                            format!("Session FTP reconnectée automatiquement dans {target_dir}")
+                        } else {
+                            format!("Session FTP ouverte dans {target_dir}")
+                        },
+                        false,
+                        true,
+                    );
                     post_notify(
                         container_hwnd_raw,
                         main_hwnd_raw,
                         session_id,
-                        FTP_EVT_CONNECTING,
+                        FTP_EVT_CONNECTED,
                     );
-
-                    let log_shared = Arc::clone(&shared);
-                    match FtpClient::connect(
-                        &host,
-                        port,
-                        &active_user,
-                        &active_pass,
-                        |is_err, line| {
-                            push_ftp_log(&log_shared, line.to_string(), is_err, false);
+                    true
+                }
+                Err((auth_err, clean_err)) => {
+                    if let Ok(mut st) = shared.lock() {
+                        st.is_connecting = false;
+                        st.is_connected = false;
+                        st.is_busy = false;
+                        st.auth_failed = auth_err;
+                        st.error_banner = Some(clean_err.clone());
+                        st.status_detail = format!("Erreur FTP : {clean_err}");
+                    }
+                    push_ftp_log(&shared, clean_err, true, false);
+                    post_notify(
+                        container_hwnd_raw,
+                        main_hwnd_raw,
+                        session_id,
+                        if auth_err {
+                            FTP_EVT_AUTH_FAILED
+                        } else {
+                            FTP_EVT_ERROR
                         },
-                    ) {
-                        Ok(mut c) => {
-                            let mut dir = c.pwd().unwrap_or_else(|_| "/".to_string());
-                            let entries = refresh_dir(&mut c, &mut dir).unwrap_or_default();
-                            client = Some(c);
-                            if let Ok(mut st) = shared.lock() {
-                                st.is_connecting = false;
-                                st.is_connected = true;
-                                st.is_busy = false;
-                                st.auth_failed = false;
-                                st.current_dir = dir.clone();
-                                st.path_dirty = true;
-                                st.entries = entries;
-                                st.status_detail =
-                                    format!("Connecté FTP ({active_user}@{host}:{port}) — {dir}");
-                            }
-                            push_ftp_log(
-                                &shared,
-                                "Authentification FTP réussie.".to_string(),
-                                false,
+                    );
+                    false
+                }
+            }
+        };
+
+        loop {
+            match cmd_rx.recv_timeout(Duration::from_secs(20)) {
+                Ok(cmd) => match cmd {
+                    FtpWorkerCommand::Connect => {
+                        connect_and_resume(
+                            &mut client,
+                            &mut last_remote_dir,
+                            &active_user,
+                            &active_pass,
+                            false,
+                        );
+                    }
+                    FtpWorkerCommand::ReconnectWithCredentials { username, password } => {
+                        active_user = if username.trim().is_empty() {
+                            "anonymous".to_string()
+                        } else {
+                            username.trim().to_string()
+                        };
+                        active_pass = password;
+                        if let Ok(mut st) = shared.lock() {
+                            st.username = active_user.clone();
+                        }
+                        connect_and_resume(
+                            &mut client,
+                            &mut last_remote_dir,
+                            &active_user,
+                            &active_pass,
+                            false,
+                        );
+                    }
+                    FtpWorkerCommand::Refresh => {
+                        if client.is_none()
+                            && !connect_and_resume(
+                                &mut client,
+                                &mut last_remote_dir,
+                                &active_user,
+                                &active_pass,
                                 true,
-                            );
+                            )
+                        {
+                            continue;
+                        }
+                        if let Some(ref mut c) = client {
+                            let mut cur = last_remote_dir.clone().unwrap_or_else(|| {
+                                shared
+                                    .lock()
+                                    .map(|s| s.current_dir.clone())
+                                    .unwrap_or_else(|_| "/".to_string())
+                            });
+                            let res = refresh_dir(c, &mut cur, &mut last_remote_dir);
+                            match res {
+                                Ok(entries) => {
+                                    if let Ok(mut st) = shared.lock() {
+                                        st.current_dir = cur.clone();
+                                        st.entries = entries;
+                                        st.status_detail = format!(
+                                            "Connecté FTP ({active_user}@{host}:{port}) — {cur}"
+                                        );
+                                    }
+                                }
+                                Err(err) if is_connection_lost_error(&err) => {
+                                    connect_and_resume(
+                                        &mut client,
+                                        &mut last_remote_dir,
+                                        &active_user,
+                                        &active_pass,
+                                        true,
+                                    );
+                                }
+                                Err(err) => push_ftp_log(&shared, err, true, false),
+                            }
                             post_notify(
                                 container_hwnd_raw,
                                 main_hwnd_raw,
                                 session_id,
-                                FTP_EVT_CONNECTED,
+                                FTP_EVT_STATUS_TEXT,
                             );
                         }
-                        Err((auth_err, clean_err)) => {
-                            if let Ok(mut st) = shared.lock() {
-                                st.is_connecting = false;
-                                st.is_connected = false;
-                                st.is_busy = false;
-                                st.auth_failed = auth_err;
-                                st.error_banner = Some(clean_err.clone());
-                                st.status_detail = format!("Erreur FTP : {clean_err}");
+                    }
+                    FtpWorkerCommand::Cwd(target) => {
+                        if client.is_none()
+                            && !connect_and_resume(
+                                &mut client,
+                                &mut last_remote_dir,
+                                &active_user,
+                                &active_pass,
+                                true,
+                            )
+                        {
+                            continue;
+                        }
+                        let mut needs_reconnect = false;
+                        if let Some(ref mut c) = client {
+                            match c.cwd(&target) {
+                                Ok(mut new_dir) => {
+                                    match refresh_dir(c, &mut new_dir, &mut last_remote_dir) {
+                                        Ok(entries) => {
+                                            if let Ok(mut st) = shared.lock() {
+                                                st.current_dir = new_dir.clone();
+                                                st.path_dirty = true;
+                                                st.entries = entries;
+                                                st.status_detail = format!(
+                                                    "Connecté FTP ({active_user}@{host}:{port}) — {new_dir}"
+                                                );
+                                            }
+                                        }
+                                        Err(err) if is_connection_lost_error(&err) => {
+                                            needs_reconnect = true;
+                                        }
+                                        Err(err) => push_ftp_log(&shared, err, true, false),
+                                    }
+                                }
+                                Err(err) if is_connection_lost_error(&err) => {
+                                    needs_reconnect = true;
+                                }
+                                Err(err) => push_ftp_log(&shared, err, true, false),
                             }
-                            push_ftp_log(&shared, clean_err, true, false);
+                        }
+                        if needs_reconnect
+                            && connect_and_resume(
+                                &mut client,
+                                &mut last_remote_dir,
+                                &active_user,
+                                &active_pass,
+                                true,
+                            )
+                            && let Some(ref mut c) = client
+                            && let Ok(mut new_dir) = c.cwd(&target)
+                            && let Ok(entries) = refresh_dir(c, &mut new_dir, &mut last_remote_dir)
+                            && let Ok(mut st) = shared.lock()
+                        {
+                            st.current_dir = new_dir.clone();
+                            st.path_dirty = true;
+                            st.entries = entries;
+                            st.status_detail =
+                                format!("Connecté FTP ({active_user}@{host}:{port}) — {new_dir}");
+                        }
+                        post_notify(
+                            container_hwnd_raw,
+                            main_hwnd_raw,
+                            session_id,
+                            FTP_EVT_STATUS_TEXT,
+                        );
+                    }
+                    FtpWorkerCommand::Cdup => {
+                        if client.is_none()
+                            && !connect_and_resume(
+                                &mut client,
+                                &mut last_remote_dir,
+                                &active_user,
+                                &active_pass,
+                                true,
+                            )
+                        {
+                            continue;
+                        }
+                        let mut needs_reconnect = false;
+                        if let Some(ref mut c) = client {
+                            match c.cdup() {
+                                Ok(mut new_dir) => {
+                                    match refresh_dir(c, &mut new_dir, &mut last_remote_dir) {
+                                        Ok(entries) => {
+                                            if let Ok(mut st) = shared.lock() {
+                                                st.current_dir = new_dir.clone();
+                                                st.path_dirty = true;
+                                                st.entries = entries;
+                                                st.status_detail = format!(
+                                                    "Connecté FTP ({active_user}@{host}:{port}) — {new_dir}"
+                                                );
+                                            }
+                                        }
+                                        Err(err) if is_connection_lost_error(&err) => {
+                                            needs_reconnect = true;
+                                        }
+                                        Err(err) => push_ftp_log(&shared, err, true, false),
+                                    }
+                                }
+                                Err(err) if is_connection_lost_error(&err) => {
+                                    needs_reconnect = true;
+                                }
+                                Err(err) => push_ftp_log(&shared, err, true, false),
+                            }
+                        }
+                        if needs_reconnect
+                            && connect_and_resume(
+                                &mut client,
+                                &mut last_remote_dir,
+                                &active_user,
+                                &active_pass,
+                                true,
+                            )
+                            && let Some(ref mut c) = client
+                            && let Ok(mut new_dir) = c.cdup()
+                            && let Ok(entries) = refresh_dir(c, &mut new_dir, &mut last_remote_dir)
+                            && let Ok(mut st) = shared.lock()
+                        {
+                            st.current_dir = new_dir.clone();
+                            st.path_dirty = true;
+                            st.entries = entries;
+                            st.status_detail =
+                                format!("Connecté FTP ({active_user}@{host}:{port}) — {new_dir}");
+                        }
+                        post_notify(
+                            container_hwnd_raw,
+                            main_hwnd_raw,
+                            session_id,
+                            FTP_EVT_STATUS_TEXT,
+                        );
+                    }
+                    FtpWorkerCommand::Download {
+                        remote_name,
+                        local_path,
+                        size_hint,
+                    } => {
+                        if client.is_none()
+                            && !connect_and_resume(
+                                &mut client,
+                                &mut last_remote_dir,
+                                &active_user,
+                                &active_pass,
+                                true,
+                            )
+                        {
+                            continue;
+                        }
+                        if let Some(ref mut c) = client {
+                            cancel_transfer.store(false, Ordering::Relaxed);
+                            let known_total = size_hint.or_else(|| c.size(&remote_name));
+                            if let Ok(mut st) = shared.lock() {
+                                st.transfer = Some(FtpTransferState {
+                                    label: format!("Téléchargement : {remote_name}"),
+                                    transferred: 0,
+                                    total: known_total,
+                                });
+                                st.status_detail = format!("Téléchargement de {remote_name}...");
+                            }
                             post_notify(
                                 container_hwnd_raw,
                                 main_hwnd_raw,
                                 session_id,
-                                if auth_err {
-                                    FTP_EVT_AUTH_FAILED
-                                } else {
-                                    FTP_EVT_ERROR
+                                FTP_EVT_STATUS_TEXT,
+                            );
+
+                            let mut last_ui_tick = std::time::Instant::now();
+                            let res = c.download_file(
+                                &remote_name,
+                                &local_path,
+                                known_total,
+                                &cancel_transfer,
+                                |done, tot| {
+                                    if let Ok(mut st) = shared.lock() {
+                                        st.transfer = Some(FtpTransferState {
+                                            label: format!("Téléchargement : {remote_name}"),
+                                            transferred: done,
+                                            total: tot,
+                                        });
+                                    }
+                                    if last_ui_tick.elapsed() >= Duration::from_millis(90) {
+                                        last_ui_tick = std::time::Instant::now();
+                                        post_notify(
+                                            container_hwnd_raw,
+                                            main_hwnd_raw,
+                                            session_id,
+                                            FTP_EVT_STATUS_TEXT,
+                                        );
+                                    }
                                 },
                             );
-                        }
-                    }
-                }
-                FtpWorkerCommand::Refresh => {
-                    if let Some(ref mut c) = client {
-                        let mut cur = shared
-                            .lock()
-                            .map(|s| s.current_dir.clone())
-                            .unwrap_or_else(|_| "/".to_string());
-                        match refresh_dir(c, &mut cur) {
-                            Ok(entries) => {
-                                if let Ok(mut st) = shared.lock() {
-                                    st.current_dir = cur.clone();
-                                    st.entries = entries;
-                                    st.status_detail = format!(
-                                        "Connecté FTP ({active_user}@{host}:{port}) — {cur}"
-                                    );
-                                }
+
+                            if let Ok(mut st) = shared.lock() {
+                                st.transfer = None;
+                                st.status_detail = match &res {
+                                    Ok(n) => format!(
+                                        "Téléchargement terminé : {remote_name} ({})",
+                                        format_file_size(*n)
+                                    ),
+                                    Err(e) => e.clone(),
+                                };
                             }
-                            Err(err) => push_ftp_log(&shared, err, true, false),
-                        }
-                        post_notify(
-                            container_hwnd_raw,
-                            main_hwnd_raw,
-                            session_id,
-                            FTP_EVT_STATUS_TEXT,
-                        );
-                    }
-                }
-                FtpWorkerCommand::Cwd(target) => {
-                    if let Some(ref mut c) = client {
-                        match c.cwd(&target) {
-                            Ok(mut new_dir) => match refresh_dir(c, &mut new_dir) {
-                                Ok(entries) => {
-                                    if let Ok(mut st) = shared.lock() {
-                                        st.current_dir = new_dir.clone();
-                                        st.path_dirty = true;
-                                        st.entries = entries;
-                                        st.status_detail = format!(
-                                            "Connecté FTP ({active_user}@{host}:{port}) — {new_dir}"
+                            match res {
+                                Ok(n) => push_ftp_log(
+                                    &shared,
+                                    format!(
+                                        "Téléchargé '{remote_name}' ({}) -> {}",
+                                        format_file_size(n),
+                                        local_path.display()
+                                    ),
+                                    false,
+                                    true,
+                                ),
+                                Err(err) => {
+                                    let lost = is_connection_lost_error(&err);
+                                    push_ftp_log(&shared, err, true, false);
+                                    if lost {
+                                        connect_and_resume(
+                                            &mut client,
+                                            &mut last_remote_dir,
+                                            &active_user,
+                                            &active_pass,
+                                            true,
                                         );
                                     }
                                 }
-                                Err(err) => push_ftp_log(&shared, err, true, false),
-                            },
-                            Err(err) => push_ftp_log(&shared, err, true, false),
+                            }
+                            post_notify(
+                                container_hwnd_raw,
+                                main_hwnd_raw,
+                                session_id,
+                                FTP_EVT_STATUS_TEXT,
+                            );
                         }
-                        post_notify(
-                            container_hwnd_raw,
-                            main_hwnd_raw,
-                            session_id,
-                            FTP_EVT_STATUS_TEXT,
-                        );
                     }
-                }
-                FtpWorkerCommand::Cdup => {
-                    if let Some(ref mut c) = client {
-                        match c.cdup() {
-                            Ok(mut new_dir) => match refresh_dir(c, &mut new_dir) {
-                                Ok(entries) => {
+                    FtpWorkerCommand::Upload {
+                        local_path,
+                        remote_name,
+                    } => {
+                        if client.is_none()
+                            && !connect_and_resume(
+                                &mut client,
+                                &mut last_remote_dir,
+                                &active_user,
+                                &active_pass,
+                                true,
+                            )
+                        {
+                            continue;
+                        }
+                        if let Some(ref mut c) = client {
+                            cancel_transfer.store(false, Ordering::Relaxed);
+                            let total = std::fs::metadata(&local_path).ok().map(|m| m.len());
+                            if let Ok(mut st) = shared.lock() {
+                                st.transfer = Some(FtpTransferState {
+                                    label: format!("Téléversement : {remote_name}"),
+                                    transferred: 0,
+                                    total,
+                                });
+                                st.status_detail = format!("Téléversement de {remote_name}...");
+                            }
+                            post_notify(
+                                container_hwnd_raw,
+                                main_hwnd_raw,
+                                session_id,
+                                FTP_EVT_STATUS_TEXT,
+                            );
+
+                            let mut last_ui_tick = std::time::Instant::now();
+                            let res = c.upload_file(
+                                &local_path,
+                                &remote_name,
+                                &cancel_transfer,
+                                |done, tot| {
                                     if let Ok(mut st) = shared.lock() {
-                                        st.current_dir = new_dir.clone();
-                                        st.path_dirty = true;
-                                        st.entries = entries;
-                                        st.status_detail = format!(
-                                            "Connecté FTP ({active_user}@{host}:{port}) — {new_dir}"
+                                        st.transfer = Some(FtpTransferState {
+                                            label: format!("Téléversement : {remote_name}"),
+                                            transferred: done,
+                                            total: tot,
+                                        });
+                                    }
+                                    if last_ui_tick.elapsed() >= Duration::from_millis(90) {
+                                        last_ui_tick = std::time::Instant::now();
+                                        post_notify(
+                                            container_hwnd_raw,
+                                            main_hwnd_raw,
+                                            session_id,
+                                            FTP_EVT_STATUS_TEXT,
+                                        );
+                                    }
+                                },
+                            );
+
+                            let mut cur = last_remote_dir.clone().unwrap_or_else(|| {
+                                shared
+                                    .lock()
+                                    .map(|s| s.current_dir.clone())
+                                    .unwrap_or_else(|_| "/".to_string())
+                            });
+                            let refreshed = refresh_dir(c, &mut cur, &mut last_remote_dir).ok();
+
+                            if let Ok(mut st) = shared.lock() {
+                                st.transfer = None;
+                                if let Some(entries) = refreshed {
+                                    st.entries = entries;
+                                }
+                                st.status_detail = match &res {
+                                    Ok(n) => format!(
+                                        "Téléversement terminé : {remote_name} ({})",
+                                        format_file_size(*n)
+                                    ),
+                                    Err(e) => e.clone(),
+                                };
+                            }
+                            match res {
+                                Ok(n) => push_ftp_log(
+                                    &shared,
+                                    format!("Téléversé '{remote_name}' ({})", format_file_size(n)),
+                                    false,
+                                    true,
+                                ),
+                                Err(err) => {
+                                    let lost = is_connection_lost_error(&err);
+                                    push_ftp_log(&shared, err, true, false);
+                                    if lost {
+                                        connect_and_resume(
+                                            &mut client,
+                                            &mut last_remote_dir,
+                                            &active_user,
+                                            &active_pass,
+                                            true,
                                         );
                                     }
                                 }
+                            }
+                            post_notify(
+                                container_hwnd_raw,
+                                main_hwnd_raw,
+                                session_id,
+                                FTP_EVT_STATUS_TEXT,
+                            );
+                        }
+                    }
+                    FtpWorkerCommand::Mkdir(dir_name) => {
+                        if client.is_none()
+                            && !connect_and_resume(
+                                &mut client,
+                                &mut last_remote_dir,
+                                &active_user,
+                                &active_pass,
+                                true,
+                            )
+                        {
+                            continue;
+                        }
+                        if let Some(ref mut c) = client {
+                            match c.mkdir(&dir_name) {
+                                Ok(()) => {
+                                    push_ftp_log(
+                                        &shared,
+                                        format!("Dossier créé : {dir_name}"),
+                                        false,
+                                        true,
+                                    );
+                                    let mut cur =
+                                        last_remote_dir.clone().unwrap_or_else(|| "/".to_string());
+                                    if let Ok(entries) =
+                                        refresh_dir(c, &mut cur, &mut last_remote_dir)
+                                        && let Ok(mut st) = shared.lock()
+                                    {
+                                        st.entries = entries;
+                                    }
+                                }
                                 Err(err) => push_ftp_log(&shared, err, true, false),
-                            },
-                            Err(err) => push_ftp_log(&shared, err, true, false),
+                            }
+                            post_notify(
+                                container_hwnd_raw,
+                                main_hwnd_raw,
+                                session_id,
+                                FTP_EVT_STATUS_TEXT,
+                            );
                         }
-                        post_notify(
-                            container_hwnd_raw,
-                            main_hwnd_raw,
-                            session_id,
-                            FTP_EVT_STATUS_TEXT,
-                        );
                     }
-                }
-                FtpWorkerCommand::Download {
-                    remote_name,
-                    local_path,
-                    size_hint,
-                } => {
-                    if let Some(ref mut c) = client {
-                        cancel_transfer.store(false, Ordering::Relaxed);
-                        let known_total = size_hint.or_else(|| c.size(&remote_name));
-                        if let Ok(mut st) = shared.lock() {
-                            st.transfer = Some(FtpTransferState {
-                                label: format!("Téléchargement : {remote_name}"),
-                                transferred: 0,
-                                total: known_total,
-                            });
-                            st.status_detail = format!("Téléchargement de {remote_name}...");
-                        }
-                        post_notify(
-                            container_hwnd_raw,
-                            main_hwnd_raw,
-                            session_id,
-                            FTP_EVT_STATUS_TEXT,
-                        );
-
-                        let mut last_ui_tick = std::time::Instant::now();
-                        let res = c.download_file(
-                            &remote_name,
-                            &local_path,
-                            known_total,
-                            &cancel_transfer,
-                            |done, tot| {
-                                if let Ok(mut st) = shared.lock() {
-                                    st.transfer = Some(FtpTransferState {
-                                        label: format!("Téléchargement : {remote_name}"),
-                                        transferred: done,
-                                        total: tot,
-                                    });
-                                }
-                                if last_ui_tick.elapsed() >= Duration::from_millis(90) {
-                                    last_ui_tick = std::time::Instant::now();
-                                    post_notify(
-                                        container_hwnd_raw,
-                                        main_hwnd_raw,
-                                        session_id,
-                                        FTP_EVT_STATUS_TEXT,
-                                    );
-                                }
-                            },
-                        );
-
-                        if let Ok(mut st) = shared.lock() {
-                            st.transfer = None;
-                            st.status_detail = match &res {
-                                Ok(n) => format!(
-                                    "Téléchargement terminé : {remote_name} ({})",
-                                    format_file_size(*n)
-                                ),
-                                Err(e) => e.clone(),
-                            };
-                        }
-                        match res {
-                            Ok(n) => push_ftp_log(
-                                &shared,
-                                format!(
-                                    "Téléchargé '{remote_name}' ({}) -> {}",
-                                    format_file_size(n),
-                                    local_path.display()
-                                ),
-                                false,
+                    FtpWorkerCommand::Rename { old_name, new_name } => {
+                        if client.is_none()
+                            && !connect_and_resume(
+                                &mut client,
+                                &mut last_remote_dir,
+                                &active_user,
+                                &active_pass,
                                 true,
-                            ),
-                            Err(err) => push_ftp_log(&shared, err, true, false),
+                            )
+                        {
+                            continue;
                         }
-                        post_notify(
-                            container_hwnd_raw,
-                            main_hwnd_raw,
-                            session_id,
-                            FTP_EVT_STATUS_TEXT,
-                        );
-                    }
-                }
-                FtpWorkerCommand::Upload {
-                    local_path,
-                    remote_name,
-                } => {
-                    if let Some(ref mut c) = client {
-                        cancel_transfer.store(false, Ordering::Relaxed);
-                        let total = std::fs::metadata(&local_path).ok().map(|m| m.len());
-                        if let Ok(mut st) = shared.lock() {
-                            st.transfer = Some(FtpTransferState {
-                                label: format!("Téléversement : {remote_name}"),
-                                transferred: 0,
-                                total,
-                            });
-                            st.status_detail = format!("Téléversement de {remote_name}...");
-                        }
-                        post_notify(
-                            container_hwnd_raw,
-                            main_hwnd_raw,
-                            session_id,
-                            FTP_EVT_STATUS_TEXT,
-                        );
-
-                        let mut last_ui_tick = std::time::Instant::now();
-                        let res = c.upload_file(
-                            &local_path,
-                            &remote_name,
-                            &cancel_transfer,
-                            |done, tot| {
-                                if let Ok(mut st) = shared.lock() {
-                                    st.transfer = Some(FtpTransferState {
-                                        label: format!("Téléversement : {remote_name}"),
-                                        transferred: done,
-                                        total: tot,
-                                    });
-                                }
-                                if last_ui_tick.elapsed() >= Duration::from_millis(90) {
-                                    last_ui_tick = std::time::Instant::now();
-                                    post_notify(
-                                        container_hwnd_raw,
-                                        main_hwnd_raw,
-                                        session_id,
-                                        FTP_EVT_STATUS_TEXT,
+                        if let Some(ref mut c) = client {
+                            match c.rename(&old_name, &new_name) {
+                                Ok(()) => {
+                                    push_ftp_log(
+                                        &shared,
+                                        format!("Renommé : {old_name} -> {new_name}"),
+                                        false,
+                                        true,
                                     );
+                                    let mut cur =
+                                        last_remote_dir.clone().unwrap_or_else(|| "/".to_string());
+                                    if let Ok(entries) =
+                                        refresh_dir(c, &mut cur, &mut last_remote_dir)
+                                        && let Ok(mut st) = shared.lock()
+                                    {
+                                        st.entries = entries;
+                                    }
                                 }
-                            },
-                        );
-
-                        let mut cur = shared
-                            .lock()
-                            .map(|s| s.current_dir.clone())
-                            .unwrap_or_else(|_| "/".to_string());
-                        let refreshed = refresh_dir(c, &mut cur).ok();
-
-                        if let Ok(mut st) = shared.lock() {
-                            st.transfer = None;
-                            if let Some(entries) = refreshed {
-                                st.entries = entries;
+                                Err(err) => push_ftp_log(&shared, err, true, false),
                             }
-                            st.status_detail = match &res {
-                                Ok(n) => format!(
-                                    "Téléversement terminé : {remote_name} ({})",
-                                    format_file_size(*n)
-                                ),
-                                Err(e) => e.clone(),
-                            };
+                            post_notify(
+                                container_hwnd_raw,
+                                main_hwnd_raw,
+                                session_id,
+                                FTP_EVT_STATUS_TEXT,
+                            );
                         }
-                        match res {
-                            Ok(n) => push_ftp_log(
-                                &shared,
-                                format!("Téléversé '{remote_name}' ({})", format_file_size(n)),
-                                false,
+                    }
+                    FtpWorkerCommand::Delete { name, is_dir } => {
+                        if client.is_none()
+                            && !connect_and_resume(
+                                &mut client,
+                                &mut last_remote_dir,
+                                &active_user,
+                                &active_pass,
                                 true,
-                            ),
-                            Err(err) => push_ftp_log(&shared, err, true, false),
+                            )
+                        {
+                            continue;
                         }
-                        post_notify(
-                            container_hwnd_raw,
-                            main_hwnd_raw,
-                            session_id,
-                            FTP_EVT_STATUS_TEXT,
-                        );
-                    }
-                }
-                FtpWorkerCommand::Mkdir(dir_name) => {
-                    if let Some(ref mut c) = client {
-                        match c.mkdir(&dir_name) {
-                            Ok(()) => {
-                                push_ftp_log(
-                                    &shared,
-                                    format!("Dossier créé : {dir_name}"),
-                                    false,
-                                    true,
-                                );
-                                let mut cur = shared
-                                    .lock()
-                                    .map(|s| s.current_dir.clone())
-                                    .unwrap_or_else(|_| "/".to_string());
-                                if let Ok(entries) = refresh_dir(c, &mut cur)
-                                    && let Ok(mut st) = shared.lock()
-                                {
-                                    st.entries = entries;
+                        if let Some(ref mut c) = client {
+                            let res = if is_dir {
+                                c.delete_dir(&name)
+                            } else {
+                                c.delete_file(&name)
+                            };
+                            match res {
+                                Ok(()) => {
+                                    push_ftp_log(
+                                        &shared,
+                                        format!("Supprimé : {name}"),
+                                        false,
+                                        true,
+                                    );
+                                    let mut cur =
+                                        last_remote_dir.clone().unwrap_or_else(|| "/".to_string());
+                                    if let Ok(entries) =
+                                        refresh_dir(c, &mut cur, &mut last_remote_dir)
+                                        && let Ok(mut st) = shared.lock()
+                                    {
+                                        st.entries = entries;
+                                    }
                                 }
+                                Err(err) => push_ftp_log(&shared, err, true, false),
                             }
-                            Err(err) => push_ftp_log(&shared, err, true, false),
+                            post_notify(
+                                container_hwnd_raw,
+                                main_hwnd_raw,
+                                session_id,
+                                FTP_EVT_STATUS_TEXT,
+                            );
                         }
-                        post_notify(
-                            container_hwnd_raw,
-                            main_hwnd_raw,
-                            session_id,
-                            FTP_EVT_STATUS_TEXT,
+                    }
+                    FtpWorkerCommand::Quit => {
+                        if let Some(mut c) = client.take() {
+                            c.quit();
+                        }
+                        break;
+                    }
+                },
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // Keep-alive NOOP périodique pour éviter la déconnexion rapide par le serveur FTP
+                    let mut keepalive_lost = false;
+                    if let Some(ref mut c) = client
+                        && c.noop().is_err()
+                    {
+                        keepalive_lost = true;
+                    }
+                    if keepalive_lost {
+                        connect_and_resume(
+                            &mut client,
+                            &mut last_remote_dir,
+                            &active_user,
+                            &active_pass,
+                            true,
                         );
                     }
                 }
-                FtpWorkerCommand::Rename { old_name, new_name } => {
-                    if let Some(ref mut c) = client {
-                        match c.rename(&old_name, &new_name) {
-                            Ok(()) => {
-                                push_ftp_log(
-                                    &shared,
-                                    format!("Renommé : {old_name} -> {new_name}"),
-                                    false,
-                                    true,
-                                );
-                                let mut cur = shared
-                                    .lock()
-                                    .map(|s| s.current_dir.clone())
-                                    .unwrap_or_else(|_| "/".to_string());
-                                if let Ok(entries) = refresh_dir(c, &mut cur)
-                                    && let Ok(mut st) = shared.lock()
-                                {
-                                    st.entries = entries;
-                                }
-                            }
-                            Err(err) => push_ftp_log(&shared, err, true, false),
-                        }
-                        post_notify(
-                            container_hwnd_raw,
-                            main_hwnd_raw,
-                            session_id,
-                            FTP_EVT_STATUS_TEXT,
-                        );
-                    }
-                }
-                FtpWorkerCommand::Delete { name, is_dir } => {
-                    if let Some(ref mut c) = client {
-                        let res = if is_dir {
-                            c.delete_dir(&name)
-                        } else {
-                            c.delete_file(&name)
-                        };
-                        match res {
-                            Ok(()) => {
-                                push_ftp_log(&shared, format!("Supprimé : {name}"), false, true);
-                                let mut cur = shared
-                                    .lock()
-                                    .map(|s| s.current_dir.clone())
-                                    .unwrap_or_else(|_| "/".to_string());
-                                if let Ok(entries) = refresh_dir(c, &mut cur)
-                                    && let Ok(mut st) = shared.lock()
-                                {
-                                    st.entries = entries;
-                                }
-                            }
-                            Err(err) => push_ftp_log(&shared, err, true, false),
-                        }
-                        post_notify(
-                            container_hwnd_raw,
-                            main_hwnd_raw,
-                            session_id,
-                            FTP_EVT_STATUS_TEXT,
-                        );
-                    }
-                }
-                FtpWorkerCommand::Quit => {
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
                     if let Some(mut c) = client.take() {
                         c.quit();
                     }
@@ -1933,7 +2169,6 @@ fn spawn_ftp_worker(
         active_pass.clear();
     });
 }
-
 /// Dessine une flèche vectorielle "remonter au parent", un dossier ou un fichier sobre GDI.
 unsafe fn draw_icon_ftp_entry(hdc: HDC, x: i32, y: i32, kind: FtpEntryKind) {
     unsafe {
@@ -2070,14 +2305,39 @@ unsafe fn ftp_layout_controls(state: &mut FtpWndState, w: i32, h: i32) {
     }
 }
 
+fn selected_remote_entries(state: &FtpWndState) -> Vec<FtpEntry> {
+    let Ok(st) = state.shared.lock() else {
+        return Vec::new();
+    };
+    state
+        .remote_selected
+        .iter()
+        .filter_map(|&idx| st.entries.get(idx).cloned())
+        .collect()
+}
+
 fn selected_remote_entry(state: &FtpWndState) -> Option<FtpEntry> {
-    let idx = state.selected_idx?;
+    let idx = state
+        .remote_anchor_idx
+        .filter(|i| state.remote_selected.contains(i))
+        .or_else(|| state.remote_selected.iter().next().copied())?;
     let st = state.shared.lock().ok()?;
     st.entries.get(idx).cloned()
 }
 
+fn selected_local_entries(state: &FtpWndState) -> Vec<FtpEntry> {
+    state
+        .local_selected
+        .iter()
+        .filter_map(|&idx| state.local_entries.get(idx).cloned())
+        .collect()
+}
+
 fn selected_local_entry(state: &FtpWndState) -> Option<FtpEntry> {
-    let idx = state.local_selected_idx?;
+    let idx = state
+        .local_anchor_idx
+        .filter(|i| state.local_selected.contains(i))
+        .or_else(|| state.local_selected.iter().next().copied())?;
     state.local_entries.get(idx).cloned()
 }
 
@@ -2100,69 +2360,120 @@ fn trigger_ftp_upload_file_picker(state: &FtpWndState) {
     }
 }
 
-fn trigger_ftp_upload(state: &FtpWndState) {
-    if !state.local_showing_drives
-        && let Some(entry) = selected_local_entry(state)
-        && entry.kind == FtpEntryKind::File
-    {
+fn trigger_ftp_upload_selected_only(state: &FtpWndState) -> usize {
+    if state.local_showing_drives {
+        return 0;
+    }
+    let files: Vec<FtpEntry> = selected_local_entries(state)
+        .into_iter()
+        .filter(|e| e.kind == FtpEntryKind::File)
+        .collect();
+    let mut queued = 0usize;
+    for entry in files {
         let local_path = state.local_dir.join(&entry.name);
         if local_path.is_file() {
             let _ = state.cmd_tx.send(FtpWorkerCommand::Upload {
                 local_path,
                 remote_name: entry.name,
             });
-            return;
+            queued += 1;
         }
     }
-    trigger_ftp_upload_file_picker(state);
+    if queued == 0 && !state.local_selected.is_empty() {
+        push_ftp_log(
+            &state.shared,
+            "Sélectionnez un ou plusieurs fichiers locaux à téléverser.".to_string(),
+            true,
+            false,
+        );
+        unsafe {
+            let _ = InvalidateRect(Some(state.container_hwnd), None, false);
+        }
+    }
+    queued
+}
+
+fn trigger_ftp_upload(state: &FtpWndState) {
+    if trigger_ftp_upload_selected_only(state) == 0 && state.local_selected.is_empty() {
+        trigger_ftp_upload_file_picker(state);
+    }
 }
 
 fn trigger_ftp_download_to_local_or_prompt(state: &FtpWndState, force_save_as: bool) {
-    let Some(entry) = selected_remote_entry(state) else {
-        return;
-    };
-    if entry.kind != FtpEntryKind::File {
-        return;
-    }
-    if !force_save_as && !state.local_showing_drives && state.local_dir.is_dir() {
-        let dest_path = state.local_dir.join(&entry.name);
-        if dest_path.exists()
-            && !confirm_dialog(
-                state.main_hwnd,
-                "Remplacer le fichier local ?",
-                &format!(
-                    "Le fichier « {} » existe déjà dans « {} ».\nVoulez-vous le remplacer ?",
-                    entry.name,
-                    state.local_dir.display()
-                ),
-            )
-        {
-            return;
+    let files: Vec<FtpEntry> = selected_remote_entries(state)
+        .into_iter()
+        .filter(|e| e.kind == FtpEntryKind::File)
+        .collect();
+    if files.is_empty() {
+        if !state.remote_selected.is_empty() {
+            push_ftp_log(
+                &state.shared,
+                "Sélectionnez un ou plusieurs fichiers distants à télécharger.".to_string(),
+                true,
+                false,
+            );
+            unsafe {
+                let _ = InvalidateRect(Some(state.container_hwnd), None, false);
+            }
         }
-        let _ = state.cmd_tx.send(FtpWorkerCommand::Download {
-            remote_name: entry.name,
-            local_path: dest_path,
-            size_hint: entry.size,
-        });
         return;
     }
 
-    let ext = Path::new(&entry.name)
+    if !force_save_as && !state.local_showing_drives && state.local_dir.is_dir() {
+        let existing_count = files
+            .iter()
+            .filter(|e| state.local_dir.join(&e.name).exists())
+            .count();
+        if existing_count > 0 {
+            let msg = if files.len() == 1 {
+                format!(
+                    "Le fichier « {} » existe déjà dans « {} ».\nVoulez-vous le remplacer ?",
+                    files[0].name,
+                    state.local_dir.display()
+                )
+            } else {
+                format!(
+                    "{existing_count} fichier(s) sur {} existent déjà dans « {} ».\nVoulez-vous les remplacer ?",
+                    files.len(),
+                    state.local_dir.display()
+                )
+            };
+            if !confirm_dialog(
+                state.main_hwnd,
+                "Remplacer le(s) fichier(s) local(aux) ?",
+                &msg,
+            ) {
+                return;
+            }
+        }
+        for entry in files {
+            let dest_path = state.local_dir.join(&entry.name);
+            let _ = state.cmd_tx.send(FtpWorkerCommand::Download {
+                remote_name: entry.name,
+                local_path: dest_path,
+                size_hint: entry.size,
+            });
+        }
+        return;
+    }
+
+    let first = &files[0];
+    let ext = Path::new(&first.name)
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("");
     if let Some(dest_path) = browse_for_save_file(
         state.container_hwnd,
-        &format!("Enregistrer '{}' sous", entry.name),
-        &entry.name,
+        &format!("Enregistrer '{}' sous", first.name),
+        &first.name,
         ext,
         "Tous les fichiers (*.*)",
         "*.*",
     ) {
         let _ = state.cmd_tx.send(FtpWorkerCommand::Download {
-            remote_name: entry.name,
+            remote_name: first.name.clone(),
             local_path: dest_path,
-            size_hint: entry.size,
+            size_hint: first.size,
         });
     }
 }
@@ -2270,70 +2581,87 @@ fn trigger_ftp_delete(state: &mut FtpWndState) {
         if state.local_showing_drives {
             return;
         }
-        let Some(entry) = selected_local_entry(state) else {
-            return;
-        };
-        if entry.kind == FtpEntryKind::ParentDir {
+        let items: Vec<FtpEntry> = selected_local_entries(state)
+            .into_iter()
+            .filter(|e| e.kind != FtpEntryKind::ParentDir)
+            .collect();
+        if items.is_empty() {
             return;
         }
-        let kind_lbl = if entry.kind == FtpEntryKind::Directory {
-            "le dossier local (et son contenu)"
+        let prompt = if items.len() == 1 {
+            let kind_lbl = if items[0].kind == FtpEntryKind::Directory {
+                "le dossier local (et son contenu)"
+            } else {
+                "le fichier local"
+            };
+            format!(
+                "Voulez-vous vraiment supprimer {kind_lbl} « {} » ?",
+                items[0].name
+            )
         } else {
-            "le fichier local"
+            format!(
+                "Voulez-vous vraiment supprimer ces {} éléments locaux ?",
+                items.len()
+            )
         };
         if confirm_dialog(
             state.main_hwnd,
             "Confirmation de suppression locale",
-            &format!(
-                "Voulez-vous vraiment supprimer {kind_lbl} « {} » ?",
-                entry.name
-            ),
+            &prompt,
         ) {
-            let target = state.local_dir.join(&entry.name);
-            let res = if entry.kind == FtpEntryKind::Directory {
-                std::fs::remove_dir_all(&target)
-            } else {
-                std::fs::remove_file(&target)
-            };
-            if let Err(err) = res {
-                show_error_dialog(
-                    state.main_hwnd,
-                    "Erreur suppression locale",
-                    &format!("Impossible de supprimer : {err}"),
-                );
-            } else {
-                refresh_local_entries(state);
-                unsafe {
-                    let _ = InvalidateRect(Some(state.container_hwnd), None, false);
+            for entry in items {
+                let target = state.local_dir.join(&entry.name);
+                let res = if entry.kind == FtpEntryKind::Directory {
+                    std::fs::remove_dir_all(&target)
+                } else {
+                    std::fs::remove_file(&target)
+                };
+                if let Err(err) = res {
+                    show_error_dialog(
+                        state.main_hwnd,
+                        "Erreur suppression locale",
+                        &format!("Impossible de supprimer « {} » : {err}", entry.name),
+                    );
                 }
+            }
+            refresh_local_entries(state);
+            unsafe {
+                let _ = InvalidateRect(Some(state.container_hwnd), None, false);
             }
         }
         return;
     }
 
-    let Some(entry) = selected_remote_entry(state) else {
-        return;
-    };
-    if entry.kind == FtpEntryKind::ParentDir {
+    let items: Vec<FtpEntry> = selected_remote_entries(state)
+        .into_iter()
+        .filter(|e| e.kind != FtpEntryKind::ParentDir)
+        .collect();
+    if items.is_empty() {
         return;
     }
-    let kind_lbl = if entry.kind == FtpEntryKind::Directory {
-        "le dossier distant"
-    } else {
-        "le fichier distant"
-    };
-    if confirm_dialog(
-        state.main_hwnd,
-        "Confirmation de suppression FTP",
-        &format!(
+    let prompt = if items.len() == 1 {
+        let kind_lbl = if items[0].kind == FtpEntryKind::Directory {
+            "le dossier distant"
+        } else {
+            "le fichier distant"
+        };
+        format!(
             "Voulez-vous vraiment supprimer {kind_lbl} « {} » ?",
-            entry.name
-        ),
-    ) {
-        let _ = state.cmd_tx.send(FtpWorkerCommand::Delete {
-            name: entry.name,
-            is_dir: entry.kind == FtpEntryKind::Directory,
-        });
+            items[0].name
+        )
+    } else {
+        format!(
+            "Voulez-vous vraiment supprimer ces {} éléments distants ?",
+            items.len()
+        )
+    };
+    if confirm_dialog(state.main_hwnd, "Confirmation de suppression FTP", &prompt) {
+        for entry in items {
+            let _ = state.cmd_tx.send(FtpWorkerCommand::Delete {
+                name: entry.name,
+                is_dir: entry.kind == FtpEntryKind::Directory,
+            });
+        }
     }
 }
 
@@ -2392,20 +2720,36 @@ unsafe fn show_ftp_context_menu(state: &mut FtpWndState, screen_pt: POINT) {
     unsafe {
         let Ok(hmenu) = CreatePopupMenu() else { return };
         if state.active_pane == FtpPane::Local {
-            let sel = selected_local_entry(state);
-            let is_item = sel
-                .as_ref()
-                .is_some_and(|e| e.kind != FtpEntryKind::ParentDir && !state.local_showing_drives);
-            let is_file = sel.as_ref().is_some_and(|e| e.kind == FtpEntryKind::File);
+            let sel_all = selected_local_entries(state);
+            let sel_items: Vec<&FtpEntry> = sel_all
+                .iter()
+                .filter(|e| e.kind != FtpEntryKind::ParentDir && !state.local_showing_drives)
+                .collect();
+            let file_count = sel_items
+                .iter()
+                .filter(|e| e.kind == FtpEntryKind::File)
+                .count();
+            let sel_first = selected_local_entry(state);
 
-            if is_file {
+            if file_count > 1 {
+                let lbl: Vec<u16> = format!("Téléverser {file_count} fichiers vers le serveur FTP")
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let _ = AppendMenuW(
+                    hmenu,
+                    MF_STRING,
+                    CMD_FTP_CTX_UPLOAD as usize,
+                    PCWSTR(lbl.as_ptr()),
+                );
+            } else if file_count == 1 {
                 let _ = AppendMenuW(
                     hmenu,
                     MF_STRING,
                     CMD_FTP_CTX_UPLOAD as usize,
                     w!("Téléverser vers le serveur FTP"),
                 );
-            } else if sel.is_some() {
+            } else if sel_first.is_some() {
                 let _ = AppendMenuW(
                     hmenu,
                     MF_STRING,
@@ -2421,13 +2765,15 @@ unsafe fn show_ftp_context_menu(state: &mut FtpWndState, screen_pt: POINT) {
                     CMD_FTP_CTX_MKDIR as usize,
                     w!("Nouveau dossier local…"),
                 );
-                if is_item {
+                if sel_items.len() == 1 {
                     let _ = AppendMenuW(
                         hmenu,
                         MF_STRING,
                         CMD_FTP_CTX_RENAME as usize,
                         w!("Renommer…"),
                     );
+                }
+                if !sel_items.is_empty() {
                     let _ = AppendMenuW(
                         hmenu,
                         MF_STRING,
@@ -2457,11 +2803,12 @@ unsafe fn show_ftp_context_menu(state: &mut FtpWndState, screen_pt: POINT) {
             let _ = DestroyMenu(hmenu);
 
             match cmd.0 as u32 {
-                CMD_FTP_CTX_OPEN | CMD_FTP_CTX_UPLOAD => {
-                    if let Some(idx) = state.local_selected_idx {
+                CMD_FTP_CTX_OPEN => {
+                    if let Some(idx) = state.local_selected.iter().next().copied() {
                         activate_local_entry(state, idx);
                     }
                 }
+                CMD_FTP_CTX_UPLOAD => trigger_ftp_upload(state),
                 CMD_FTP_CTX_MKDIR => trigger_ftp_mkdir(state),
                 CMD_FTP_CTX_RENAME => trigger_ftp_rename(state),
                 CMD_FTP_CTX_DELETE => trigger_ftp_delete(state),
@@ -2474,13 +2821,29 @@ unsafe fn show_ftp_context_menu(state: &mut FtpWndState, screen_pt: POINT) {
             return;
         }
 
-        let sel = selected_remote_entry(state);
-        let is_item = sel
-            .as_ref()
-            .is_some_and(|e| e.kind != FtpEntryKind::ParentDir);
-        let is_file = sel.as_ref().is_some_and(|e| e.kind == FtpEntryKind::File);
+        let sel_all = selected_remote_entries(state);
+        let sel_items: Vec<&FtpEntry> = sel_all
+            .iter()
+            .filter(|e| e.kind != FtpEntryKind::ParentDir)
+            .collect();
+        let file_count = sel_items
+            .iter()
+            .filter(|e| e.kind == FtpEntryKind::File)
+            .count();
+        let sel_first = selected_remote_entry(state);
 
-        if is_file {
+        if file_count > 1 {
+            let lbl: Vec<u16> = format!("Télécharger {file_count} fichiers vers le dossier local")
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let _ = AppendMenuW(
+                hmenu,
+                MF_STRING,
+                CMD_FTP_CTX_DOWNLOAD as usize,
+                PCWSTR(lbl.as_ptr()),
+            );
+        } else if file_count == 1 {
             let _ = AppendMenuW(
                 hmenu,
                 MF_STRING,
@@ -2493,7 +2856,7 @@ unsafe fn show_ftp_context_menu(state: &mut FtpWndState, screen_pt: POINT) {
                 CMD_FTP_CTX_DOWNLOAD_AS as usize,
                 w!("Télécharger sous…"),
             );
-        } else if sel.is_some() {
+        } else if sel_first.is_some() {
             let _ = AppendMenuW(
                 hmenu,
                 MF_STRING,
@@ -2514,13 +2877,15 @@ unsafe fn show_ftp_context_menu(state: &mut FtpWndState, screen_pt: POINT) {
             CMD_FTP_CTX_MKDIR as usize,
             w!("Nouveau dossier…"),
         );
-        if is_item {
+        if sel_items.len() == 1 {
             let _ = AppendMenuW(
                 hmenu,
                 MF_STRING,
                 CMD_FTP_CTX_RENAME as usize,
                 w!("Renommer…"),
             );
+        }
+        if !sel_items.is_empty() {
             let _ = AppendMenuW(
                 hmenu,
                 MF_STRING,
@@ -2549,11 +2914,12 @@ unsafe fn show_ftp_context_menu(state: &mut FtpWndState, screen_pt: POINT) {
         let _ = DestroyMenu(hmenu);
 
         match cmd.0 as u32 {
-            CMD_FTP_CTX_OPEN | CMD_FTP_CTX_DOWNLOAD => {
-                if let Some(idx) = state.selected_idx {
+            CMD_FTP_CTX_OPEN => {
+                if let Some(idx) = state.remote_selected.iter().next().copied() {
                     activate_remote_entry(state, idx);
                 }
             }
+            CMD_FTP_CTX_DOWNLOAD => trigger_ftp_download_to_local_or_prompt(state, false),
             CMD_FTP_CTX_DOWNLOAD_AS => trigger_ftp_download_to_local_or_prompt(state, true),
             CMD_FTP_CTX_UPLOAD => trigger_ftp_upload(state),
             CMD_FTP_CTX_MKDIR => trigger_ftp_mkdir(state),
@@ -2566,7 +2932,6 @@ unsafe fn show_ftp_context_menu(state: &mut FtpWndState, screen_pt: POINT) {
         }
     }
 }
-
 fn ftp_hit_test(state: &FtpWndState, x: i32, y: i32) -> Option<FtpUiZone> {
     let pt = POINT { x, y };
     for hz in &state.hit_zones {
@@ -2593,7 +2958,7 @@ unsafe fn paint_file_list_pane(
     list_bottom: i32,
     row_h: i32,
     entries: &[FtpEntry],
-    selected_idx: Option<usize>,
+    selected_indices: &BTreeSet<usize>,
     scroll_offset: &mut i32,
     hovered_zone: Option<FtpUiZone>,
     is_active_pane: bool,
@@ -2719,7 +3084,7 @@ unsafe fn paint_file_list_pane(
                 FtpUiZone::Row(idx)
             };
 
-            let is_sel = selected_idx == Some(idx);
+            let is_sel = selected_indices.contains(&idx);
             let is_hover = hovered_zone == Some(zone);
             if is_sel {
                 let sel_brush = CreateSolidBrush(COLORREF(theme.bg_selected));
@@ -2916,8 +3281,12 @@ unsafe fn paint_ftp_host(state: &mut FtpWndState) {
         let _ = FillRect(hdc, &toolbar_rc, state.palette.brush_bg_sidebar);
         draw_horizontal_line(hdc, 0, w, toolbar_h - 1, col_border());
 
-        let sel_local = selected_local_entry(state);
-        let sel_remote = state.selected_idx.and_then(|i| snapshot.entries.get(i));
+        let sel_local_list = selected_local_entries(state);
+        let sel_remote_list: Vec<FtpEntry> = state
+            .remote_selected
+            .iter()
+            .filter_map(|&i| snapshot.entries.get(i).cloned())
+            .collect();
         let can_cdup = if state.active_pane == FtpPane::Local {
             !state.local_showing_drives
         } else {
@@ -2925,18 +3294,27 @@ unsafe fn paint_ftp_host(state: &mut FtpWndState) {
         };
         let can_upload = snapshot.is_connected;
         let can_download =
-            sel_remote.is_some_and(|e| e.kind == FtpEntryKind::File) && snapshot.is_connected;
+            sel_remote_list.iter().any(|e| e.kind == FtpEntryKind::File) && snapshot.is_connected;
         let can_mkdir = if state.active_pane == FtpPane::Local {
             !state.local_showing_drives
         } else {
             snapshot.is_connected
         };
-        let can_modify = if state.active_pane == FtpPane::Local {
-            sel_local.is_some_and(|e| e.kind != FtpEntryKind::ParentDir)
-                && !state.local_showing_drives
+        let active_items: Vec<&FtpEntry> = if state.active_pane == FtpPane::Local {
+            sel_local_list
+                .iter()
+                .filter(|e| e.kind != FtpEntryKind::ParentDir && !state.local_showing_drives)
+                .collect()
         } else {
-            sel_remote.is_some_and(|e| e.kind != FtpEntryKind::ParentDir) && snapshot.is_connected
+            sel_remote_list
+                .iter()
+                .filter(|e| e.kind != FtpEntryKind::ParentDir)
+                .collect()
         };
+        let can_rename = active_items.len() == 1
+            && (state.active_pane == FtpPane::Local || snapshot.is_connected);
+        let can_delete = !active_items.is_empty()
+            && (state.active_pane == FtpPane::Local || snapshot.is_connected);
 
         let btn_top = dpi.scale(7);
         let btn_h = dpi.scale(30);
@@ -2984,14 +3362,14 @@ unsafe fn paint_ftp_host(state: &mut FtpWndState) {
                 FtpUiZone::BtnRename,
                 dpi.scale(94),
                 false,
-                can_modify,
+                can_rename,
             ),
             (
                 "✕ Supprimer",
                 FtpUiZone::BtnDelete,
                 dpi.scale(94),
                 false,
-                can_modify,
+                can_delete,
             ),
         ];
 
@@ -3250,7 +3628,7 @@ unsafe fn paint_ftp_host(state: &mut FtpWndState) {
             activity_top,
             row_h,
             &local_entries_snapshot,
-            state.local_selected_idx,
+            &state.local_selected,
             &mut local_scroll,
             state.hovered_zone,
             state.active_pane == FtpPane::Local,
@@ -3396,7 +3774,7 @@ unsafe fn paint_ftp_host(state: &mut FtpWndState) {
                 activity_top,
                 row_h,
                 &snapshot.entries,
-                state.selected_idx,
+                &state.remote_selected,
                 &mut remote_scroll,
                 state.hovered_zone,
                 state.active_pane == FtpPane::Remote,
@@ -3405,6 +3783,54 @@ unsafe fn paint_ftp_host(state: &mut FtpWndState) {
                 &mut state.hit_zones,
             );
             state.scroll_offset = remote_scroll;
+        }
+
+        // Indicateur visuel de dépôt inter-panneaux (drag & drop façon FileZilla)
+        if let (Some(src), Some(target)) = (state.dragging_transfer, state.drag_hover_target) {
+            let (drop_rc, msg) = if src == FtpPane::Local && target == FtpPane::Remote {
+                let count = selected_local_entries(state)
+                    .into_iter()
+                    .filter(|e| e.kind == FtpEntryKind::File)
+                    .count();
+                (
+                    state.list_area_rc,
+                    format!(
+                        "Déposer ici pour téléverser {count} fichier(s) vers {}",
+                        snapshot.current_dir
+                    ),
+                )
+            } else {
+                let count = selected_remote_entries(state)
+                    .into_iter()
+                    .filter(|e| e.kind == FtpEntryKind::File)
+                    .count();
+                (
+                    state.local_list_area_rc,
+                    format!(
+                        "Déposer ici pour télécharger {count} fichier(s) vers {}",
+                        state.local_dir.display()
+                    ),
+                )
+            };
+            let banner_rc = RECT {
+                left: drop_rc.left + dpi.scale(14),
+                top: (drop_rc.bottom - dpi.scale(42)).max(drop_rc.top + 8),
+                right: drop_rc.right - dpi.scale(14),
+                bottom: drop_rc.bottom - dpi.scale(10),
+            };
+            draw_rounded_box(hdc, banner_rc, col_accent(), col_accent_hover());
+            let _ = SelectObject(hdc, state.palette.font_ui_bold.into());
+            let _ = SetTextColor(hdc, COLORREF(COL_TEXT_ON_ACCENT));
+            draw_text_line(
+                hdc,
+                &msg,
+                RECT {
+                    left: banner_rc.left + dpi.scale(12),
+                    top: banner_rc.top,
+                    right: banner_rc.right - dpi.scale(12),
+                    bottom: banner_rc.bottom,
+                },
+            );
         }
 
         // Séparateur vertical draggable entre Local et FTP
@@ -3670,6 +4096,15 @@ unsafe extern "system" fn ftp_host_wnd_proc(
             WM_SETCURSOR => {
                 if !ptr.is_null() {
                     let state = &*ptr;
+                    if state.dragging_transfer.is_some() {
+                        let cursor_id = if state.drag_hover_target.is_some() {
+                            IDC_HAND
+                        } else {
+                            IDC_ARROW
+                        };
+                        let _ = SetCursor(Some(LoadCursorW(None, cursor_id).unwrap_or_default()));
+                        return LRESULT(1);
+                    }
                     if state.dragging_pane_splitter
                         || state.hovered_zone == Some(FtpUiZone::PaneSplitter)
                     {
@@ -3720,6 +4155,63 @@ unsafe extern "system" fn ftp_host_wnd_proc(
                                 clamp_activity_height(h, h - y, dpi.scale(54), fixed_top_h);
                         }
                         let _ = InvalidateRect(Some(hwnd), None, false);
+                        return LRESULT(0);
+                    }
+
+                    if let Some((src_pane, _idx, start_pt, _)) = state.drag_candidate {
+                        let dist = (x - start_pt.x).abs() + (y - start_pt.y).abs();
+                        if dist >= 6 {
+                            let has_files = match src_pane {
+                                FtpPane::Local => {
+                                    !state.local_showing_drives
+                                        && selected_local_entries(state)
+                                            .iter()
+                                            .any(|e| e.kind == FtpEntryKind::File)
+                                }
+                                FtpPane::Remote => selected_remote_entries(state)
+                                    .iter()
+                                    .any(|e| e.kind == FtpEntryKind::File),
+                            };
+                            if has_files {
+                                state.dragging_transfer = Some(src_pane);
+                            }
+                            state.drag_candidate = None;
+                        }
+                    }
+
+                    if let Some(src_pane) = state.dragging_transfer {
+                        let toolbar_h = state.palette.dpi.scale(44);
+                        let in_body = y > toolbar_h && y < state.activity_splitter_rc.top;
+                        let new_target = if in_body {
+                            match src_pane {
+                                FtpPane::Local
+                                    if x >= state.pane_splitter_rc.right
+                                        && state.shared.lock().is_ok_and(|s| s.is_connected) =>
+                                {
+                                    Some(FtpPane::Remote)
+                                }
+                                FtpPane::Remote
+                                    if x < state.pane_splitter_rc.left
+                                        && !state.local_showing_drives
+                                        && state.local_dir.is_dir() =>
+                                {
+                                    Some(FtpPane::Local)
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        if new_target != state.drag_hover_target {
+                            state.drag_hover_target = new_target;
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                        }
+                        let cursor_id = if state.drag_hover_target.is_some() {
+                            IDC_HAND
+                        } else {
+                            IDC_ARROW
+                        };
+                        let _ = SetCursor(Some(LoadCursorW(None, cursor_id).unwrap_or_default()));
                         return LRESULT(0);
                     }
 
@@ -3777,12 +4269,46 @@ unsafe extern "system" fn ftp_host_wnd_proc(
             WM_LBUTTONUP | WM_CAPTURECHANGED => {
                 if !ptr.is_null() {
                     let state = &mut *ptr;
+                    let mut changed = false;
                     if state.dragging_pane_splitter || state.dragging_activity_splitter {
                         state.dragging_pane_splitter = false;
                         state.dragging_activity_splitter = false;
+                        changed = true;
+                    }
+                    if let Some(src_pane) = state.dragging_transfer.take() {
+                        let target = state.drag_hover_target.take();
                         if msg == WM_LBUTTONUP {
-                            let _ = ReleaseCapture();
+                            if src_pane == FtpPane::Local && target == Some(FtpPane::Remote) {
+                                trigger_ftp_upload_selected_only(state);
+                            } else if src_pane == FtpPane::Remote && target == Some(FtpPane::Local)
+                            {
+                                trigger_ftp_download_to_local_or_prompt(state, false);
+                            }
                         }
+                        changed = true;
+                    } else if let Some((pane, idx, _pt, was_plain_reclick)) =
+                        state.drag_candidate.take()
+                        && msg == WM_LBUTTONUP
+                        && was_plain_reclick
+                    {
+                        match pane {
+                            FtpPane::Local => {
+                                state.local_selected.clear();
+                                state.local_selected.insert(idx);
+                                state.local_anchor_idx = Some(idx);
+                            }
+                            FtpPane::Remote => {
+                                state.remote_selected.clear();
+                                state.remote_selected.insert(idx);
+                                state.remote_anchor_idx = Some(idx);
+                            }
+                        }
+                        changed = true;
+                    }
+                    if msg == WM_LBUTTONUP {
+                        let _ = ReleaseCapture();
+                    }
+                    if changed {
                         let _ = InvalidateRect(Some(hwnd), None, false);
                     }
                 }
@@ -3794,6 +4320,8 @@ unsafe extern "system" fn ftp_host_wnd_proc(
                     let _ = SetFocus(Some(hwnd));
                     let x = (lparam.0 & 0xFFFF) as i16 as i32;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                    let ctrl = is_mod_key_down(VK_CONTROL.0);
+                    let shift = is_mod_key_down(VK_SHIFT.0);
                     if let Some(zone) = ftp_hit_test(state, x, y) {
                         match zone {
                             FtpUiZone::PaneSplitter => {
@@ -3865,12 +4393,48 @@ unsafe extern "system" fn ftp_host_wnd_proc(
                             }
                             FtpUiZone::LocalRow(idx) => {
                                 state.active_pane = FtpPane::Local;
-                                state.local_selected_idx = Some(idx);
+                                let already_sel = state.local_selected.contains(&idx);
+                                if !ctrl && !shift && already_sel && state.local_selected.len() > 1
+                                {
+                                    state.drag_candidate =
+                                        Some((FtpPane::Local, idx, POINT { x, y }, true));
+                                } else {
+                                    apply_row_selection(
+                                        &mut state.local_selected,
+                                        &mut state.local_anchor_idx,
+                                        idx,
+                                        ctrl,
+                                        shift,
+                                        &state.local_entries,
+                                    );
+                                    state.drag_candidate =
+                                        Some((FtpPane::Local, idx, POINT { x, y }, false));
+                                }
+                                SetCapture(hwnd);
                                 let _ = InvalidateRect(Some(hwnd), None, false);
                             }
                             FtpUiZone::Row(idx) => {
                                 state.active_pane = FtpPane::Remote;
-                                state.selected_idx = Some(idx);
+                                let already_sel = state.remote_selected.contains(&idx);
+                                if !ctrl && !shift && already_sel && state.remote_selected.len() > 1
+                                {
+                                    state.drag_candidate =
+                                        Some((FtpPane::Remote, idx, POINT { x, y }, true));
+                                } else {
+                                    if let Ok(st) = state.shared.lock() {
+                                        apply_row_selection(
+                                            &mut state.remote_selected,
+                                            &mut state.remote_anchor_idx,
+                                            idx,
+                                            ctrl,
+                                            shift,
+                                            &st.entries,
+                                        );
+                                    }
+                                    state.drag_candidate =
+                                        Some((FtpPane::Remote, idx, POINT { x, y }, false));
+                                }
+                                SetCapture(hwnd);
                                 let _ = InvalidateRect(Some(hwnd), None, false);
                             }
                         }
@@ -3889,17 +4453,24 @@ unsafe extern "system" fn ftp_host_wnd_proc(
             WM_LBUTTONDBLCLK => {
                 if !ptr.is_null() {
                     let state = &mut *ptr;
+                    state.drag_candidate = None;
+                    state.dragging_transfer = None;
+                    state.drag_hover_target = None;
                     let x = (lparam.0 & 0xFFFF) as i16 as i32;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                     match ftp_hit_test(state, x, y) {
                         Some(FtpUiZone::LocalRow(idx)) => {
                             state.active_pane = FtpPane::Local;
-                            state.local_selected_idx = Some(idx);
+                            state.local_selected.clear();
+                            state.local_selected.insert(idx);
+                            state.local_anchor_idx = Some(idx);
                             activate_local_entry(state, idx);
                         }
                         Some(FtpUiZone::Row(idx)) => {
                             state.active_pane = FtpPane::Remote;
-                            state.selected_idx = Some(idx);
+                            state.remote_selected.clear();
+                            state.remote_selected.insert(idx);
+                            state.remote_anchor_idx = Some(idx);
                             activate_remote_entry(state, idx);
                         }
                         _ => {}
@@ -3915,12 +4486,20 @@ unsafe extern "system" fn ftp_host_wnd_proc(
                     match ftp_hit_test(state, x, y) {
                         Some(FtpUiZone::LocalRow(idx)) => {
                             state.active_pane = FtpPane::Local;
-                            state.local_selected_idx = Some(idx);
+                            if !state.local_selected.contains(&idx) {
+                                state.local_selected.clear();
+                                state.local_selected.insert(idx);
+                                state.local_anchor_idx = Some(idx);
+                            }
                             let _ = InvalidateRect(Some(hwnd), None, false);
                         }
                         Some(FtpUiZone::Row(idx)) => {
                             state.active_pane = FtpPane::Remote;
-                            state.selected_idx = Some(idx);
+                            if !state.remote_selected.contains(&idx) {
+                                state.remote_selected.clear();
+                                state.remote_selected.insert(idx);
+                                state.remote_anchor_idx = Some(idx);
+                            }
                             let _ = InvalidateRect(Some(hwnd), None, false);
                         }
                         _ => {
@@ -3950,36 +4529,64 @@ unsafe extern "system" fn ftp_host_wnd_proc(
                 if !ptr.is_null() {
                     let state = &mut *ptr;
                     let vk = wparam.0 as u16;
+                    let ctrl = is_mod_key_down(VK_CONTROL.0);
+                    if ctrl && vk == b'A' as u16 {
+                        if state.active_pane == FtpPane::Local {
+                            state.local_selected.clear();
+                            for (i, e) in state.local_entries.iter().enumerate() {
+                                if e.kind != FtpEntryKind::ParentDir {
+                                    state.local_selected.insert(i);
+                                }
+                            }
+                        } else if let Ok(st) = state.shared.lock() {
+                            state.remote_selected.clear();
+                            for (i, e) in st.entries.iter().enumerate() {
+                                if e.kind != FtpEntryKind::ParentDir {
+                                    state.remote_selected.insert(i);
+                                }
+                            }
+                        }
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        return LRESULT(0);
+                    }
                     if state.active_pane == FtpPane::Local {
                         let count = state.local_entries.len();
                         match vk {
                             x if x == VK_UP.0 && count > 0 => {
                                 let next = state
-                                    .local_selected_idx
+                                    .local_anchor_idx
                                     .map(|i| i.saturating_sub(1))
                                     .unwrap_or(0);
-                                state.local_selected_idx = Some(next);
+                                state.local_selected.clear();
+                                state.local_selected.insert(next);
+                                state.local_anchor_idx = Some(next);
                                 let _ = InvalidateRect(Some(hwnd), None, false);
                             }
                             x if x == VK_DOWN.0 && count > 0 => {
                                 let next = state
-                                    .local_selected_idx
+                                    .local_anchor_idx
                                     .map(|i| (i + 1).min(count - 1))
                                     .unwrap_or(0);
-                                state.local_selected_idx = Some(next);
+                                state.local_selected.clear();
+                                state.local_selected.insert(next);
+                                state.local_anchor_idx = Some(next);
                                 let _ = InvalidateRect(Some(hwnd), None, false);
                             }
                             x if x == VK_HOME.0 && count > 0 => {
-                                state.local_selected_idx = Some(0);
+                                state.local_selected.clear();
+                                state.local_selected.insert(0);
+                                state.local_anchor_idx = Some(0);
                                 state.local_scroll_offset = 0;
                                 let _ = InvalidateRect(Some(hwnd), None, false);
                             }
                             x if x == VK_END.0 && count > 0 => {
-                                state.local_selected_idx = Some(count - 1);
+                                state.local_selected.clear();
+                                state.local_selected.insert(count - 1);
+                                state.local_anchor_idx = Some(count - 1);
                                 let _ = InvalidateRect(Some(hwnd), None, false);
                             }
                             x if x == VK_RETURN.0 => {
-                                if let Some(idx) = state.local_selected_idx {
+                                if let Some(idx) = state.local_anchor_idx {
                                     activate_local_entry(state, idx);
                                 }
                             }
@@ -3999,30 +4606,40 @@ unsafe extern "system" fn ftp_host_wnd_proc(
                         let count = state.shared.lock().map(|s| s.entries.len()).unwrap_or(0);
                         match vk {
                             x if x == VK_UP.0 && count > 0 => {
-                                let next =
-                                    state.selected_idx.map(|i| i.saturating_sub(1)).unwrap_or(0);
-                                state.selected_idx = Some(next);
+                                let next = state
+                                    .remote_anchor_idx
+                                    .map(|i| i.saturating_sub(1))
+                                    .unwrap_or(0);
+                                state.remote_selected.clear();
+                                state.remote_selected.insert(next);
+                                state.remote_anchor_idx = Some(next);
                                 let _ = InvalidateRect(Some(hwnd), None, false);
                             }
                             x if x == VK_DOWN.0 && count > 0 => {
                                 let next = state
-                                    .selected_idx
+                                    .remote_anchor_idx
                                     .map(|i| (i + 1).min(count - 1))
                                     .unwrap_or(0);
-                                state.selected_idx = Some(next);
+                                state.remote_selected.clear();
+                                state.remote_selected.insert(next);
+                                state.remote_anchor_idx = Some(next);
                                 let _ = InvalidateRect(Some(hwnd), None, false);
                             }
                             x if x == VK_HOME.0 && count > 0 => {
-                                state.selected_idx = Some(0);
+                                state.remote_selected.clear();
+                                state.remote_selected.insert(0);
+                                state.remote_anchor_idx = Some(0);
                                 state.scroll_offset = 0;
                                 let _ = InvalidateRect(Some(hwnd), None, false);
                             }
                             x if x == VK_END.0 && count > 0 => {
-                                state.selected_idx = Some(count - 1);
+                                state.remote_selected.clear();
+                                state.remote_selected.insert(count - 1);
+                                state.remote_anchor_idx = Some(count - 1);
                                 let _ = InvalidateRect(Some(hwnd), None, false);
                             }
                             x if x == VK_RETURN.0 => {
-                                if let Some(idx) = state.selected_idx {
+                                if let Some(idx) = state.remote_anchor_idx {
                                     activate_remote_entry(state, idx);
                                 }
                             }
@@ -4302,11 +4919,16 @@ impl FtpSessionHost {
                 local_entries: Vec::new(),
                 local_error: None,
                 local_path_dirty: true,
-                local_selected_idx: None,
+                local_selected: BTreeSet::new(),
+                local_anchor_idx: None,
                 local_scroll_offset: 0,
                 row_height: dpi.scale(28),
-                selected_idx: None,
+                remote_selected: BTreeSet::new(),
+                remote_anchor_idx: None,
                 scroll_offset: 0,
+                drag_candidate: None,
+                dragging_transfer: None,
+                drag_hover_target: None,
                 last_transfer_active: false,
                 hovered_zone: None,
                 hit_zones: Vec::new(),
@@ -4698,5 +5320,67 @@ mod tests {
         assert_eq!(clamp_activity_height(700, 180, 54, 170), 180);
         assert_eq!(clamp_activity_height(700, 10, 54, 170), 54);
         assert_eq!(clamp_activity_height(700, 680, 54, 170), 530);
+    }
+
+    #[test]
+    fn test_ftp_noop_and_single_parent_dir_and_lost_error_detection() {
+        assert!(is_connection_lost_error("421 Idle timeout"));
+        assert!(is_connection_lost_error(
+            "Connexion FTP fermée par le serveur"
+        ));
+        assert!(!is_connection_lost_error("550 Permission denied"));
+    }
+
+    #[test]
+    fn test_ftp_multi_selection_ctrl_and_shift() {
+        let entries = vec![
+            FtpEntry {
+                name: "..".to_string(),
+                kind: FtpEntryKind::ParentDir,
+                size: None,
+                modified: String::new(),
+                permissions: String::new(),
+            },
+            FtpEntry {
+                name: "dir1".to_string(),
+                kind: FtpEntryKind::Directory,
+                size: None,
+                modified: String::new(),
+                permissions: String::new(),
+            },
+            FtpEntry {
+                name: "a.txt".to_string(),
+                kind: FtpEntryKind::File,
+                size: Some(10),
+                modified: String::new(),
+                permissions: String::new(),
+            },
+            FtpEntry {
+                name: "b.txt".to_string(),
+                kind: FtpEntryKind::File,
+                size: Some(20),
+                modified: String::new(),
+                permissions: String::new(),
+            },
+        ];
+
+        let mut sel = BTreeSet::new();
+        let mut anchor = None;
+
+        // Clic simple sur 1
+        apply_row_selection(&mut sel, &mut anchor, 1, false, false, &entries);
+        assert_eq!(sel.iter().copied().collect::<Vec<_>>(), vec![1]);
+
+        // Shift+clic sur 3 -> plage 1..=3
+        apply_row_selection(&mut sel, &mut anchor, 3, false, true, &entries);
+        assert_eq!(sel.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+
+        // Ctrl+clic sur 2 -> retire 2
+        apply_row_selection(&mut sel, &mut anchor, 2, true, false, &entries);
+        assert_eq!(sel.iter().copied().collect::<Vec<_>>(), vec![1, 3]);
+
+        // Ctrl+clic sur 2 -> rajoute 2
+        apply_row_selection(&mut sel, &mut anchor, 2, true, false, &entries);
+        assert_eq!(sel.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
     }
 }

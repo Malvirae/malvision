@@ -9,6 +9,7 @@ use crate::security::SecretString;
 pub enum Protocol {
     Rdp,
     Ftp,
+    Ssh,
     AnyDesk,
     RustDesk,
 }
@@ -18,6 +19,7 @@ impl Protocol {
         match self {
             Self::Rdp => "rdp",
             Self::Ftp => "ftp",
+            Self::Ssh => "ssh",
             Self::AnyDesk => "anydesk",
             Self::RustDesk => "rustdesk",
         }
@@ -27,6 +29,7 @@ impl Protocol {
         match self {
             Self::Rdp => "RDP",
             Self::Ftp => "FTP",
+            Self::Ssh => "SSH",
             Self::AnyDesk => "AnyDesk",
             Self::RustDesk => "RustDesk",
         }
@@ -36,6 +39,7 @@ impl Protocol {
         match self {
             Self::Rdp => "[RDP]",
             Self::Ftp => "[FTP]",
+            Self::Ssh => "[SSH]",
             Self::AnyDesk => "[ANY]",
             Self::RustDesk => "[RST]",
         }
@@ -45,6 +49,7 @@ impl Protocol {
         match s.trim().to_ascii_lowercase().as_str() {
             "rdp" => Ok(Self::Rdp),
             "ftp" => Ok(Self::Ftp),
+            "ssh" => Ok(Self::Ssh),
             "anydesk" => Ok(Self::AnyDesk),
             "rustdesk" => Ok(Self::RustDesk),
             other => Err(format!("Protocole inconnu en base de données : '{other}'.")),
@@ -109,6 +114,13 @@ impl ConnectionItem {
                     format!("{}:{}", self.host, self.port)
                 }
             }
+            Protocol::Ssh => {
+                if self.port == 22 {
+                    self.host.clone()
+                } else {
+                    format!("{}:{}", self.host, self.port)
+                }
+            }
             Protocol::AnyDesk | Protocol::RustDesk => self.host.clone(),
         }
     }
@@ -157,6 +169,9 @@ impl ConnectionDraft {
                 Protocol::Ftp => {
                     "L'adresse hôte FTP (IPv4, IPv6 ou DNS) ne peut pas être vide.".to_string()
                 }
+                Protocol::Ssh => {
+                    "L'adresse hôte SSH (IPv4, IPv6 ou DNS) ne peut pas être vide.".to_string()
+                }
                 Protocol::AnyDesk => {
                     "L'identifiant ou alias AnyDesk ne peut pas être vide.".to_string()
                 }
@@ -198,6 +213,24 @@ impl ConnectionDraft {
                     && let Some(p) = initial_path
                 {
                     self.domain = p;
+                }
+            }
+            Protocol::Ssh => {
+                if self.port == 0 {
+                    return Err("Le port SSH doit être compris entre 1 et 65535.".to_string());
+                }
+                let (parsed_user, parsed_host, parsed_port) = parse_ssh_target(&self.host)?;
+                if parsed_host.contains(char::is_whitespace) {
+                    return Err("L'adresse d'hôte SSH ne doit pas contenir d'espaces.".to_string());
+                }
+                self.host = parsed_host;
+                if parsed_port != 22 && self.port == 22 {
+                    self.port = parsed_port;
+                }
+                if self.username.trim().is_empty()
+                    && let Some(u) = parsed_user
+                {
+                    self.username = u;
                 }
             }
             Protocol::AnyDesk | Protocol::RustDesk => {
@@ -285,6 +318,74 @@ pub fn parse_ftp_target(input: &str) -> Result<(String, u16, Option<String>), St
     }
 
     Ok((host_port.to_string(), 21, initial_path))
+}
+
+/// Analyse une cible SSH saisie (`ssh://utilisateur@hôte:port`, `utilisateur@hôte:port`, `[::1]:2222`, `srv.exemple.fr`)
+/// en extrayant `(utilisateur_éventuel, hôte, port)` avec port `22` par défaut.
+pub fn parse_ssh_target(input: &str) -> Result<(Option<String>, String, u16), String> {
+    let mut s = input.trim();
+    if s.len() >= 6 && s[..6].eq_ignore_ascii_case("ssh://") {
+        s = &s[6..];
+    }
+    s = s.trim_end_matches('/');
+
+    let (parsed_user, host_port) = if let Some((u, hp)) = s.split_once('@') {
+        let cu = u.trim();
+        (
+            if cu.is_empty() {
+                None
+            } else {
+                Some(cu.to_string())
+            },
+            hp.trim(),
+        )
+    } else {
+        (None, s)
+    };
+
+    if host_port.is_empty() {
+        return Err("L'adresse hôte SSH (IPv4, IPv6 ou DNS) ne peut pas être vide.".to_string());
+    }
+
+    if let Some(rest) = host_port.strip_prefix('[') {
+        let Some((ipv6, after)) = rest.split_once(']') else {
+            return Err("Crochet fermant ']' manquant dans l'adresse IPv6 SSH.".to_string());
+        };
+        if ipv6.is_empty() {
+            return Err("Adresse IPv6 SSH invalide.".to_string());
+        }
+        if after.is_empty() {
+            return Ok((parsed_user, ipv6.to_string(), 22));
+        }
+        if let Some(port_str) = after.strip_prefix(':') {
+            let port = port_str
+                .parse::<u16>()
+                .map_err(|_| format!("Port SSH invalide : '{port_str}'."))?;
+            if port == 0 {
+                return Err("Le port SSH doit être compris entre 1 et 65535.".to_string());
+            }
+            return Ok((parsed_user, ipv6.to_string(), port));
+        }
+        return Err("Format d'adresse IPv6 SSH invalide.".to_string());
+    }
+
+    if host_port.matches(':').count() == 1
+        && let Some((h, port_str)) = host_port.rsplit_once(':')
+    {
+        if h.trim().is_empty() {
+            return Err("L'adresse hôte SSH ne peut pas être vide.".to_string());
+        }
+        let port = port_str
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| format!("Port SSH invalide : '{port_str}'."))?;
+        if port == 0 {
+            return Err("Le port SSH doit être compris entre 1 et 65535.".to_string());
+        }
+        return Ok((parsed_user, h.trim().to_string(), port));
+    }
+
+    Ok((parsed_user, host_port.to_string(), 22))
 }
 
 /// Entrée d'historique des connexions récemment lancées.
@@ -769,5 +870,33 @@ mod tests {
         assert_eq!(draft.domain, "/public_html");
         assert_eq!(draft.protocol.as_str(), "ftp");
         assert_eq!(draft.protocol.badge_prefix(), "[FTP]");
+    }
+
+    #[test]
+    fn test_validate_connection_draft_ssh() {
+        let mut draft = ConnectionDraft {
+            folder_id: None,
+            name: "Serveur Debian Prod".to_string(),
+            protocol: Protocol::Ssh,
+            host: "ssh://admin@ssh.example.com:2222".to_string(),
+            port: 22,
+            username: String::new(),
+            domain: "~/.ssh/id_ed25519".to_string(),
+            description: "Terminal SSH".to_string(),
+            is_favorite: false,
+            is_priority: false,
+            save_password: true,
+            password: SecretString::new("S3cretSSH!".to_string()),
+            keep_existing_password: false,
+            dynamic_resolution: false,
+            redirect_clipboard: false,
+        };
+        draft.validate_and_normalize().expect("Validation SSH OK");
+        assert_eq!(draft.host, "ssh.example.com");
+        assert_eq!(draft.port, 2222);
+        assert_eq!(draft.username, "admin");
+        assert_eq!(draft.domain, "~/.ssh/id_ed25519");
+        assert_eq!(draft.protocol.as_str(), "ssh");
+        assert_eq!(draft.protocol.badge_prefix(), "[SSH]");
     }
 }

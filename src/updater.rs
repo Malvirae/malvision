@@ -1879,9 +1879,9 @@ mod tests {
         let current = current_semver()
             .expect("La version locale doit être dérivée sans erreur de CARGO_PKG_VERSION");
         assert_eq!(current.to_string(), CURRENT_VERSION);
-        assert_eq!(current.to_string(), "1.0.5");
-        assert_eq!(current, SemVer::new(1, 0, 5));
-        assert_eq!(current, SemVer::new(1, 0, 5));
+        assert_eq!(current.to_string(), "1.0.6");
+        assert_eq!(current, SemVer::new(1, 0, 6));
+        assert_eq!(current, SemVer::new(1, 0, 6));
         assert_eq!(SemVer::current().unwrap(), current);
     }
 
@@ -1949,42 +1949,8 @@ mod tests {
     fn test_startup_and_manual_comparison_simulation() {
         let local = current_semver().expect("Version locale valide");
 
-        // Simulation réponse GitHub distante égale à 1.0.5
+        // Simulation réponse GitHub distante égale à 1.0.6
         let remote_info_same = ReleaseInfo {
-            tag_name: "v1.0.5".to_string(),
-            name: "Malvision 1.0.5".to_string(),
-            version: SemVer::new(1, 0, 5),
-            body: String::new(),
-            html_url: String::new(),
-            exe_asset: None,
-            expected_exe_sha256: None,
-            sha256_sums_asset: None,
-        };
-        let is_upgrade_same = remote_info_same.version > local;
-        assert!(
-            !is_upgrade_same,
-            "1.0.5 distant == 1.0.5 local -> Doit indiquer à jour"
-        );
-
-        // Simulation réponse GitHub distante antérieure (ex: 1.0.4 alors qu'on est en 1.0.5)
-        let remote_info_old = ReleaseInfo {
-            tag_name: "v1.0.4".to_string(),
-            name: "Malvision 1.0.4".to_string(),
-            version: SemVer::new(1, 0, 4),
-            body: String::new(),
-            html_url: String::new(),
-            exe_asset: None,
-            expected_exe_sha256: None,
-            sha256_sums_asset: None,
-        };
-        let is_upgrade_old = remote_info_old.version > local;
-        assert!(
-            !is_upgrade_old,
-            "1.0.4 distant < 1.0.5 local -> Doit indiquer à jour"
-        );
-
-        // Simulation réponse GitHub distante postérieure (ex: 1.0.6)
-        let remote_info_new = ReleaseInfo {
             tag_name: "v1.0.6".to_string(),
             name: "Malvision 1.0.6".to_string(),
             version: SemVer::new(1, 0, 6),
@@ -1994,10 +1960,44 @@ mod tests {
             expected_exe_sha256: None,
             sha256_sums_asset: None,
         };
+        let is_upgrade_same = remote_info_same.version > local;
+        assert!(
+            !is_upgrade_same,
+            "1.0.6 distant == 1.0.6 local -> Doit indiquer à jour"
+        );
+
+        // Simulation réponse GitHub distante antérieure (ex: 1.0.5 alors qu'on est en 1.0.6)
+        let remote_info_old = ReleaseInfo {
+            tag_name: "v1.0.5".to_string(),
+            name: "Malvision 1.0.5".to_string(),
+            version: SemVer::new(1, 0, 5),
+            body: String::new(),
+            html_url: String::new(),
+            exe_asset: None,
+            expected_exe_sha256: None,
+            sha256_sums_asset: None,
+        };
+        let is_upgrade_old = remote_info_old.version > local;
+        assert!(
+            !is_upgrade_old,
+            "1.0.5 distant < 1.0.6 local -> Doit indiquer à jour"
+        );
+
+        // Simulation réponse GitHub distante postérieure (ex: 1.0.7)
+        let remote_info_new = ReleaseInfo {
+            tag_name: "v1.0.7".to_string(),
+            name: "Malvision 1.0.7".to_string(),
+            version: SemVer::new(1, 0, 7),
+            body: String::new(),
+            html_url: String::new(),
+            exe_asset: None,
+            expected_exe_sha256: None,
+            sha256_sums_asset: None,
+        };
         let is_upgrade_new = remote_info_new.version > local;
         assert!(
             is_upgrade_new,
-            "1.0.6 distant > 1.0.5 local -> Doit indiquer mise à jour disponible"
+            "1.0.7 distant > 1.0.6 local -> Doit indiquer mise à jour disponible"
         );
     }
 
