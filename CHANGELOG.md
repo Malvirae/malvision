@@ -2,6 +2,18 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
+## [1.0.7] — Gestionnaire d'identifiants partagés (2026-11-18)
+
+### Ajouté & Amélioré
+- **Système d'identifiants partagés réutilisables (`src/models.rs`, `src/storage.rs`, `src/ui.rs`)** :
+  - Nouvelle table SQLite `credentials` et colonne `connections.credential_id` (`ON DELETE SET NULL`) introduites via la migration automatique de schéma **v6 -> v7**.
+  - Chiffrement des mots de passe partagés via **Windows DPAPI** (`CredentialItem`, `CredentialDraft`, `Storage::resolve_connection_credentials()`), avec résolution transparente au lancement pour tous les protocoles (`RDP`, `FTP`, `SSH`, `AnyDesk`, `RustDesk`) tout en conservant le répertoire initial FTP et le chemin de clé privée SSH propres à chaque connexion.
+  - Nouveau bouton **« Identifiants »** dans le pied de la barre latérale donnant accès au **Gestionnaire d'identifiants partagés** (création, modification, suppression avec confirmation, compteur de connexions liées).
+  - Ajout du sélecteur **« Identifiant partagé »** dans le formulaire de connexion (`run_connection_form_dialog`), désactivant automatiquement les champs de saisie manuelle lorsqu'un identifiant partagé est sélectionné, et affichage de l'identifiant résolu sur les cartes d'accueil.
+
+### Testé
+- Suite étendue à **111 tests unitaires et d'intégration (100 % passants)**, `cargo fmt --check` et `cargo clippy --all-targets -- -D warnings` sans avertissement.
+
 ## [1.0.6] — Terminal SSH intégré & Améliorations FTP (2026-11-16)
 
 ### Ajouté & Amélioré

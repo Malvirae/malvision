@@ -5,7 +5,9 @@
 use crate::ftp::{
     FTP_EVT_AUTH_FAILED, WM_FTP_EVENT, WM_FTP_REQUEST_CREDENTIALS, unpack_ftp_event_wparam,
 };
-use crate::models::{ConnectionDraft, ConnectionItem, Folder, Protocol};
+use crate::models::{
+    ConnectionDraft, ConnectionItem, CredentialDraft, CredentialItem, Folder, Protocol,
+};
 use crate::rdp::{WM_RDP_EVENT, unpack_rdp_event_wparam};
 use crate::security::SecretString;
 use crate::sessions::{SessionManager, SessionStatus};
@@ -230,6 +232,7 @@ const DEFERRED_NEW_FOLDER: usize = 3;
 const DEFERRED_EDIT_CONNECTION: usize = 4;
 const DEFERRED_OPEN_SETTINGS: usize = 5;
 const DEFERRED_APPLY_UPDATE_AND_EXIT: usize = 6;
+const DEFERRED_OPEN_CREDENTIALS: usize = 7;
 
 const WM_APP_UPDATE_PROGRESS: u32 = WM_APP + 110;
 
@@ -346,6 +349,7 @@ enum InteractiveZone {
     BtnNewFolder,
     BtnExpandAll,
     BtnCollapseAll,
+    BtnCredentials,
     BtnSettings,
     TabSelect(u32),
     TabClose(u32),
@@ -2382,12 +2386,65 @@ impl AppWindowState {
             let _ = FillRect(hdc, &sidebar_footer_rc, self.palette.brush_bg_sidebar);
             draw_horizontal_line(hdc, 0, sidebar_w, footer_top, col_border());
 
-            let rc_btn_settings = RECT {
-                left: 12,
+            let footer_gap = 8;
+            let footer_left = 12;
+            let footer_right = (sidebar_w - 12).max(footer_left + 140);
+            let half_w = ((footer_right - footer_left - footer_gap) / 2).max(60);
+            let rc_btn_creds = RECT {
+                left: footer_left,
                 top: footer_top + 7,
-                right: (sidebar_w - 12).max(92),
+                right: footer_left + half_w,
                 bottom: status_top - 7,
             };
+            let rc_btn_settings = RECT {
+                left: rc_btn_creds.right + footer_gap,
+                top: footer_top + 7,
+                right: footer_right,
+                bottom: status_top - 7,
+            };
+            let is_creds_hover = self.hovered_zone == Some(InteractiveZone::BtnCredentials);
+            draw_rounded_box(
+                hdc,
+                rc_btn_creds,
+                if is_creds_hover {
+                    col_bg_hover()
+                } else {
+                    col_bg_surface()
+                },
+                if is_creds_hover {
+                    col_accent()
+                } else {
+                    col_border()
+                },
+            );
+            let creds_cy = (rc_btn_creds.top + rc_btn_creds.bottom) / 2;
+            draw_icon_key(
+                hdc,
+                rc_btn_creds.left + 15,
+                creds_cy,
+                if is_creds_hover {
+                    col_accent_hover()
+                } else {
+                    col_text_muted()
+                },
+            );
+            let _ = SelectObject(hdc, self.palette.font_ui.into());
+            let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+            draw_text_line(
+                hdc,
+                "Identifiants",
+                RECT {
+                    left: rc_btn_creds.left + 29,
+                    top: rc_btn_creds.top,
+                    right: rc_btn_creds.right - 6,
+                    bottom: rc_btn_creds.bottom,
+                },
+            );
+            self.hit_zones.push(HitZone {
+                rect: rc_btn_creds,
+                zone: InteractiveZone::BtnCredentials,
+            });
+
             let is_settings_hover = self.hovered_zone == Some(InteractiveZone::BtnSettings);
             draw_rounded_box(
                 hdc,
@@ -2406,7 +2463,7 @@ impl AppWindowState {
             let gear_cy = (rc_btn_settings.top + rc_btn_settings.bottom) / 2;
             draw_icon_gear(
                 hdc,
-                rc_btn_settings.left + 18,
+                rc_btn_settings.left + 15,
                 gear_cy,
                 if is_settings_hover {
                     col_accent_hover()
@@ -2420,9 +2477,9 @@ impl AppWindowState {
                 hdc,
                 "Paramètres",
                 RECT {
-                    left: rc_btn_settings.left + 34,
+                    left: rc_btn_settings.left + 29,
                     top: rc_btn_settings.top,
-                    right: rc_btn_settings.right - 10,
+                    right: rc_btn_settings.right - 6,
                     bottom: rc_btn_settings.bottom,
                 },
             );
@@ -3061,31 +3118,42 @@ impl AppWindowState {
                     // Sous-texte : hôte:port + utilisateur
                     let _ = SelectObject(hdc, self.palette.font_small.into());
                     let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
+                    let shared_cred = conn
+                        .credential_id
+                        .and_then(|cid| self.storage.get_credential(cid).ok().flatten());
+                    let eff_user = shared_cred
+                        .as_ref()
+                        .map(|c| c.username.as_str())
+                        .unwrap_or(conn.username.as_str());
+                    let eff_rdp_domain = shared_cred
+                        .as_ref()
+                        .map(|c| c.domain.as_str())
+                        .unwrap_or(conn.domain.as_str());
                     let user_info = if matches!(conn.protocol, Protocol::Ftp | Protocol::Ssh) {
-                        if conn.username.is_empty() && conn.domain.is_empty() {
+                        if eff_user.is_empty() && conn.domain.is_empty() {
                             conn.endpoint_label()
                         } else if conn.domain.is_empty() {
-                            format!("{}  •  {}", conn.endpoint_label(), conn.username)
-                        } else if conn.username.is_empty() {
+                            format!("{}  •  {}", conn.endpoint_label(), eff_user)
+                        } else if eff_user.is_empty() {
                             format!("{}  •  {}", conn.endpoint_label(), conn.domain)
                         } else {
                             format!(
                                 "{}  •  {}  •  {}",
                                 conn.endpoint_label(),
-                                conn.username,
+                                eff_user,
                                 conn.domain
                             )
                         }
-                    } else if conn.username.is_empty() {
+                    } else if eff_user.is_empty() {
                         conn.endpoint_label()
-                    } else if conn.domain.is_empty() {
-                        format!("{}  •  {}", conn.endpoint_label(), conn.username)
+                    } else if eff_rdp_domain.is_empty() {
+                        format!("{}  •  {}", conn.endpoint_label(), eff_user)
                     } else {
                         format!(
                             "{}  •  {}\\{}",
                             conn.endpoint_label(),
-                            conn.domain,
-                            conn.username
+                            eff_rdp_domain,
+                            eff_user
                         )
                     };
                     draw_text_line(
@@ -3889,6 +3957,30 @@ unsafe fn draw_icon_gear(hdc: HDC, cx: i32, cy: i32, color: u32) {
     }
 }
 
+/// Dessine une icône clé vectorielle sobre centrée en `(cx, cy)`.
+unsafe fn draw_icon_key(hdc: HDC, cx: i32, cy: i32, color: u32) {
+    unsafe {
+        let pen = CreatePen(PS_SOLID, 2, COLORREF(color));
+        let brush = GetStockObject(NULL_BRUSH);
+        let old_p = SelectObject(hdc, pen.into());
+        let old_b = SelectObject(hdc, brush);
+
+        // Anneau de la clé à gauche
+        let _ = RoundRect(hdc, cx - 7, cy - 4, cx, cy + 4, 7, 7);
+        // Tige + dents à droite
+        let _ = MoveToEx(hdc, cx, cy, None);
+        let _ = LineTo(hdc, cx + 7, cy);
+        let _ = MoveToEx(hdc, cx + 4, cy, None);
+        let _ = LineTo(hdc, cx + 4, cy + 4);
+        let _ = MoveToEx(hdc, cx + 7, cy, None);
+        let _ = LineTo(hdc, cx + 7, cy + 3);
+
+        let _ = SelectObject(hdc, old_b);
+        let _ = SelectObject(hdc, old_p);
+        let _ = DeleteObject(pen.into());
+    }
+}
+
 impl AppWindowState {
     // =========================================================================
     // INTERACTIONS SOURIS, ONGLETS, SÉPARATEUR, MENU CONTEXTUEL & DRAG-AND-DROP
@@ -4044,6 +4136,14 @@ impl AppWindowState {
                 InteractiveZone::BtnCollapseAll => {
                     self.collapse_all_folders();
                 }
+                InteractiveZone::BtnCredentials => unsafe {
+                    let _ = PostMessageW(
+                        Some(self.hwnd),
+                        WM_DEFERRED_ACTION,
+                        WPARAM(DEFERRED_OPEN_CREDENTIALS),
+                        LPARAM(0),
+                    );
+                },
                 InteractiveZone::BtnSettings => unsafe {
                     let _ = PostMessageW(
                         Some(self.hwnd),
@@ -4294,32 +4394,30 @@ impl AppWindowState {
 
         let _ = self.storage.record_recent_connection(conn.id);
 
-        match conn.protocol {
-            Protocol::Rdp => {
-                let decrypted_pwd = if conn.has_saved_password {
-                    match self.storage.load_decrypted_password(conn.id) {
-                        Ok(secret_opt) => secret_opt,
-                        Err(err) => {
-                            show_warning_dialog(
-                                self.hwnd,
-                                "Mot de passe DPAPI non déchiffrable",
-                                &format!(
-                                    "{err}\n\nLa session RDP va démarrer et Windows vous demandera vos identifiants via NLA/CredSSP."
-                                ),
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
+        let (eff_user, eff_domain, eff_pwd) =
+            match self.storage.resolve_connection_credentials(&conn) {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    show_warning_dialog(
+                        self.hwnd,
+                        "Mot de passe DPAPI non déchiffrable",
+                        &format!("{err}\n\nLa session va démarrer sans mot de passe pré-rempli."),
+                    );
+                    (conn.username.clone(), conn.domain.clone(), None)
+                }
+            };
+        let mut eff_conn = conn.clone();
+        eff_conn.username = eff_user;
+        eff_conn.domain = eff_domain;
 
+        match eff_conn.protocol {
+            Protocol::Rdp => {
                 let viewport = self.rdp_viewport_rect();
                 match self.sessions.open_rdp_session(
                     self.hwnd,
                     viewport,
-                    &conn,
-                    decrypted_pwd,
+                    &eff_conn,
+                    eff_pwd,
                     self.settings.rdp_keyboard_hook_mode,
                 ) {
                     Ok(_sid) => {
@@ -4329,7 +4427,7 @@ impl AppWindowState {
                     Err(err) => {
                         let msg = format!(
                             "Impossible de démarrer la session RDP vers {} : {err}",
-                            conn.endpoint_label()
+                            eff_conn.endpoint_label()
                         );
                         self.status_override = Some(msg.clone());
                         self.invalidate_canvas();
@@ -4338,15 +4436,10 @@ impl AppWindowState {
                 }
             }
             Protocol::AnyDesk => {
-                let saved_pwd = if conn.has_saved_password {
-                    self.storage.load_decrypted_password(conn.id).ok().flatten()
-                } else {
-                    None
-                };
-                let pwd_str = saved_pwd.as_ref().map(|s| s.as_str());
+                let pwd_str = eff_pwd.as_ref().map(|s| s.as_str());
                 match crate::external_apps::launch_anydesk_connection(
                     &self.settings.anydesk_path,
-                    &conn.host,
+                    &eff_conn.host,
                     pwd_str,
                 ) {
                     Ok(info_msg) => {
@@ -4356,7 +4449,7 @@ impl AppWindowState {
                     Err(err) => {
                         let msg = format!(
                             "Impossible de lancer AnyDesk pour « {} » : {err}",
-                            conn.name
+                            eff_conn.name
                         );
                         self.status_override = Some(msg.clone());
                         self.invalidate_canvas();
@@ -4365,27 +4458,10 @@ impl AppWindowState {
                 }
             }
             Protocol::RustDesk => {
-                let saved_pwd = if conn.has_saved_password {
-                    match self.storage.load_decrypted_password(conn.id) {
-                        Ok(secret_opt) => secret_opt,
-                        Err(err) => {
-                            show_warning_dialog(
-                                self.hwnd,
-                                "Mot de passe DPAPI non déchiffrable",
-                                &format!(
-                                    "{err}\n\nRustDesk va démarrer et vous demandera le mot de passe manuellement."
-                                ),
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-                let pwd_str = saved_pwd.as_ref().map(|s| s.as_str());
+                let pwd_str = eff_pwd.as_ref().map(|s| s.as_str());
                 match crate::external_apps::launch_rustdesk_connection(
                     &self.settings.rustdesk_path,
-                    &conn.host,
+                    &eff_conn.host,
                     pwd_str,
                 ) {
                     Ok(info_msg) => {
@@ -4395,7 +4471,7 @@ impl AppWindowState {
                     Err(err) => {
                         let msg = format!(
                             "Impossible de lancer RustDesk pour « {} » : {err}",
-                            conn.name
+                            eff_conn.name
                         );
                         self.status_override = Some(msg.clone());
                         self.invalidate_canvas();
@@ -4404,42 +4480,25 @@ impl AppWindowState {
                 }
             }
             Protocol::Ftp => {
-                let saved_pwd = if conn.has_saved_password {
-                    match self.storage.load_decrypted_password(conn.id) {
-                        Ok(secret_opt) => secret_opt,
-                        Err(err) => {
-                            show_warning_dialog(
-                                self.hwnd,
-                                "Mot de passe DPAPI non déchiffrable",
-                                &format!(
-                                    "{err}\n\nVeuillez saisir vos identifiants FTP pour cette connexion."
-                                ),
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                let (ftp_user, ftp_pwd) = if let Some(secret) = saved_pwd {
-                    if !conn.username.trim().is_empty() {
-                        (conn.username.clone(), secret)
+                let (ftp_user, ftp_pwd) = if let Some(secret) = eff_pwd {
+                    if !eff_conn.username.trim().is_empty() {
+                        (eff_conn.username.clone(), secret)
                     } else if let Some((u, p, save)) = run_ftp_credentials_dialog(
                         self.hwnd,
-                        &format!("Connexion FTP — {}", conn.name),
-                        &conn.endpoint_label(),
-                        &conn.username,
+                        &format!("Connexion FTP — {}", eff_conn.name),
+                        &eff_conn.endpoint_label(),
+                        &eff_conn.username,
                         true,
                         true,
                         &self.palette,
                     ) {
-                        if save {
+                        if save && eff_conn.credential_id.is_none() {
                             let pwd_copy = SecretString::new(p.as_str().to_string());
-                            if let Err(err) = self
-                                .storage
-                                .update_connection_credentials(conn.id, &u, pwd_copy)
-                            {
+                            if let Err(err) = self.storage.update_connection_credentials(
+                                eff_conn.id,
+                                &u,
+                                pwd_copy,
+                            ) {
                                 show_warning_dialog(
                                     self.hwnd,
                                     "Enregistrement DPAPI impossible",
@@ -4452,12 +4511,12 @@ impl AppWindowState {
                         (u, p)
                     } else {
                         self.status_override =
-                            Some(format!("Connexion FTP « {} » annulée.", conn.name));
+                            Some(format!("Connexion FTP « {} » annulée.", eff_conn.name));
                         self.invalidate_canvas();
                         return;
                     }
-                } else if conn.username.trim().eq_ignore_ascii_case("anonymous")
-                    && !conn.save_password
+                } else if eff_conn.username.trim().eq_ignore_ascii_case("anonymous")
+                    && !eff_conn.save_password
                 {
                     (
                         "anonymous".to_string(),
@@ -4465,18 +4524,18 @@ impl AppWindowState {
                     )
                 } else if let Some((u, p, save)) = run_ftp_credentials_dialog(
                     self.hwnd,
-                    &format!("Connexion FTP — {}", conn.name),
-                    &conn.endpoint_label(),
-                    &conn.username,
+                    &format!("Connexion FTP — {}", eff_conn.name),
+                    &eff_conn.endpoint_label(),
+                    &eff_conn.username,
                     true,
-                    conn.save_password,
+                    eff_conn.save_password,
                     &self.palette,
                 ) {
-                    if save {
+                    if save && eff_conn.credential_id.is_none() {
                         let pwd_copy = SecretString::new(p.as_str().to_string());
-                        if let Err(err) = self
-                            .storage
-                            .update_connection_credentials(conn.id, &u, pwd_copy)
+                        if let Err(err) =
+                            self.storage
+                                .update_connection_credentials(eff_conn.id, &u, pwd_copy)
                         {
                             show_warning_dialog(self.hwnd, "Enregistrement DPAPI impossible", &err);
                         } else {
@@ -4486,7 +4545,7 @@ impl AppWindowState {
                     (u, p)
                 } else {
                     self.status_override =
-                        Some(format!("Connexion FTP « {} » annulée.", conn.name));
+                        Some(format!("Connexion FTP « {} » annulée.", eff_conn.name));
                     self.invalidate_canvas();
                     return;
                 };
@@ -4494,7 +4553,7 @@ impl AppWindowState {
                 let viewport = self.rdp_viewport_rect();
                 match self
                     .sessions
-                    .open_ftp_session(self.hwnd, viewport, &conn, ftp_user, ftp_pwd)
+                    .open_ftp_session(self.hwnd, viewport, &eff_conn, ftp_user, ftp_pwd)
                 {
                     Ok(_sid) => {
                         self.status_override = None;
@@ -4503,7 +4562,7 @@ impl AppWindowState {
                     Err(err) => {
                         let msg = format!(
                             "Impossible d'ouvrir le client FTP pour {} : {err}",
-                            conn.endpoint_label()
+                            eff_conn.endpoint_label()
                         );
                         self.status_override = Some(msg.clone());
                         self.invalidate_canvas();
@@ -4512,19 +4571,11 @@ impl AppWindowState {
                 }
             }
             Protocol::Ssh => {
-                let saved_pwd = if conn.has_saved_password {
-                    self.storage
-                        .load_decrypted_password(conn.id)
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| SecretString::new(String::new()))
-                } else {
-                    SecretString::new(String::new())
-                };
+                let saved_pwd = eff_pwd.unwrap_or_else(|| SecretString::new(String::new()));
                 let viewport = self.rdp_viewport_rect();
                 match self
                     .sessions
-                    .open_ssh_session(self.hwnd, viewport, &conn, saved_pwd)
+                    .open_ssh_session(self.hwnd, viewport, &eff_conn, saved_pwd)
                 {
                     Ok(_sid) => {
                         self.status_override = None;
@@ -5093,12 +5144,14 @@ impl AppWindowState {
         let existing =
             edit_connection_id.and_then(|id| self.storage.get_connection(id).ok().flatten());
         let folders = self.storage.list_folders().unwrap_or_default();
+        let credentials = self.storage.list_credentials().unwrap_or_default();
 
         if let Some(draft) = run_connection_form_dialog(
             self.hwnd,
             existing.as_ref(),
             default_folder_id,
             &folders,
+            &credentials,
             self.settings.rdp_default_dynamic_resolution,
             self.settings.rdp_default_clipboard,
             &self.palette,
@@ -5154,6 +5207,12 @@ impl AppWindowState {
                 }
             }
         });
+    }
+
+    pub fn open_credentials_manager_dialog(&mut self) {
+        run_credentials_manager_dialog(self.hwnd, &mut self.storage, &self.palette);
+        self.rebuild_treeview();
+        self.invalidate_canvas();
     }
 
     pub fn open_settings_dialog(&mut self) {
@@ -5215,6 +5274,7 @@ const IDC_DLG_CLIPBOARD: usize = 4012;
 const IDC_DLG_DESC: usize = 4013;
 const IDC_DLG_OK: usize = 4014;
 const IDC_DLG_CANCEL: usize = 4015;
+const IDC_DLG_CREDENTIAL: usize = 4017;
 
 /// Ferme proprement un dialogue modal : réactive la fenêtre propriétaire, lui redonne le focus
 /// et détruit immédiatement le `HWND` du dialogue pour que `IsWindow(Some(dlg_hwnd))` devienne `false`.
@@ -6288,10 +6348,12 @@ struct ConnectionDialogState {
     divider_y2: i32,
     security_banner_rc: RECT,
     folder_options: Vec<Option<i64>>,
+    credential_options: Vec<Option<i64>>,
     has_existing_pwd: bool,
     ed_name: HWND,
     cb_proto: HWND,
     cb_folder: HWND,
+    cb_credential: HWND,
     ed_host: HWND,
     ed_port: HWND,
     ed_user: HWND,
@@ -6417,8 +6479,41 @@ fn update_dialog_protocol_layout(state: &mut ConnectionDialogState, hwnd: HWND, 
             }
         }
 
+        update_dialog_credential_state(state, hwnd);
         let _ = InvalidateRect(Some(hwnd), None, true);
         let _ = UpdateWindow(hwnd);
+    }
+}
+
+/// Active ou désactive les champs utilisateur / mot de passe selon l'identifiant partagé choisi.
+fn update_dialog_credential_state(state: &ConnectionDialogState, hwnd: HWND) {
+    unsafe {
+        let cred_idx = SendMessageW(
+            state.cb_credential,
+            CB_GETCURSEL,
+            Some(WPARAM(0)),
+            Some(LPARAM(0)),
+        )
+        .0;
+        let using_shared = cred_idx > 0
+            && (cred_idx as usize) < state.credential_options.len()
+            && state.credential_options[cred_idx as usize].is_some();
+
+        let _ = EnableWindow(state.ed_user, !using_shared);
+        let _ = EnableWindow(
+            state.ed_domain,
+            !using_shared || state.current_protocol != Protocol::Rdp,
+        );
+        let _ = EnableWindow(state.chk_save_pass, !using_shared);
+        let save_checked = SendMessageW(
+            state.chk_save_pass,
+            BM_GETCHECK,
+            Some(WPARAM(0)),
+            Some(LPARAM(0)),
+        )
+        .0 != 0;
+        let _ = EnableWindow(state.ed_pass, !using_shared && save_checked);
+        let _ = InvalidateRect(Some(hwnd), None, false);
     }
 }
 
@@ -6697,6 +6792,8 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                             set_window_text(state.ed_port, "3389");
                         }
                         update_dialog_protocol_layout(state, hwnd, proto);
+                    } else if id == IDC_DLG_CREDENTIAL && code == 1 {
+                        update_dialog_credential_state(state, hwnd);
                     } else if id == IDC_DLG_SAVE_PASS {
                         let checked = SendMessageW(
                             state.chk_save_pass,
@@ -6735,6 +6832,20 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
                             && (folder_idx as usize) < state.folder_options.len()
                         {
                             state.folder_options[folder_idx as usize]
+                        } else {
+                            None
+                        };
+                        let cred_idx = SendMessageW(
+                            state.cb_credential,
+                            CB_GETCURSEL,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(0)),
+                        )
+                        .0;
+                        let credential_id = if cred_idx >= 0
+                            && (cred_idx as usize) < state.credential_options.len()
+                        {
+                            state.credential_options[cred_idx as usize]
                         } else {
                             None
                         };
@@ -6811,6 +6922,7 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
 
                         let mut draft = ConnectionDraft {
                             folder_id,
+                            credential_id,
                             name: get_window_text(state.ed_name),
                             protocol,
                             host: get_window_text(state.ed_host),
@@ -6864,11 +6976,13 @@ unsafe extern "system" fn conn_dlg_wnd_proc(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_connection_form_dialog(
     owner: HWND,
     existing: Option<&ConnectionItem>,
     default_folder_id: Option<i64>,
     folders: &[Folder],
+    credentials: &[CredentialItem],
     default_dyn_res: bool,
     default_clipboard: bool,
     palette: &GdiPalette,
@@ -6895,7 +7009,7 @@ fn run_connection_form_dialog(
             DpiMetrics::for_window(owner)
         };
         let client_w = dpi.scale(680);
-        let client_h = dpi.scale(676);
+        let client_h = dpi.scale(718);
         let dlg_style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
         let (win_w, win_h) = calc_dialog_window_size(dlg_style, client_w, client_h);
 
@@ -6994,14 +7108,14 @@ fn run_connection_form_dialog(
             right: field_right,
             bottom: y_host + field_h,
         };
-        let y_pass = dpi.scale(336);
+        let y_pass = dpi.scale(378);
         let password_label_rect = RECT {
             left: pad_x,
             top: y_pass,
             right: field_left - dpi.scale(8),
             bottom: y_pass + field_h,
         };
-        let y_chk3 = dpi.scale(432);
+        let y_chk3 = dpi.scale(474);
         let notice_rect = RECT {
             left: field_left,
             top: y_chk3,
@@ -7057,9 +7171,9 @@ fn run_connection_form_dialog(
             },
             domain_label_rect: RECT {
                 left: pad_x,
-                top: dpi.scale(294),
+                top: dpi.scale(336),
                 right: field_left - dpi.scale(8),
-                bottom: dpi.scale(294) + field_h,
+                bottom: dpi.scale(336) + field_h,
             },
             notice_text: match initial_proto {
                 Protocol::Rdp => None,
@@ -7083,18 +7197,20 @@ fn run_connection_form_dialog(
             labels: Vec::new(),
             edit_boxes: Vec::new(),
             divider_y1: dpi.scale(70),
-            divider_y2: dpi.scale(604),
+            divider_y2: dpi.scale(646),
             security_banner_rc: RECT {
                 left: pad_x,
-                top: dpi.scale(554),
+                top: dpi.scale(596),
                 right: field_right,
-                bottom: dpi.scale(590),
+                bottom: dpi.scale(632),
             },
             folder_options: Vec::new(),
+            credential_options: Vec::new(),
             has_existing_pwd: existing.is_some_and(|e| e.has_saved_password),
             ed_name: HWND::default(),
             cb_proto: HWND::default(),
             cb_folder: HWND::default(),
+            cb_credential: HWND::default(),
             ed_host: HWND::default(),
             ed_port: HWND::default(),
             ed_user: HWND::default(),
@@ -7293,8 +7409,66 @@ fn run_connection_form_dialog(
             rdp_only: true,
         });
 
+        // 4b. Identifiant partagé
+        let y_cred = dpi.scale(252);
+        add_label(
+            &mut dlg_state.labels,
+            "Identifiant partagé :",
+            y_cred,
+            field_h,
+            false,
+        );
+        let rc_cred = RECT {
+            left: field_left,
+            top: y_cred,
+            right: field_right,
+            bottom: y_cred + field_h,
+        };
+        let cb_credential = create_dark_combobox(
+            hwnd,
+            hinstance.into(),
+            rc_cred,
+            dpi.scale(240),
+            IDC_DLG_CREDENTIAL,
+            palette.font_ui,
+            dpi,
+        );
+        let mut credential_options: Vec<Option<i64>> = Vec::with_capacity(credentials.len() + 1);
+        credential_options.push(None);
+        let manual_lbl = w!("(Saisie manuelle / propre à cette connexion)");
+        let _ = SendMessageW(
+            cb_credential,
+            CB_ADDSTRING,
+            Some(WPARAM(0)),
+            Some(LPARAM(manual_lbl.as_ptr() as isize)),
+        );
+        let target_cred = existing.and_then(|e| e.credential_id);
+        let mut selected_cred_idx: usize = 0;
+        for cred in credentials {
+            if Some(cred.id) == target_cred {
+                selected_cred_idx = credential_options.len();
+            }
+            credential_options.push(Some(cred.id));
+            let label = format!("{}  ({})", cred.name, cred.account_label());
+            let mut w_lbl: Vec<u16> = label.encode_utf16().collect();
+            w_lbl.push(0);
+            let _ = SendMessageW(
+                cb_credential,
+                CB_ADDSTRING,
+                Some(WPARAM(0)),
+                Some(LPARAM(w_lbl.as_ptr() as isize)),
+            );
+        }
+        let _ = SendMessageW(
+            cb_credential,
+            CB_SETCURSEL,
+            Some(WPARAM(selected_cred_idx)),
+            Some(LPARAM(0)),
+        );
+        dlg_state.credential_options = credential_options;
+
         // 5. Utilisateur
-        let y_user = dpi.scale(252);
+        let y_user = dpi.scale(294);
         add_label(
             &mut dlg_state.labels,
             "Nom d'utilisateur :",
@@ -7324,7 +7498,7 @@ fn run_connection_form_dialog(
         });
 
         // 6. Domaine / Dossier initial FTP (libellé géré dynamiquement par WM_PAINT)
-        let y_dom = dpi.scale(294);
+        let y_dom = dpi.scale(336);
         let rc_dom = RECT {
             left: field_left,
             top: y_dom,
@@ -7370,11 +7544,11 @@ fn run_connection_form_dialog(
 
         // 8. Cases à cocher larges (434 px à 96 DPI -> aucune troncature)
         let chk_h = dpi.scale(24);
-        let y_chk1 = dpi.scale(372);
-        let y_chk2 = dpi.scale(398);
-        let y_chk_prio = dpi.scale(424);
-        let y_chk3 = dpi.scale(450);
-        let y_chk4 = dpi.scale(476);
+        let y_chk1 = dpi.scale(414);
+        let y_chk2 = dpi.scale(440);
+        let y_chk_prio = dpi.scale(466);
+        let y_chk3 = dpi.scale(492);
+        let y_chk4 = dpi.scale(518);
 
         dlg_state.labels.push(ConnDialogLabel {
             text: "Options de session :".to_string(),
@@ -7456,7 +7630,7 @@ fn run_connection_form_dialog(
         );
 
         // 9. Description
-        let y_desc = dpi.scale(508);
+        let y_desc = dpi.scale(550);
         add_label(
             &mut dlg_state.labels,
             "Description :",
@@ -7488,7 +7662,7 @@ fn run_connection_form_dialog(
         // 10. Boutons d'action Enregistrer / Annuler
         let btn_w = dpi.scale(130);
         let btn_h = dpi.scale(36);
-        let btn_y = dpi.scale(620);
+        let btn_y = dpi.scale(662);
         let btn_gap = dpi.scale(12);
         let rc_cancel = RECT {
             left: field_right - btn_w,
@@ -7523,6 +7697,7 @@ fn run_connection_form_dialog(
         dlg_state.ed_name = ed_name;
         dlg_state.cb_proto = cb_proto;
         dlg_state.cb_folder = cb_folder;
+        dlg_state.cb_credential = cb_credential;
         dlg_state.ed_host = ed_host;
         dlg_state.ed_port = ed_port;
         dlg_state.ed_user = ed_user;
@@ -7618,6 +7793,7 @@ fn run_connection_form_dialog(
             cb_proto,
             cb_folder,
             ed_host,
+            cb_credential,
             ed_port,
             ed_user,
             ed_domain,
@@ -7640,6 +7816,879 @@ fn run_connection_form_dialog(
         run_modal_loop(owner, hwnd, &tab_order);
 
         dlg_state.result.take()
+    }
+}
+
+const IDC_CRED_LIST: usize = 4701;
+const IDC_CRED_NEW: usize = 4702;
+const IDC_CRED_EDIT: usize = 4703;
+const IDC_CRED_DELETE: usize = 4704;
+const IDC_CRED_CLOSE: usize = 4705;
+
+const IDC_CRED_FORM_NAME: usize = 4711;
+const IDC_CRED_FORM_USER: usize = 4712;
+const IDC_CRED_FORM_DOMAIN: usize = 4713;
+const IDC_CRED_FORM_PASS: usize = 4714;
+const IDC_CRED_FORM_DESC: usize = 4715;
+const IDC_CRED_FORM_OK: usize = 4716;
+const IDC_CRED_FORM_CANCEL: usize = 4717;
+
+struct CredentialsManagerState<'a> {
+    owner: HWND,
+    dpi: DpiMetrics,
+    font_bold: HFONT,
+    font_subtitle: HFONT,
+    brush_bg: HBRUSH,
+    brush_input: HBRUSH,
+    palette: &'a GdiPalette,
+    storage: &'a mut Storage,
+    items: Vec<CredentialItem>,
+    lb_creds: HWND,
+}
+
+fn refresh_credentials_listbox(state: &mut CredentialsManagerState<'_>) {
+    unsafe {
+        let _ = SendMessageW(state.lb_creds, 0x0184, Some(WPARAM(0)), Some(LPARAM(0))); // LB_RESETCONTENT
+        state.items = state.storage.list_credentials().unwrap_or_default();
+        for item in &state.items {
+            let used_count = state
+                .storage
+                .count_connections_using_credential(item.id)
+                .unwrap_or(0);
+            let pwd_badge = if item.has_saved_password {
+                "DPAPI"
+            } else {
+                "Sans mot de passe"
+            };
+            let line = format!(
+                "{}  —  {}  •  {}  ({} connexion{})",
+                item.name,
+                item.account_label(),
+                pwd_badge,
+                used_count,
+                if used_count > 1 { "s" } else { "" }
+            );
+            let mut w_line: Vec<u16> = line.encode_utf16().collect();
+            w_line.push(0);
+            let _ = SendMessageW(
+                state.lb_creds,
+                0x0180, // LB_ADDSTRING
+                Some(WPARAM(0)),
+                Some(LPARAM(w_line.as_ptr() as isize)),
+            );
+        }
+        if !state.items.is_empty() {
+            let _ = SendMessageW(state.lb_creds, 0x0186, Some(WPARAM(0)), Some(LPARAM(0))); // LB_SETCURSEL
+        }
+    }
+}
+
+fn selected_credential_from_listbox<'a>(
+    state: &'a CredentialsManagerState<'_>,
+) -> Option<&'a CredentialItem> {
+    unsafe {
+        let idx = SendMessageW(state.lb_creds, 0x0188, Some(WPARAM(0)), Some(LPARAM(0))).0; // LB_GETCURSEL
+        if idx >= 0 && (idx as usize) < state.items.len() {
+            Some(&state.items[idx as usize])
+        } else {
+            None
+        }
+    }
+}
+
+unsafe extern "system" fn cred_mgr_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_ERASEBKGND => LRESULT(1),
+            WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+                let ptr =
+                    GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const CredentialsManagerState<'_>;
+                if !ptr.is_null() {
+                    let hdc = HDC(wparam.0 as *mut _);
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_sidebar()));
+                    return LRESULT((*ptr).brush_bg.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_CTLCOLORLISTBOX => {
+                let ptr =
+                    GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const CredentialsManagerState<'_>;
+                if !ptr.is_null() {
+                    let hdc = HDC(wparam.0 as *mut _);
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_input()));
+                    return LRESULT((*ptr).brush_input.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_PAINT => {
+                let mut ps = PAINTSTRUCT::default();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                let ptr =
+                    GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const CredentialsManagerState<'_>;
+                if !ptr.is_null() {
+                    let st = &*ptr;
+                    let mut rc = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut rc);
+                    let w = (rc.right - rc.left).max(1);
+                    let h = (rc.bottom - rc.top).max(1);
+                    let mem_dc = CreateCompatibleDC(Some(hdc));
+                    let mem_bmp = CreateCompatibleBitmap(hdc, w, h);
+                    let old_bmp = SelectObject(mem_dc, mem_bmp.into());
+
+                    let _ = FillRect(mem_dc, &rc, st.brush_bg);
+                    let pad_x = st.dpi.scale(24);
+                    let _ = SetBkMode(mem_dc, TRANSPARENT);
+                    let _ = SelectObject(mem_dc, st.font_bold.into());
+                    let _ = SetTextColor(mem_dc, COLORREF(col_text_primary()));
+                    draw_text_line(
+                        mem_dc,
+                        "Gestionnaire d'identifiants partagés",
+                        RECT {
+                            left: pad_x,
+                            top: st.dpi.scale(16),
+                            right: w - pad_x,
+                            bottom: st.dpi.scale(42),
+                        },
+                    );
+                    let _ = SelectObject(mem_dc, st.font_subtitle.into());
+                    let _ = SetTextColor(mem_dc, COLORREF(col_text_muted()));
+                    draw_text_line(
+                        mem_dc,
+                        "Créez un identifiant DPAPI réutilisable sur plusieurs connexions.",
+                        RECT {
+                            left: pad_x,
+                            top: st.dpi.scale(42),
+                            right: w - pad_x,
+                            bottom: st.dpi.scale(62),
+                        },
+                    );
+                    draw_horizontal_line(mem_dc, pad_x, w - pad_x, st.dpi.scale(70), col_border());
+                    draw_horizontal_line(
+                        mem_dc,
+                        pad_x,
+                        w - pad_x,
+                        h - st.dpi.scale(68),
+                        col_border(),
+                    );
+
+                    let _ = windows::Win32::Graphics::Gdi::BitBlt(
+                        hdc,
+                        0,
+                        0,
+                        w,
+                        h,
+                        Some(mem_dc),
+                        0,
+                        0,
+                        windows::Win32::Graphics::Gdi::SRCCOPY,
+                    );
+                    let _ = SelectObject(mem_dc, old_bmp);
+                    let _ = DeleteObject(mem_bmp.into());
+                    let _ = DeleteDC(mem_dc);
+                }
+                let _ = EndPaint(hwnd, &ps);
+                LRESULT(0)
+            }
+            WM_DRAWITEM => {
+                let ptr =
+                    GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const CredentialsManagerState<'_>;
+                let dis = lparam.0 as *const DRAWITEMSTRUCT;
+                if !ptr.is_null() && !dis.is_null() {
+                    let st = &*ptr;
+                    let d = &*dis;
+                    if d.CtlType == ODT_BUTTON {
+                        let id = d.CtlID as usize;
+                        draw_owner_button(
+                            d,
+                            id == IDC_CRED_NEW,
+                            st.palette.font_ui,
+                            st.palette.font_ui_bold,
+                        );
+                        return LRESULT(1);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_COMMAND => {
+                let ptr =
+                    GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut CredentialsManagerState<'_>;
+                if !ptr.is_null() {
+                    let st = &mut *ptr;
+                    let id = wparam.0 & 0xFFFF;
+                    let code = ((wparam.0 >> 16) & 0xFFFF) as u16;
+                    if id == IDC_CRED_NEW {
+                        if let Some(draft) = run_credential_form_dialog(hwnd, None, st.palette) {
+                            match st.storage.create_credential(draft) {
+                                Ok(_) => refresh_credentials_listbox(st),
+                                Err(err) => show_warning_dialog(hwnd, "Nouvel identifiant", &err),
+                            }
+                        }
+                    } else if id == IDC_CRED_EDIT || (id == IDC_CRED_LIST && code == 2) {
+                        if let Some(sel) = selected_credential_from_listbox(st).cloned()
+                            && let Some(draft) =
+                                run_credential_form_dialog(hwnd, Some(&sel), st.palette)
+                        {
+                            match st.storage.update_credential(sel.id, draft) {
+                                Ok(_) => refresh_credentials_listbox(st),
+                                Err(err) => {
+                                    show_warning_dialog(hwnd, "Modification de l'identifiant", &err)
+                                }
+                            }
+                        }
+                    } else if id == IDC_CRED_DELETE {
+                        if let Some(sel) = selected_credential_from_listbox(st).cloned() {
+                            let used = st
+                                .storage
+                                .count_connections_using_credential(sel.id)
+                                .unwrap_or(0);
+                            let msg = if used > 0 {
+                                format!(
+                                    "Supprimer l'identifiant « {} » ?\n\n{} connexion(s) liée(s) repasseront en saisie manuelle.",
+                                    sel.name, used
+                                )
+                            } else {
+                                format!("Supprimer l'identifiant « {} » ?", sel.name)
+                            };
+                            let mut w_msg: Vec<u16> = msg.encode_utf16().collect();
+                            w_msg.push(0);
+                            let w_title = w!("Supprimer l'identifiant");
+                            if MessageBoxW(
+                                Some(hwnd),
+                                PCWSTR(w_msg.as_ptr()),
+                                w_title,
+                                MB_YESNO | MB_ICONQUESTION,
+                            ) == IDYES
+                            {
+                                if let Err(err) = st.storage.delete_credential(sel.id) {
+                                    show_warning_dialog(hwnd, "Suppression", &err);
+                                } else {
+                                    refresh_credentials_listbox(st);
+                                }
+                            }
+                        }
+                    } else if id == IDC_CRED_CLOSE || id == 2 {
+                        let owner = st.owner;
+                        close_modal_dialog(hwnd, owner);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_CLOSE => {
+                let ptr =
+                    GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut CredentialsManagerState<'_>;
+                if !ptr.is_null() {
+                    let owner = (*ptr).owner;
+                    close_modal_dialog(hwnd, owner);
+                } else {
+                    let _ = DestroyWindow(hwnd);
+                }
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+fn run_credentials_manager_dialog(owner: HWND, storage: &mut Storage, palette: &GdiPalette) {
+    unsafe {
+        let hinstance = GetModuleHandleW(None).unwrap_or_default();
+        let class_name = w!("MalvisionCredentialsManagerDlgClass");
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(cred_mgr_wnd_proc),
+            hInstance: hinstance.into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hbrBackground: palette.brush_bg_sidebar,
+            lpszClassName: class_name,
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+
+        let dpi = if owner.is_invalid() {
+            palette.dpi
+        } else {
+            DpiMetrics::for_window(owner)
+        };
+        let client_w = dpi.scale(660);
+        let client_h = dpi.scale(440);
+        let dlg_style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+        let (win_w, win_h) = calc_dialog_window_size(dlg_style, client_w, client_h);
+
+        let mut owner_rc = RECT::default();
+        let _ = GetWindowRect(owner, &mut owner_rc);
+        let x = owner_rc.left + ((owner_rc.right - owner_rc.left) - win_w) / 2;
+        let y = owner_rc.top + ((owner_rc.bottom - owner_rc.top) - win_h) / 2;
+
+        let Ok(hwnd) = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            class_name,
+            w!("Identifiants partagés"),
+            dlg_style,
+            x.max(20),
+            y.max(20),
+            win_w,
+            win_h,
+            Some(owner),
+            None,
+            Some(hinstance.into()),
+            None,
+        ) else {
+            return;
+        };
+
+        const WM_GETICON: u32 = 0x007F;
+        let owner_icon_sm = SendMessageW(owner, WM_GETICON, Some(WPARAM(0)), Some(LPARAM(0))).0;
+        let owner_icon_lg = SendMessageW(owner, WM_GETICON, Some(WPARAM(1)), Some(LPARAM(0))).0;
+        if owner_icon_sm != 0 {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(0)),
+                Some(LPARAM(owner_icon_sm)),
+            );
+        }
+        if owner_icon_lg != 0 {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(1)),
+                Some(LPARAM(owner_icon_lg)),
+            );
+        }
+
+        let dark_mode: i32 = i32::from(is_active_theme_dark());
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark_mode as *const i32 as *const c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+
+        let pad_x = dpi.scale(24);
+        let list_rc = RECT {
+            left: pad_x,
+            top: dpi.scale(84),
+            right: client_w - pad_x,
+            bottom: client_h - dpi.scale(82),
+        };
+        let lb_creds = CreateWindowExW(
+            WINDOW_EX_STYLE(0x0000_0200),
+            w!("LISTBOX"),
+            w!(""),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(0x0001 | 0x0100), // LBS_NOTIFY | LBS_NOINTEGRALHEIGHT
+            list_rc.left,
+            list_rc.top,
+            list_rc.right - list_rc.left,
+            list_rc.bottom - list_rc.top,
+            Some(hwnd),
+            Some(HMENU(IDC_CRED_LIST as *mut _)),
+            Some(hinstance.into()),
+            None,
+        )
+        .unwrap_or_default();
+        let _ = SendMessageW(
+            lb_creds,
+            WM_SETFONT,
+            Some(WPARAM(palette.font_ui.0 as usize)),
+            Some(LPARAM(1)),
+        );
+
+        let btn_y = client_h - dpi.scale(52);
+        let btn_h = dpi.scale(34);
+        let btn_w = dpi.scale(116);
+        let gap = dpi.scale(10);
+        let _ = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Nouveau…"),
+            RECT {
+                left: pad_x,
+                top: btn_y,
+                right: pad_x + btn_w,
+                bottom: btn_y + btn_h,
+            },
+            IDC_CRED_NEW,
+            palette.font_ui_bold,
+        );
+        let _ = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Modifier…"),
+            RECT {
+                left: pad_x + btn_w + gap,
+                top: btn_y,
+                right: pad_x + 2 * btn_w + gap,
+                bottom: btn_y + btn_h,
+            },
+            IDC_CRED_EDIT,
+            palette.font_ui,
+        );
+        let _ = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Supprimer"),
+            RECT {
+                left: pad_x + 2 * (btn_w + gap),
+                top: btn_y,
+                right: pad_x + 3 * btn_w + 2 * gap,
+                bottom: btn_y + btn_h,
+            },
+            IDC_CRED_DELETE,
+            palette.font_ui,
+        );
+        let _ = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Fermer"),
+            RECT {
+                left: client_w - pad_x - btn_w,
+                top: btn_y,
+                right: client_w - pad_x,
+                bottom: btn_y + btn_h,
+            },
+            IDC_CRED_CLOSE,
+            palette.font_ui,
+        );
+
+        let mut state = Box::new(CredentialsManagerState {
+            owner,
+            dpi,
+            font_bold: palette.font_ui_bold,
+            font_subtitle: palette.font_subtitle,
+            brush_bg: palette.brush_bg_sidebar,
+            brush_input: palette.brush_bg_input,
+            palette,
+            storage,
+            items: Vec::new(),
+            lb_creds,
+        });
+        refresh_credentials_listbox(&mut state);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&mut *state) as *mut _ as isize);
+
+        let _ = EnableWindow(owner, false);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = UpdateWindow(hwnd);
+        let _ = SetFocus(Some(lb_creds));
+
+        run_modal_loop(owner, hwnd, &[lb_creds]);
+    }
+}
+
+struct CredentialFormState {
+    owner: HWND,
+    dpi: DpiMetrics,
+    font_ui: HFONT,
+    font_bold: HFONT,
+    font_subtitle: HFONT,
+    font_small: HFONT,
+    brush_bg: HBRUSH,
+    brush_input: HBRUSH,
+    header_title: String,
+    has_existing_pwd: bool,
+    labels: Vec<(String, RECT)>,
+    edit_boxes: Vec<RECT>,
+    ed_name: HWND,
+    ed_user: HWND,
+    ed_domain: HWND,
+    ed_pass: HWND,
+    ed_desc: HWND,
+    result: Option<CredentialDraft>,
+}
+
+unsafe extern "system" fn cred_form_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_ERASEBKGND => LRESULT(1),
+            WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const CredentialFormState;
+                if !ptr.is_null() {
+                    let hdc = HDC(wparam.0 as *mut _);
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_sidebar()));
+                    return LRESULT((*ptr).brush_bg.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_CTLCOLOREDIT => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const CredentialFormState;
+                if !ptr.is_null() {
+                    let hdc = HDC(wparam.0 as *mut _);
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_input()));
+                    return LRESULT((*ptr).brush_input.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_PAINT => {
+                let mut ps = PAINTSTRUCT::default();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const CredentialFormState;
+                if !ptr.is_null() {
+                    let st = &*ptr;
+                    let mut rc = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut rc);
+                    let w = (rc.right - rc.left).max(1);
+                    let h = (rc.bottom - rc.top).max(1);
+                    let mem_dc = CreateCompatibleDC(Some(hdc));
+                    let mem_bmp = CreateCompatibleBitmap(hdc, w, h);
+                    let old_bmp = SelectObject(mem_dc, mem_bmp.into());
+
+                    let _ = FillRect(mem_dc, &rc, st.brush_bg);
+                    let pad_x = st.dpi.scale(24);
+                    let _ = SetBkMode(mem_dc, TRANSPARENT);
+                    let _ = SelectObject(mem_dc, st.font_bold.into());
+                    let _ = SetTextColor(mem_dc, COLORREF(col_text_primary()));
+                    draw_text_line(
+                        mem_dc,
+                        &st.header_title,
+                        RECT {
+                            left: pad_x,
+                            top: st.dpi.scale(16),
+                            right: w - pad_x,
+                            bottom: st.dpi.scale(42),
+                        },
+                    );
+                    let _ = SelectObject(mem_dc, st.font_subtitle.into());
+                    let _ = SetTextColor(mem_dc, COLORREF(col_text_muted()));
+                    draw_text_line(
+                        mem_dc,
+                        "Le mot de passe est chiffré localement via Windows DPAPI.",
+                        RECT {
+                            left: pad_x,
+                            top: st.dpi.scale(42),
+                            right: w - pad_x,
+                            bottom: st.dpi.scale(62),
+                        },
+                    );
+                    draw_horizontal_line(mem_dc, pad_x, w - pad_x, st.dpi.scale(70), col_border());
+
+                    let _ = SelectObject(mem_dc, st.font_small.into());
+                    let _ = SetTextColor(mem_dc, COLORREF(col_text_primary()));
+                    for (txt, r) in &st.labels {
+                        draw_text_line(mem_dc, txt, *r);
+                    }
+                    for box_rc in &st.edit_boxes {
+                        draw_rounded_box(mem_dc, *box_rc, col_bg_input(), col_border());
+                    }
+
+                    draw_horizontal_line(
+                        mem_dc,
+                        pad_x,
+                        w - pad_x,
+                        h - st.dpi.scale(68),
+                        col_border(),
+                    );
+
+                    let _ = windows::Win32::Graphics::Gdi::BitBlt(
+                        hdc,
+                        0,
+                        0,
+                        w,
+                        h,
+                        Some(mem_dc),
+                        0,
+                        0,
+                        windows::Win32::Graphics::Gdi::SRCCOPY,
+                    );
+                    let _ = SelectObject(mem_dc, old_bmp);
+                    let _ = DeleteObject(mem_bmp.into());
+                    let _ = DeleteDC(mem_dc);
+                }
+                let _ = EndPaint(hwnd, &ps);
+                LRESULT(0)
+            }
+            WM_DRAWITEM => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const CredentialFormState;
+                let dis = lparam.0 as *const DRAWITEMSTRUCT;
+                if !ptr.is_null() && !dis.is_null() {
+                    let st = &*ptr;
+                    let d = &*dis;
+                    if d.CtlType == ODT_BUTTON {
+                        let id = d.CtlID as usize;
+                        draw_owner_button(d, id == IDC_CRED_FORM_OK, st.font_ui, st.font_bold);
+                        return LRESULT(1);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_COMMAND => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut CredentialFormState;
+                if !ptr.is_null() {
+                    let st = &mut *ptr;
+                    let id = wparam.0 & 0xFFFF;
+                    if id == IDC_CRED_FORM_OK || id == 1 {
+                        let raw_pwd = get_window_text(st.ed_pass);
+                        let keep_existing_password = raw_pwd.is_empty() && st.has_existing_pwd;
+                        let mut draft = CredentialDraft {
+                            name: get_window_text(st.ed_name),
+                            username: get_window_text(st.ed_user),
+                            domain: get_window_text(st.ed_domain),
+                            description: get_window_text(st.ed_desc),
+                            password: SecretString::new(raw_pwd),
+                            keep_existing_password,
+                        };
+                        set_window_text(st.ed_pass, "");
+                        match draft.validate_and_normalize() {
+                            Ok(()) => {
+                                st.result = Some(draft);
+                                let owner = st.owner;
+                                close_modal_dialog(hwnd, owner);
+                            }
+                            Err(err) => {
+                                show_warning_dialog(hwnd, "Validation de l'identifiant", &err);
+                            }
+                        }
+                    } else if id == IDC_CRED_FORM_CANCEL || id == 2 {
+                        set_window_text(st.ed_pass, "");
+                        let owner = st.owner;
+                        close_modal_dialog(hwnd, owner);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_CLOSE => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut CredentialFormState;
+                if !ptr.is_null() {
+                    set_window_text((*ptr).ed_pass, "");
+                    let owner = (*ptr).owner;
+                    close_modal_dialog(hwnd, owner);
+                } else {
+                    let _ = DestroyWindow(hwnd);
+                }
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+fn run_credential_form_dialog(
+    owner: HWND,
+    existing: Option<&CredentialItem>,
+    palette: &GdiPalette,
+) -> Option<CredentialDraft> {
+    unsafe {
+        let hinstance = GetModuleHandleW(None).unwrap_or_default();
+        let class_name = w!("MalvisionCredentialFormDlgClass");
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(cred_form_wnd_proc),
+            hInstance: hinstance.into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hbrBackground: palette.brush_bg_sidebar,
+            lpszClassName: class_name,
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+
+        let dpi = if owner.is_invalid() {
+            palette.dpi
+        } else {
+            DpiMetrics::for_window(owner)
+        };
+        let client_w = dpi.scale(560);
+        let client_h = dpi.scale(380);
+        let dlg_style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+        let (win_w, win_h) = calc_dialog_window_size(dlg_style, client_w, client_h);
+
+        let mut owner_rc = RECT::default();
+        let _ = GetWindowRect(owner, &mut owner_rc);
+        let x = owner_rc.left + ((owner_rc.right - owner_rc.left) - win_w) / 2;
+        let y = owner_rc.top + ((owner_rc.bottom - owner_rc.top) - win_h) / 2;
+
+        let title = if existing.is_some() {
+            w!("Modifier l'identifiant")
+        } else {
+            w!("Nouvel identifiant partagé")
+        };
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            class_name,
+            title,
+            dlg_style,
+            x.max(20),
+            y.max(20),
+            win_w,
+            win_h,
+            Some(owner),
+            None,
+            Some(hinstance.into()),
+            None,
+        )
+        .ok()?;
+
+        const WM_GETICON: u32 = 0x007F;
+        let owner_icon_sm = SendMessageW(owner, WM_GETICON, Some(WPARAM(0)), Some(LPARAM(0))).0;
+        let owner_icon_lg = SendMessageW(owner, WM_GETICON, Some(WPARAM(1)), Some(LPARAM(0))).0;
+        if owner_icon_sm != 0 {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(0)),
+                Some(LPARAM(owner_icon_sm)),
+            );
+        }
+        if owner_icon_lg != 0 {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(1)),
+                Some(LPARAM(owner_icon_lg)),
+            );
+        }
+
+        let dark_mode: i32 = i32::from(is_active_theme_dark());
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark_mode as *const i32 as *const c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+
+        let pad_x = dpi.scale(24);
+        let label_w = dpi.scale(165);
+        let field_left = pad_x + label_w;
+        let field_right = client_w - pad_x;
+        let field_h = dpi.scale(32);
+
+        let mut labels = Vec::new();
+        let mut edit_boxes = Vec::new();
+        let mut make_row = |label: &str, y_pos: i32, id: usize, is_pwd: bool| -> HWND {
+            labels.push((
+                label.to_string(),
+                RECT {
+                    left: pad_x,
+                    top: y_pos,
+                    right: field_left - dpi.scale(8),
+                    bottom: y_pos + field_h,
+                },
+            ));
+            let rc = RECT {
+                left: field_left,
+                top: y_pos,
+                right: field_right,
+                bottom: y_pos + field_h,
+            };
+            edit_boxes.push(rc);
+            create_dark_edit(hwnd, hinstance.into(), rc, id, is_pwd, palette.font_ui, dpi)
+        };
+
+        let ed_name = make_row(
+            "Nom de l'identifiant * :",
+            dpi.scale(86),
+            IDC_CRED_FORM_NAME,
+            false,
+        );
+        let ed_user = make_row(
+            "Nom d'utilisateur :",
+            dpi.scale(130),
+            IDC_CRED_FORM_USER,
+            false,
+        );
+        let ed_domain = make_row(
+            "Domaine (facultatif) :",
+            dpi.scale(174),
+            IDC_CRED_FORM_DOMAIN,
+            false,
+        );
+        let ed_pass = make_row("Mot de passe :", dpi.scale(218), IDC_CRED_FORM_PASS, true);
+        let ed_desc = make_row("Description :", dpi.scale(262), IDC_CRED_FORM_DESC, false);
+
+        if let Some(ex) = existing {
+            set_window_text(ed_name, &ex.name);
+            set_window_text(ed_user, &ex.username);
+            set_window_text(ed_domain, &ex.domain);
+            set_window_text(ed_desc, &ex.description);
+            if ex.has_saved_password {
+                let cue = w!("(Mot de passe enregistré — laisser vide pour conserver)");
+                let _ = SendMessageW(
+                    ed_pass,
+                    0x1501,
+                    Some(WPARAM(1)),
+                    Some(LPARAM(cue.as_ptr() as isize)),
+                );
+            }
+        }
+
+        let btn_w = dpi.scale(120);
+        let btn_h = dpi.scale(34);
+        let btn_y = client_h - dpi.scale(52);
+        let gap = dpi.scale(10);
+        let _ = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Enregistrer"),
+            RECT {
+                left: field_right - 2 * btn_w - gap,
+                top: btn_y,
+                right: field_right - btn_w - gap,
+                bottom: btn_y + btn_h,
+            },
+            IDC_CRED_FORM_OK,
+            palette.font_ui_bold,
+        );
+        let _ = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Annuler"),
+            RECT {
+                left: field_right - btn_w,
+                top: btn_y,
+                right: field_right,
+                bottom: btn_y + btn_h,
+            },
+            IDC_CRED_FORM_CANCEL,
+            palette.font_ui,
+        );
+
+        let mut state = Box::new(CredentialFormState {
+            owner,
+            dpi,
+            font_ui: palette.font_ui,
+            font_bold: palette.font_ui_bold,
+            font_subtitle: palette.font_subtitle,
+            font_small: palette.font_small,
+            brush_bg: palette.brush_bg_sidebar,
+            brush_input: palette.brush_bg_input,
+            header_title: if existing.is_some() {
+                "Modifier l'identifiant partagé".to_string()
+            } else {
+                "Nouvel identifiant partagé".to_string()
+            },
+            has_existing_pwd: existing.is_some_and(|e| e.has_saved_password),
+            labels,
+            edit_boxes,
+            ed_name,
+            ed_user,
+            ed_domain,
+            ed_pass,
+            ed_desc,
+            result: None,
+        });
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&mut *state) as *mut _ as isize);
+
+        let _ = EnableWindow(owner, false);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = UpdateWindow(hwnd);
+        let _ = SetFocus(Some(ed_name));
+
+        let tab_order = [ed_name, ed_user, ed_domain, ed_pass, ed_desc];
+        run_modal_loop(owner, hwnd, &tab_order);
+        state.result.take()
     }
 }
 
@@ -10821,6 +11870,36 @@ fn run_settings_dialog(
             return (None, false);
         };
 
+        const WM_GETICON: u32 = 0x007F;
+        let owner_icon_sm = SendMessageW(owner, WM_GETICON, Some(WPARAM(0)), Some(LPARAM(0))).0;
+        let owner_icon_lg = SendMessageW(owner, WM_GETICON, Some(WPARAM(1)), Some(LPARAM(0))).0;
+        if owner_icon_sm != 0 {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(0)),
+                Some(LPARAM(owner_icon_sm)),
+            );
+        } else {
+            let fallback_icon = create_malvision_app_icon();
+            if !fallback_icon.is_invalid() {
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(fallback_icon.0 as isize)),
+                );
+            }
+        }
+        if owner_icon_lg != 0 {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(1)),
+                Some(LPARAM(owner_icon_lg)),
+            );
+        }
+
         let dark_mode: i32 = i32::from(is_active_theme_dark());
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -12386,6 +13465,9 @@ unsafe extern "system" fn main_wnd_proc(
                             let cid = lparam.0 as i64;
                             (*ptr).open_connection_dialog(Some(cid), None);
                         }
+                        DEFERRED_OPEN_CREDENTIALS => {
+                            (*ptr).open_credentials_manager_dialog();
+                        }
                         DEFERRED_OPEN_SETTINGS => {
                             (*ptr).open_settings_dialog();
                         }
@@ -13833,6 +14915,7 @@ mod tests {
                 created_at: 0,
                 updated_at: 0,
                 last_connected_at: None,
+                credential_id: None,
             };
             let _ = (*ptr).sessions.open_rdp_session(
                 hwnd,
@@ -13903,6 +14986,7 @@ mod tests {
                 created_at: 0,
                 updated_at: 0,
                 last_connected_at: None,
+                credential_id: None,
             };
             let sid = (*ptr)
                 .sessions
@@ -13939,6 +15023,7 @@ mod tests {
                 save_password: false,
                 password: SecretString::new(String::new()),
                 keep_existing_password: false,
+                credential_id: None,
                 dynamic_resolution: false,
                 redirect_clipboard: false,
             };
@@ -14150,6 +15235,7 @@ mod tests {
                 password: SecretString::new(String::new()),
                 save_password: false,
                 keep_existing_password: false,
+                credential_id: None,
                 dynamic_resolution: false,
                 redirect_clipboard: false,
             };
@@ -14170,6 +15256,7 @@ mod tests {
                 password: SecretString::new(String::new()),
                 save_password: false,
                 keep_existing_password: false,
+                credential_id: None,
                 dynamic_resolution: false,
                 redirect_clipboard: false,
             };
@@ -14316,6 +15403,7 @@ mod tests {
                 password: SecretString::new(String::new()),
                 save_password: false,
                 keep_existing_password: false,
+                credential_id: None,
                 dynamic_resolution: false,
                 redirect_clipboard: false,
             };
@@ -14631,6 +15719,7 @@ mod tests {
             save_password: false,
             password: crate::security::SecretString::new(String::new()),
             keep_existing_password: false,
+            credential_id: None,
             dynamic_resolution: true,
             redirect_clipboard: true,
         }
@@ -15468,6 +16557,7 @@ mod tests {
                 save_password: true,
                 password: SecretString::new("RustDeskPwd#2026".to_string()),
                 keep_existing_password: false,
+                credential_id: None,
                 dynamic_resolution: false,
                 redirect_clipboard: false,
             };
@@ -15584,6 +16674,7 @@ mod tests {
                 save_password: true,
                 password: SecretString::new("secret".to_string()),
                 keep_existing_password: false,
+                credential_id: None,
                 dynamic_resolution: false,
                 redirect_clipboard: false,
             };
@@ -15739,5 +16830,72 @@ mod tests {
             let _ = SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
         }
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_win32_shared_credential_storage_and_multi_connection_resolution() {
+        let mut storage = Storage::open_in_memory().expect("SQLite en mémoire");
+        let cred = storage
+            .create_credential(CredentialDraft {
+                name: "Admin Multi-Serveurs".to_string(),
+                username: "CORP\\admin_shared".to_string(),
+                domain: String::new(),
+                description: "Identifiant partagé RDP + SSH".to_string(),
+                password: SecretString::new("PassShared!2026".to_string()),
+                keep_existing_password: false,
+            })
+            .expect("Création identifiant");
+
+        let rdp = storage
+            .create_connection(ConnectionDraft {
+                folder_id: None,
+                credential_id: Some(cred.id),
+                name: "SRV-RDP-01".to_string(),
+                protocol: Protocol::Rdp,
+                host: "10.0.1.10".to_string(),
+                port: 3389,
+                username: String::new(),
+                domain: String::new(),
+                description: String::new(),
+                is_favorite: false,
+                is_priority: false,
+                save_password: false,
+                password: SecretString::new(String::new()),
+                keep_existing_password: false,
+                dynamic_resolution: true,
+                redirect_clipboard: true,
+            })
+            .expect("Création RDP liée");
+
+        let ssh = storage
+            .create_connection(ConnectionDraft {
+                folder_id: None,
+                credential_id: Some(cred.id),
+                name: "SRV-SSH-01".to_string(),
+                protocol: Protocol::Ssh,
+                host: "10.0.1.11".to_string(),
+                port: 22,
+                username: String::new(),
+                domain: "~/.ssh/id_ed25519".to_string(),
+                description: String::new(),
+                is_favorite: false,
+                is_priority: false,
+                save_password: false,
+                password: SecretString::new(String::new()),
+                keep_existing_password: false,
+                dynamic_resolution: false,
+                redirect_clipboard: false,
+            })
+            .expect("Création SSH liée");
+
+        let (u1, d1, p1) = storage.resolve_connection_credentials(&rdp).unwrap();
+        assert_eq!(u1, "admin_shared");
+        assert_eq!(d1, "CORP");
+        assert_eq!(p1.unwrap().as_str(), "PassShared!2026");
+
+        let (u2, d2, p2) = storage.resolve_connection_credentials(&ssh).unwrap();
+        assert_eq!(u2, "admin_shared");
+        assert_eq!(d2, "~/.ssh/id_ed25519");
+        assert_eq!(p2.unwrap().as_str(), "PassShared!2026");
     }
 }

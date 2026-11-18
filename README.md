@@ -2,11 +2,16 @@
 
 Application native **Windows 11 x64** de gestion de connexions distantes, écrite en **Rust** avec `windows-rs` (Win32 natif + COM/ActiveX + SQLite embarqué + DPAPI).
 
-**Version actuelle :** `1.0.6` (V1.0.6 Portable)
+**Version actuelle :** `1.0.7` (V1.0.7 Portable)
 
 ---
 
-## Fonctionnalités principales (V1.0.6)
+## Fonctionnalités principales (V1.0.7)
+
+- **Gestionnaire d'identifiants partagés DPAPI (V1.0.7)** :
+  - Nouveau bouton **« Identifiants »** dans le pied de barre latérale ouvrant le **Gestionnaire d'identifiants partagés** (`Nouveau…`, `Modifier…`, `Supprimer`, compteur de connexions liées).
+  - Créez un identifiant réutilisable (nom, nom d'utilisateur ou `DOMAINE\utilisateur`, domaine, mot de passe chiffré via Windows DPAPI, description) et associez-le à plusieurs connexions (`RDP`, `FTP`, `SSH`, `AnyDesk`, `RustDesk`) depuis le champ **« Identifiant partagé »** du formulaire de connexion.
+  - La rotation d'un mot de passe dans le gestionnaire s'applique immédiatement à toutes les connexions associées (schéma SQLite v7), tout en préservant les paramètres propres à chaque protocole (dossier initial FTP, clé privée SSH).
 
 - **Terminal SSH intégré ConPTY & OpenSSH Windows (V1.0.6)** :
   - Nouveau protocole `SSH (Terminal intégré)` dans le choix des connexions (badge `SSH`, port `22`, clé privée SSH facultative, URL `ssh://user@host:port`).

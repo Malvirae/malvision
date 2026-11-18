@@ -9,13 +9,16 @@
 //! - Recherche filtrée, gestion des favoris, duplication, déplacement, historique (`recent_connections`)
 //!   et préférences (`settings`).
 
-use crate::models::{ConnectionDraft, ConnectionItem, Folder, Protocol, RecentConnectionEntry};
+use crate::models::{
+    ConnectionDraft, ConnectionItem, CredentialDraft, CredentialItem, Folder, Protocol,
+    RecentConnectionEntry,
+};
 use crate::security::{SecretString, decrypt_secret, encrypt_secret};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const CURRENT_SCHEMA_VERSION: i32 = 6;
+const CURRENT_SCHEMA_VERSION: i32 = 7;
 
 /// Résumé du diagnostic et du résultat d'un import de configuration SQLite.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -464,6 +467,37 @@ impl Storage {
             fk_on_res.map_err(|e| format!("Échec réactivation foreign_keys post-v6 : {e}"))?;
         }
 
+        if version < 7 {
+            let tx = self
+                .conn
+                .transaction()
+                .map_err(|e| format!("Échec ouverture transaction migration v7 : {e}"))?;
+
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS credentials (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE CHECK(length(trim(name)) > 0),
+                    username TEXT NOT NULL DEFAULT '',
+                    domain TEXT NOT NULL DEFAULT '',
+                    encrypted_password BLOB NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                ALTER TABLE connections
+                ADD COLUMN credential_id INTEGER NULL REFERENCES credentials(id) ON DELETE SET NULL;
+
+                CREATE INDEX IF NOT EXISTS idx_connections_credential ON connections(credential_id);
+
+                PRAGMA user_version = 7;",
+            )
+            .map_err(|e| format!("Échec de la migration SQLite v7 : {e}"))?;
+
+            tx.commit()
+                .map_err(|e| format!("Échec de validation de la migration SQLite v7 : {e}"))?;
+        }
+
         if version > CURRENT_SCHEMA_VERSION {
             return Err(format!(
                 "La base de données (schéma v{version}) est plus récente que cette version de Malvision (schéma v{CURRENT_SCHEMA_VERSION})."
@@ -767,6 +801,11 @@ impl Storage {
         {
             return Err(format!("Le dossier parent #{fid} n'existe pas."));
         }
+        if let Some(cid) = draft.credential_id
+            && !self.credential_exists(cid)?
+        {
+            return Err(format!("L'identifiant partagé #{cid} n'existe pas."));
+        }
 
         let encrypted_blob: Option<Vec<u8>> = if draft.save_password && !draft.password.is_empty() {
             Some(encrypt_secret(draft.password.as_str())?)
@@ -789,16 +828,17 @@ impl Storage {
         self.conn
             .execute(
                 "INSERT INTO connections (
-                    folder_id, name, protocol, host, port, username, domain, description,
+                    folder_id, credential_id, name, protocol, host, port, username, domain, description,
                     is_favorite, is_priority, save_password, encrypted_password, dynamic_resolution,
                     redirect_clipboard, sort_order, created_at, updated_at
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-                    ?9, ?10, ?11, ?12, ?13,
-                    ?14, ?15, ?16, ?16
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                    ?10, ?11, ?12, ?13, ?14,
+                    ?15, ?16, ?17, ?17
                  )",
                 params![
                     draft.folder_id,
+                    draft.credential_id,
                     draft.name,
                     draft.protocol.as_str(),
                     draft.host,
@@ -838,6 +878,11 @@ impl Storage {
         {
             return Err(format!("Le dossier parent #{fid} n'existe pas."));
         }
+        if let Some(cid) = draft.credential_id
+            && !self.credential_exists(cid)?
+        {
+            return Err(format!("L'identifiant partagé #{cid} n'existe pas."));
+        }
 
         let now = unix_timestamp();
         let tx = self
@@ -849,13 +894,14 @@ impl Storage {
             // L'utilisateur a décoché « Enregistrer le mot de passe » : supprimer le secret DPAPI stocké
             tx.execute(
                 "UPDATE connections SET
-                    folder_id = ?1, name = ?2, protocol = ?3, host = ?4, port = ?5,
-                    username = ?6, domain = ?7, description = ?8, is_favorite = ?9, is_priority = ?10,
+                    folder_id = ?1, credential_id = ?2, name = ?3, protocol = ?4, host = ?5, port = ?6,
+                    username = ?7, domain = ?8, description = ?9, is_favorite = ?10, is_priority = ?11,
                     save_password = 0, encrypted_password = NULL,
-                    dynamic_resolution = ?11, redirect_clipboard = ?12, updated_at = ?13
-                 WHERE id = ?14",
+                    dynamic_resolution = ?12, redirect_clipboard = ?13, updated_at = ?14
+                 WHERE id = ?15",
                 params![
                     draft.folder_id,
+                    draft.credential_id,
                     draft.name,
                     draft.protocol.as_str(),
                     draft.host,
@@ -878,13 +924,14 @@ impl Storage {
             draft.password.clear();
             tx.execute(
                 "UPDATE connections SET
-                    folder_id = ?1, name = ?2, protocol = ?3, host = ?4, port = ?5,
-                    username = ?6, domain = ?7, description = ?8, is_favorite = ?9, is_priority = ?10,
-                    save_password = 1, encrypted_password = ?11,
-                    dynamic_resolution = ?12, redirect_clipboard = ?13, updated_at = ?14
-                 WHERE id = ?15",
+                    folder_id = ?1, credential_id = ?2, name = ?3, protocol = ?4, host = ?5, port = ?6,
+                    username = ?7, domain = ?8, description = ?9, is_favorite = ?10, is_priority = ?11,
+                    save_password = 1, encrypted_password = ?12,
+                    dynamic_resolution = ?13, redirect_clipboard = ?14, updated_at = ?15
+                 WHERE id = ?16",
                 params![
                     draft.folder_id,
+                    draft.credential_id,
                     draft.name,
                     draft.protocol.as_str(),
                     draft.host,
@@ -906,12 +953,13 @@ impl Storage {
             // Conserver le mot de passe chiffré déjà stocké
             tx.execute(
                 "UPDATE connections SET
-                    folder_id = ?1, name = ?2, protocol = ?3, host = ?4, port = ?5,
-                    username = ?6, domain = ?7, description = ?8, is_favorite = ?9, is_priority = ?10,
-                    dynamic_resolution = ?11, redirect_clipboard = ?12, updated_at = ?13
-                 WHERE id = ?14",
+                    folder_id = ?1, credential_id = ?2, name = ?3, protocol = ?4, host = ?5, port = ?6,
+                    username = ?7, domain = ?8, description = ?9, is_favorite = ?10, is_priority = ?11,
+                    dynamic_resolution = ?12, redirect_clipboard = ?13, updated_at = ?14
+                 WHERE id = ?15",
                 params![
                     draft.folder_id,
+                    draft.credential_id,
                     draft.name,
                     draft.protocol.as_str(),
                     draft.host,
@@ -932,13 +980,14 @@ impl Storage {
             // Aucun mot de passe saisi et pas de conservation demandée : vider le secret
             tx.execute(
                 "UPDATE connections SET
-                    folder_id = ?1, name = ?2, protocol = ?3, host = ?4, port = ?5,
-                    username = ?6, domain = ?7, description = ?8, is_favorite = ?9,
+                    folder_id = ?1, credential_id = ?2, name = ?3, protocol = ?4, host = ?5, port = ?6,
+                    username = ?7, domain = ?8, description = ?9, is_favorite = ?10, is_priority = ?11,
                     save_password = 0, encrypted_password = NULL,
-                    dynamic_resolution = ?10, redirect_clipboard = ?11, updated_at = ?12
-                 WHERE id = ?13",
+                    dynamic_resolution = ?12, redirect_clipboard = ?13, updated_at = ?14
+                 WHERE id = ?15",
                 params![
                     draft.folder_id,
+                    draft.credential_id,
                     draft.name,
                     draft.protocol.as_str(),
                     draft.host,
@@ -947,6 +996,7 @@ impl Storage {
                     draft.domain,
                     draft.description,
                     i32::from(draft.is_favorite),
+                    i32::from(draft.is_priority),
                     i32::from(draft.dynamic_resolution),
                     i32::from(draft.redirect_clipboard),
                     now,
@@ -1017,7 +1067,7 @@ impl Storage {
                         is_favorite, is_priority, save_password,
                         (encrypted_password IS NOT NULL AND length(encrypted_password) > 0) AS has_pwd,
                         dynamic_resolution, redirect_clipboard, sort_order,
-                        created_at, updated_at, last_connected_at
+                        created_at, updated_at, last_connected_at, credential_id
                  FROM connections WHERE id = ?1",
                 params![connection_id],
                 Self::map_connection_row,
@@ -1034,7 +1084,7 @@ impl Storage {
                         is_favorite, is_priority, save_password,
                         (encrypted_password IS NOT NULL AND length(encrypted_password) > 0) AS has_pwd,
                         dynamic_resolution, redirect_clipboard, sort_order,
-                        created_at, updated_at, last_connected_at
+                        created_at, updated_at, last_connected_at, credential_id
                  FROM connections
                  ORDER BY sort_order ASC, name COLLATE NOCASE ASC, id ASC",
             )
@@ -1065,7 +1115,7 @@ impl Storage {
                         is_favorite, is_priority, save_password,
                         (encrypted_password IS NOT NULL AND length(encrypted_password) > 0) AS has_pwd,
                         dynamic_resolution, redirect_clipboard, sort_order,
-                        created_at, updated_at, last_connected_at
+                        created_at, updated_at, last_connected_at, credential_id
                  FROM connections
                  WHERE lower(name) LIKE ?1
                     OR lower(host) LIKE ?1
@@ -1073,6 +1123,11 @@ impl Storage {
                     OR lower(domain) LIKE ?1
                     OR lower(description) LIKE ?1
                     OR lower(protocol) LIKE ?1
+                    OR EXISTS (
+                        SELECT 1 FROM credentials c
+                        WHERE c.id = connections.credential_id
+                          AND (lower(c.name) LIKE ?1 OR lower(c.username) LIKE ?1 OR lower(c.domain) LIKE ?1)
+                    )
                  ORDER BY is_favorite DESC, is_priority DESC, name COLLATE NOCASE ASC, id ASC",
             )
             .map_err(|e| format!("Erreur préparation search_connections : {e}"))?;
@@ -1218,16 +1273,17 @@ impl Storage {
         self.conn
             .execute(
                 "INSERT INTO connections (
-                    folder_id, name, protocol, host, port, username, domain, description,
+                    folder_id, credential_id, name, protocol, host, port, username, domain, description,
                     is_favorite, is_priority, save_password, encrypted_password, dynamic_resolution,
                     redirect_clipboard, sort_order, created_at, updated_at
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-                    ?9, ?10, ?11, ?12, ?13,
-                    ?14, ?15, ?16, ?16
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                    ?10, ?11, ?12, ?13, ?14,
+                    ?15, ?16, ?17, ?17
                  )",
                 params![
                     orig.folder_id,
+                    orig.credential_id,
                     new_name,
                     orig.protocol.as_str(),
                     orig.host,
@@ -1318,10 +1374,10 @@ impl Storage {
             .conn
             .prepare(
                 "SELECT c.id, c.folder_id, c.name, c.protocol, c.host, c.port, c.username, c.domain,
-                        c.description, c.is_favorite, c.save_password,
+                        c.description, c.is_favorite, c.is_priority, c.save_password,
                         (c.encrypted_password IS NOT NULL AND length(c.encrypted_password) > 0) AS has_pwd,
                         c.dynamic_resolution, c.redirect_clipboard, c.sort_order,
-                        c.created_at, c.updated_at, c.last_connected_at,
+                        c.created_at, c.updated_at, c.last_connected_at, c.credential_id,
                         r.connected_at
                  FROM recent_connections r
                  JOIN connections c ON c.id = r.connection_id
@@ -1333,7 +1389,7 @@ impl Storage {
         let rows = stmt
             .query_map(params![limit as i64], |row| {
                 let conn_item = Self::map_connection_row(row)?;
-                let connected_at: i64 = row.get(18)?;
+                let connected_at: i64 = row.get(20)?;
                 Ok(RecentConnectionEntry {
                     connection: conn_item,
                     connected_at,
@@ -1740,7 +1796,257 @@ impl Storage {
             created_at: row.get(16)?,
             updated_at: row.get(17)?,
             last_connected_at: row.get(18)?,
+            credential_id: row.get(19)?,
         })
+    }
+
+    // =========================================================================
+    // Gestion des identifiants partagés (`credentials`)
+    // =========================================================================
+
+    fn credential_exists(&self, credential_id: i64) -> Result<bool, String> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM credentials WHERE id = ?1",
+                params![credential_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Erreur vérification existence identifiant : {e}"))?;
+        Ok(count > 0)
+    }
+
+    fn map_credential_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CredentialItem> {
+        Ok(CredentialItem {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            username: row.get(2)?,
+            domain: row.get(3)?,
+            has_saved_password: row.get::<_, i32>(4)? != 0,
+            description: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    }
+
+    pub fn list_credentials(&self) -> Result<Vec<CredentialItem>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, name, username, domain,
+                        (encrypted_password IS NOT NULL AND length(encrypted_password) > 0) AS has_pwd,
+                        description, created_at, updated_at
+                 FROM credentials
+                 ORDER BY name COLLATE NOCASE ASC, id ASC",
+            )
+            .map_err(|e| format!("Erreur préparation list_credentials : {e}"))?;
+
+        let rows = stmt
+            .query_map([], Self::map_credential_row)
+            .map_err(|e| format!("Erreur exécution list_credentials : {e}"))?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| format!("Erreur décodage identifiant : {e}"))?);
+        }
+        Ok(out)
+    }
+
+    pub fn get_credential(&self, credential_id: i64) -> Result<Option<CredentialItem>, String> {
+        self.conn
+            .query_row(
+                "SELECT id, name, username, domain,
+                        (encrypted_password IS NOT NULL AND length(encrypted_password) > 0) AS has_pwd,
+                        description, created_at, updated_at
+                 FROM credentials WHERE id = ?1",
+                params![credential_id],
+                Self::map_credential_row,
+            )
+            .optional()
+            .map_err(|e| format!("Erreur lecture identifiant #{credential_id} : {e}"))
+    }
+
+    pub fn create_credential(
+        &mut self,
+        mut draft: CredentialDraft,
+    ) -> Result<CredentialItem, String> {
+        draft.validate_and_normalize()?;
+
+        let encrypted_blob: Option<Vec<u8>> = if !draft.password.is_empty() {
+            Some(encrypt_secret(draft.password.as_str())?)
+        } else {
+            None
+        };
+        draft.password.clear();
+
+        let now = unix_timestamp();
+        self.conn
+            .execute(
+                "INSERT INTO credentials (name, username, domain, encrypted_password, description, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![
+                    draft.name,
+                    draft.username,
+                    draft.domain,
+                    encrypted_blob,
+                    draft.description,
+                    now,
+                ],
+            )
+            .map_err(|e| {
+                if e.to_string().contains("UNIQUE") {
+                    format!("Un identifiant nommé « {} » existe déjà.", draft.name)
+                } else {
+                    format!("Erreur lors de la création de l'identifiant : {e}")
+                }
+            })?;
+
+        let id = self.conn.last_insert_rowid();
+        self.get_credential(id)?
+            .ok_or_else(|| "Identifiant créé introuvable.".to_string())
+    }
+
+    pub fn update_credential(
+        &mut self,
+        credential_id: i64,
+        mut draft: CredentialDraft,
+    ) -> Result<CredentialItem, String> {
+        draft.validate_and_normalize()?;
+        if !self.credential_exists(credential_id)? {
+            return Err(format!("L'identifiant #{credential_id} n'existe pas."));
+        }
+
+        let now = unix_timestamp();
+        let res = if !draft.password.is_empty() {
+            let encrypted_blob = encrypt_secret(draft.password.as_str())?;
+            draft.password.clear();
+            self.conn.execute(
+                "UPDATE credentials SET
+                    name = ?1, username = ?2, domain = ?3,
+                    encrypted_password = ?4, description = ?5, updated_at = ?6
+                 WHERE id = ?7",
+                params![
+                    draft.name,
+                    draft.username,
+                    draft.domain,
+                    encrypted_blob,
+                    draft.description,
+                    now,
+                    credential_id,
+                ],
+            )
+        } else if draft.keep_existing_password {
+            self.conn.execute(
+                "UPDATE credentials SET
+                    name = ?1, username = ?2, domain = ?3,
+                    description = ?4, updated_at = ?5
+                 WHERE id = ?6",
+                params![
+                    draft.name,
+                    draft.username,
+                    draft.domain,
+                    draft.description,
+                    now,
+                    credential_id,
+                ],
+            )
+        } else {
+            self.conn.execute(
+                "UPDATE credentials SET
+                    name = ?1, username = ?2, domain = ?3,
+                    encrypted_password = NULL, description = ?4, updated_at = ?5
+                 WHERE id = ?6",
+                params![
+                    draft.name,
+                    draft.username,
+                    draft.domain,
+                    draft.description,
+                    now,
+                    credential_id,
+                ],
+            )
+        };
+        draft.password.clear();
+
+        res.map_err(|e| {
+            if e.to_string().contains("UNIQUE") {
+                format!("Un identifiant nommé « {} » existe déjà.", draft.name)
+            } else {
+                format!("Erreur lors de la mise à jour de l'identifiant : {e}")
+            }
+        })?;
+
+        self.get_credential(credential_id)?
+            .ok_or_else(|| "Identifiant mis à jour introuvable.".to_string())
+    }
+
+    pub fn delete_credential(&mut self, credential_id: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM credentials WHERE id = ?1",
+                params![credential_id],
+            )
+            .map_err(|e| format!("Erreur suppression identifiant #{credential_id} : {e}"))?;
+        Ok(())
+    }
+
+    pub fn count_connections_using_credential(&self, credential_id: i64) -> Result<usize, String> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM connections WHERE credential_id = ?1",
+                params![credential_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Erreur comptage connexions liées : {e}"))?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    pub fn load_decrypted_credential_password(
+        &self,
+        credential_id: i64,
+    ) -> Result<Option<SecretString>, String> {
+        let blob_opt: Option<Option<Vec<u8>>> = self
+            .conn
+            .query_row(
+                "SELECT encrypted_password FROM credentials WHERE id = ?1",
+                params![credential_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("Erreur lecture secret identifiant #{credential_id} : {e}"))?;
+
+        match blob_opt.flatten() {
+            Some(blob) if !blob.is_empty() => Ok(Some(decrypt_secret(&blob)?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Résout `(username, domain, password)` effectifs d'une connexion.
+    /// Si un identifiant partagé (`credential_id`) est lié, ses informations et son secret DPAPI
+    /// sont utilisés ; pour FTP/SSH, `conn.domain` (répertoire initial / clé privée) est préservé.
+    pub fn resolve_connection_credentials(
+        &self,
+        conn: &ConnectionItem,
+    ) -> Result<(String, String, Option<SecretString>), String> {
+        if let Some(cred_id) = conn.credential_id
+            && let Some(cred) = self.get_credential(cred_id)?
+        {
+            let pwd = self.load_decrypted_credential_password(cred_id)?;
+            let eff_domain = if conn.protocol == Protocol::Rdp {
+                cred.domain
+            } else {
+                conn.domain.clone()
+            };
+            return Ok((cred.username, eff_domain, pwd));
+        }
+
+        let pwd = if conn.has_saved_password {
+            self.load_decrypted_password(conn.id)?
+        } else {
+            None
+        };
+        Ok((conn.username.clone(), conn.domain.clone(), pwd))
     }
 }
 
@@ -1787,6 +2093,7 @@ mod tests {
             save_password: true,
             password: SecretString::new("MonSecretDPAPI!42".to_string()),
             keep_existing_password: false,
+            credential_id: None,
             dynamic_resolution: true,
             redirect_clipboard: true,
         }
@@ -1795,7 +2102,7 @@ mod tests {
     #[test]
     fn test_schema_migration_and_settings() {
         let mut store = Storage::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 6);
+        assert_eq!(store.schema_version().unwrap(), 7);
         assert_eq!(
             store.get_setting("theme_mode").unwrap().as_deref(),
             Some("dark")
@@ -2367,7 +2674,7 @@ mod tests {
 
         // Ouvrir avec Malvision Storage : les migrations v4 puis v5 doivent s'exécuter
         let mut store = Storage::open_at_path(&db_path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 6);
+        assert_eq!(store.schema_version().unwrap(), 7);
 
         let conns = store.list_connections().unwrap();
         assert_eq!(conns.len(), 1);
@@ -2389,6 +2696,7 @@ mod tests {
             save_password: false,
             password: SecretString::new(String::new()),
             keep_existing_password: false,
+            credential_id: None,
             dynamic_resolution: false,
             redirect_clipboard: false,
         };
@@ -2414,5 +2722,96 @@ mod tests {
 
         drop(store);
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_shared_credentials_crud_resolution_and_delete() {
+        let mut store = Storage::open_in_memory().unwrap();
+        let cred = store
+            .create_credential(CredentialDraft {
+                name: "Admin Infra".to_string(),
+                username: "CORP\\svc_admin".to_string(),
+                domain: String::new(),
+                description: "Compte partagé production".to_string(),
+                password: SecretString::new("SharedSecret#1".to_string()),
+                keep_existing_password: false,
+            })
+            .unwrap();
+        assert_eq!(cred.domain, "CORP");
+        assert_eq!(cred.username, "svc_admin");
+        assert!(cred.has_saved_password);
+
+        // Connexion RDP liée à l'identifiant partagé
+        let mut rdp_draft = sample_rdp_draft("DC-01", "10.0.0.10", None);
+        rdp_draft.credential_id = Some(cred.id);
+        let rdp = store.create_connection(rdp_draft).unwrap();
+        assert_eq!(rdp.credential_id, Some(cred.id));
+        assert!(!rdp.has_saved_password);
+
+        // Connexion FTP liée au même identifiant tout en conservant son répertoire initial `/var/www`
+        let ftp = store
+            .create_connection(ConnectionDraft {
+                folder_id: None,
+                credential_id: Some(cred.id),
+                name: "Web Prod FTP".to_string(),
+                protocol: Protocol::Ftp,
+                host: "ftp.corp.local".to_string(),
+                port: 21,
+                username: String::new(),
+                domain: "/var/www".to_string(),
+                description: String::new(),
+                is_favorite: false,
+                is_priority: false,
+                save_password: false,
+                password: SecretString::new(String::new()),
+                keep_existing_password: false,
+                dynamic_resolution: false,
+                redirect_clipboard: false,
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.count_connections_using_credential(cred.id).unwrap(),
+            2
+        );
+
+        let (u_rdp, d_rdp, p_rdp) = store.resolve_connection_credentials(&rdp).unwrap();
+        assert_eq!(u_rdp, "svc_admin");
+        assert_eq!(d_rdp, "CORP");
+        assert_eq!(p_rdp.unwrap().as_str(), "SharedSecret#1");
+
+        let (u_ftp, d_ftp, p_ftp) = store.resolve_connection_credentials(&ftp).unwrap();
+        assert_eq!(u_ftp, "svc_admin");
+        assert_eq!(d_ftp, "/var/www");
+        assert_eq!(p_ftp.unwrap().as_str(), "SharedSecret#1");
+
+        // Mise à jour du mot de passe partagé -> répercutée immédiatement sur les deux connexions
+        store
+            .update_credential(
+                cred.id,
+                CredentialDraft {
+                    name: "Admin Infra".to_string(),
+                    username: "svc_admin2".to_string(),
+                    domain: "AD".to_string(),
+                    description: "Rotation".to_string(),
+                    password: SecretString::new("SharedSecret#2".to_string()),
+                    keep_existing_password: false,
+                },
+            )
+            .unwrap();
+
+        let (u_rdp2, d_rdp2, p_rdp2) = store.resolve_connection_credentials(&rdp).unwrap();
+        assert_eq!(u_rdp2, "svc_admin2");
+        assert_eq!(d_rdp2, "AD");
+        assert_eq!(p_rdp2.unwrap().as_str(), "SharedSecret#2");
+
+        // Recherche par nom d'identifiant partagé
+        let found = store.search_connections("Admin Infra").unwrap();
+        assert_eq!(found.len(), 2);
+
+        // Suppression de l'identifiant -> ON DELETE SET NULL sur les connexions
+        store.delete_credential(cred.id).unwrap();
+        let rdp_after = store.get_connection(rdp.id).unwrap().unwrap();
+        assert_eq!(rdp_after.credential_id, None);
     }
 }

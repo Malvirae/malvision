@@ -73,10 +73,71 @@ pub struct Folder {
 ///
 /// Ne contient jamais le mot de passe en clair : seul `has_saved_password` indique
 /// la présence d'un blob DPAPI dans SQLite, déchiffré uniquement à la demande.
+/// Identifiant partagé réutilisable par plusieurs connexions (RDP, FTP, SSH, AnyDesk, RustDesk).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialItem {
+    pub id: i64,
+    pub name: String,
+    pub username: String,
+    pub domain: String,
+    pub has_saved_password: bool,
+    pub description: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl CredentialItem {
+    /// Libellé compact d'affichage (`DOMAINE\utilisateur` ou `utilisateur`).
+    pub fn account_label(&self) -> String {
+        if !self.domain.is_empty() && !self.username.is_empty() {
+            format!("{}\\{}", self.domain, self.username)
+        } else if !self.username.is_empty() {
+            self.username.clone()
+        } else if !self.domain.is_empty() {
+            self.domain.clone()
+        } else {
+            "(sans nom d'utilisateur)".to_string()
+        }
+    }
+}
+
+/// Données saisies pour créer ou modifier un identifiant partagé.
+#[derive(Debug, Clone)]
+pub struct CredentialDraft {
+    pub name: String,
+    pub username: String,
+    pub domain: String,
+    pub description: String,
+    pub password: SecretString,
+    /// Si true lors d'une mise à jour et `password` vide, conserve le mot de passe chiffré existant.
+    pub keep_existing_password: bool,
+}
+
+impl CredentialDraft {
+    /// Nettoie et valide les champs avant persistance.
+    pub fn validate_and_normalize(&mut self) -> Result<(), String> {
+        self.name = self.name.trim().to_string();
+        if self.name.is_empty() {
+            return Err("Le nom de l'identifiant ne peut pas être vide.".to_string());
+        }
+        self.username = self.username.trim().to_string();
+        self.domain = self.domain.trim().to_string();
+        self.description = self.description.trim().to_string();
+
+        if self.domain.is_empty() && self.username.contains('\\') {
+            let (d, u) = split_domain_username(&self.username);
+            self.domain = d;
+            self.username = u;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionItem {
     pub id: i64,
     pub folder_id: Option<i64>,
+    pub credential_id: Option<i64>,
     pub name: String,
     pub protocol: Protocol,
     pub host: String,
@@ -130,6 +191,7 @@ impl ConnectionItem {
 #[derive(Debug, Clone)]
 pub struct ConnectionDraft {
     pub folder_id: Option<i64>,
+    pub credential_id: Option<i64>,
     pub name: String,
     pub protocol: Protocol,
     pub host: String,
@@ -244,8 +306,19 @@ impl ConnectionDraft {
         self.domain = self.domain.trim().to_string();
         self.description = self.description.trim().to_string();
 
-        // Si l'utilisateur a saisi `DOMAINE\utilisateur` dans le champ utilisateur et laissé domaine vide (RDP uniquement)
-        if self.protocol == Protocol::Rdp && self.domain.is_empty() && self.username.contains('\\')
+        // Si un identifiant partagé est lié, on délègue l'authentification à l'identifiant
+        // (pour FTP/SSH on conserve `domain` qui stocke le répertoire initial / la clé privée).
+        if self.credential_id.is_some() {
+            self.username.clear();
+            if self.protocol == Protocol::Rdp {
+                self.domain.clear();
+            }
+            self.save_password = false;
+            self.password.clear();
+            self.keep_existing_password = false;
+        } else if self.protocol == Protocol::Rdp
+            && self.domain.is_empty()
+            && self.username.contains('\\')
         {
             let (d, u) = split_domain_username(&self.username);
             self.domain = d;
@@ -490,6 +563,7 @@ mod tests {
             save_password: false,
             password: SecretString::new("MonMotDePasse".to_string()),
             keep_existing_password: false,
+            credential_id: None,
             dynamic_resolution: true,
             redirect_clipboard: true,
         };
@@ -520,6 +594,7 @@ mod tests {
             save_password: false,
             password: SecretString::new(String::new()),
             keep_existing_password: false,
+            credential_id: None,
             dynamic_resolution: true,
             redirect_clipboard: true,
         };
@@ -597,6 +672,7 @@ mod tests {
                 created_at: 0,
                 updated_at: 0,
                 last_connected_at: None,
+                credential_id: None,
             },
             ConnectionItem {
                 id: 11,
@@ -618,6 +694,7 @@ mod tests {
                 created_at: 0,
                 updated_at: 0,
                 last_connected_at: None,
+                credential_id: None,
             },
             // Dans dossier 1 ("Clients") : connexions directes
             ConnectionItem {
@@ -640,6 +717,7 @@ mod tests {
                 created_at: 0,
                 updated_at: 0,
                 last_connected_at: None,
+                credential_id: None,
             },
             ConnectionItem {
                 id: 21,
@@ -661,6 +739,7 @@ mod tests {
                 created_at: 0,
                 updated_at: 0,
                 last_connected_at: None,
+                credential_id: None,
             },
             // Dans dossier 3 ("client a")
             ConnectionItem {
@@ -683,6 +762,7 @@ mod tests {
                 created_at: 0,
                 updated_at: 0,
                 last_connected_at: None,
+                credential_id: None,
             },
             // Dans dossier 2 ("Client B")
             ConnectionItem {
@@ -705,6 +785,7 @@ mod tests {
                 created_at: 0,
                 updated_at: 0,
                 last_connected_at: None,
+                credential_id: None,
             },
             // Dans dossier 4 ("Administration")
             ConnectionItem {
@@ -727,6 +808,7 @@ mod tests {
                 created_at: 0,
                 updated_at: 0,
                 last_connected_at: None,
+                credential_id: None,
             },
         ];
 
@@ -797,6 +879,7 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             last_connected_at: None,
+            credential_id: None,
         };
 
         let connections = vec![
@@ -861,6 +944,7 @@ mod tests {
             save_password: true,
             password: SecretString::new("S3cretFTP!".to_string()),
             keep_existing_password: false,
+            credential_id: None,
             dynamic_resolution: false,
             redirect_clipboard: false,
         };
@@ -888,6 +972,7 @@ mod tests {
             save_password: true,
             password: SecretString::new("S3cretSSH!".to_string()),
             keep_existing_password: false,
+            credential_id: None,
             dynamic_resolution: false,
             redirect_clipboard: false,
         };
@@ -898,5 +983,38 @@ mod tests {
         assert_eq!(draft.domain, "~/.ssh/id_ed25519");
         assert_eq!(draft.protocol.as_str(), "ssh");
         assert_eq!(draft.protocol.badge_prefix(), "[SSH]");
+    }
+
+    #[test]
+    fn test_validate_credential_draft_splits_domain_and_trims() {
+        let mut draft = CredentialDraft {
+            name: "  Admin Domaine  ".to_string(),
+            username: "  CORP\\jdupont  ".to_string(),
+            domain: String::new(),
+            description: "  Compte partagé infra  ".to_string(),
+            password: SecretString::new("S3cretPass!".to_string()),
+            keep_existing_password: false,
+        };
+        draft
+            .validate_and_normalize()
+            .expect("Validation identifiant OK");
+        assert_eq!(draft.name, "Admin Domaine");
+        assert_eq!(draft.domain, "CORP");
+        assert_eq!(draft.username, "jdupont");
+        assert_eq!(draft.description, "Compte partagé infra");
+        assert_eq!(draft.password.as_str(), "S3cretPass!");
+    }
+
+    #[test]
+    fn test_reject_empty_credential_name() {
+        let mut draft = CredentialDraft {
+            name: "   ".to_string(),
+            username: "admin".to_string(),
+            domain: String::new(),
+            description: String::new(),
+            password: SecretString::new(String::new()),
+            keep_existing_password: false,
+        };
+        assert!(draft.validate_and_normalize().is_err());
     }
 }
