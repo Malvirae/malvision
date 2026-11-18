@@ -351,6 +351,7 @@ enum InteractiveZone {
     BtnCollapseAll,
     BtnCredentials,
     BtnSettings,
+    TabHome,
     TabSelect(u32),
     TabClose(u32),
     TabActions(u32),
@@ -2510,8 +2511,8 @@ impl AppWindowState {
 
             self.paint_tab_bar(hdc, tabbar_rc);
 
-            // 4. Zone centrale : si aucune session RDP n'est ouverte, dessiner l'écran d'accueil moderne
-            if self.sessions.is_empty() {
+            // 4. Zone centrale : si l'onglet Accueil est actif (aucune session affichée), dessiner l'écran d'accueil moderne
+            if self.sessions.active_session_id().is_none() {
                 let home_rc = RECT {
                     left: content_left,
                     top: TABBAR_HEIGHT,
@@ -2555,15 +2556,25 @@ impl AppWindowState {
             let mut x = tabbar_rc.left + 8;
             let active_id = self.sessions.active_session_id();
 
-            if self.sessions.is_empty() {
-                // Onglet d'accueil passif avec icône maison vectorielle
-                let home_tab = RECT {
-                    left: x,
-                    top: 5,
-                    right: x + 150,
-                    bottom: TABBAR_HEIGHT - 1,
-                };
-                let _ = FillRect(hdc, &home_tab, self.palette.brush_bg_deep);
+            // Onglet d'accueil permanent à gauche de la barre des connexions
+            let home_tab_w = 136;
+            let home_tab = RECT {
+                left: x,
+                top: 4,
+                right: x + home_tab_w,
+                bottom: TABBAR_HEIGHT - 1,
+            };
+            let is_home_active = active_id.is_none();
+            let is_home_hover = self.hovered_zone == Some(InteractiveZone::TabHome);
+            let home_bg = if is_home_active {
+                self.palette.brush_bg_deep
+            } else if is_home_hover {
+                self.palette.brush_bg_hover
+            } else {
+                self.palette.brush_bg_surface
+            };
+            let _ = FillRect(hdc, &home_tab, home_bg);
+            if is_home_active {
                 draw_horizontal_line(
                     hdc,
                     home_tab.left,
@@ -2578,24 +2589,51 @@ impl AppWindowState {
                     home_tab.top + 1,
                     col_accent(),
                 );
-                draw_icon_home(
-                    hdc,
-                    home_tab.left + 14,
-                    (home_tab.top + home_tab.bottom) / 2 - 7,
-                    col_accent_hover(),
-                );
-                let _ = SelectObject(hdc, self.palette.font_ui_bold.into());
-                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
-                draw_text_line(
-                    hdc,
-                    "Accueil",
-                    RECT {
-                        left: home_tab.left + 34,
-                        top: home_tab.top,
-                        right: home_tab.right - 10,
-                        bottom: home_tab.bottom,
-                    },
-                );
+            }
+            draw_icon_home(
+                hdc,
+                home_tab.left + 14,
+                (home_tab.top + home_tab.bottom) / 2 - 7,
+                if is_home_active {
+                    col_accent_hover()
+                } else {
+                    col_text_muted()
+                },
+            );
+            let _ = SelectObject(
+                hdc,
+                if is_home_active {
+                    self.palette.font_ui_bold
+                } else {
+                    self.palette.font_ui
+                }
+                .into(),
+            );
+            let _ = SetTextColor(
+                hdc,
+                COLORREF(if is_home_active {
+                    col_text_primary()
+                } else {
+                    col_text_muted()
+                }),
+            );
+            draw_text_line(
+                hdc,
+                "Accueil",
+                RECT {
+                    left: home_tab.left + 34,
+                    top: home_tab.top,
+                    right: home_tab.right - 10,
+                    bottom: home_tab.bottom,
+                },
+            );
+            self.hit_zones.push(HitZone {
+                rect: home_tab,
+                zone: InteractiveZone::TabHome,
+            });
+            x += home_tab_w + 4;
+
+            if self.sessions.is_empty() {
                 return;
             }
 
@@ -4049,7 +4087,7 @@ impl AppWindowState {
     }
 
     fn on_mouse_wheel(&mut self, delta: i16) {
-        if self.sessions.is_empty() {
+        if self.sessions.active_session_id().is_none() {
             let rc = self.client_rect();
             let visible_h = rc.bottom - rc.top - TABBAR_HEIGHT - STATUSBAR_HEIGHT;
             let max_scroll = (self.dashboard_content_height - visible_h + 30).max(0);
@@ -4152,6 +4190,10 @@ impl AppWindowState {
                         LPARAM(0),
                     );
                 },
+                InteractiveZone::TabHome => {
+                    self.sessions.select_home();
+                    self.invalidate_canvas();
+                }
                 InteractiveZone::TabSelect(sid) => {
                     let viewport = self.rdp_viewport_rect();
                     self.sessions.select_tab(sid, viewport);
@@ -10942,7 +10984,7 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
 
                         let _ = SelectObject(hdc, state.font_ui.into());
                         let _ = SetTextColor(hdc, COLORREF(col_text_secondary()));
-                        let about_desc = "Malvision est un client natif haute performance conçu pour les administrateurs système et professionnels de l'infrastructure.\nIl prend en charge le Bureau à distance Microsoft (ActiveX MsTscAx) avec sessions par onglets, ainsi que le lancement automatisé des clients AnyDesk et RustDesk.";
+                        let about_desc = "Malvision est un client natif haute performance conçu pour les administrateurs système.\nIl intègre RDP (MsTscAx), un client FTP double-panneau, un terminal SSH (ConPTY), AnyDesk / RustDesk (DPAPI), les identifiants partagés et les onglets multi-sessions.";
                         draw_text_multiline(
                             hdc,
                             about_desc,
@@ -12496,7 +12538,7 @@ fn run_settings_dialog(
             RECT {
                 left: content_x,
                 top: dpi.scale(164),
-                right: content_x + dpi.scale(190),
+                right: content_x + dpi.scale(178),
                 bottom: dpi.scale(164) + dpi.scale(34),
             },
             IDC_SET_ADV_CHANGE_PATH,
@@ -12507,9 +12549,9 @@ fn run_settings_dialog(
             hinstance.into(),
             w!("Ouvrir le dossier"),
             RECT {
-                left: content_x + dpi.scale(198),
+                left: content_x + dpi.scale(186),
                 top: dpi.scale(164),
-                right: content_x + dpi.scale(338),
+                right: content_x + dpi.scale(318),
                 bottom: dpi.scale(164) + dpi.scale(34),
             },
             IDC_SET_ADV_OPEN_FOLDER,
@@ -12520,9 +12562,9 @@ fn run_settings_dialog(
             hinstance.into(),
             w!("Revenir au dossier par défaut"),
             RECT {
-                left: content_x + dpi.scale(346),
+                left: content_x + dpi.scale(326),
                 top: dpi.scale(164),
-                right: content_x + dpi.scale(570),
+                right: content_right,
                 bottom: dpi.scale(164) + dpi.scale(34),
             },
             IDC_SET_ADV_RESET_DEFAULT,

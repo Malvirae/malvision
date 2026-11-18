@@ -2,6 +2,20 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
+## [1.0.8] — Onglet Accueil permanent & Finitions UI (2026-11-18)
+
+### Ajouté & Corrigé
+- **Onglet « Accueil » permanent dans la barre des connexions (`src/sessions.rs`, `src/ui.rs`)** :
+  - Ajout de `SessionManager::select_home()` permettant de revenir à l'écran d'accueil (`active_session_id = None`) tout en conservant les sessions actives ouvertes en arrière-plan.
+  - L'onglet **Accueil** (`InteractiveZone::TabHome`) reste affiché en permanence à gauche de la barre d'onglets, et les connexions ouvertes s'ajoutent à la suite.
+  - Le rendu du tableau de bord (`paint`) et le défilement molette (`on_mouse_wheel`) utilisent désormais `active_session_id().is_none()`.
+- **Fenêtre Paramètres (`src/ui.rs`)** :
+  - Mise à jour de la description dans l'onglet **À propos** intégrant RDP (`MsTscAx`), FTP double-panneau, SSH (`ConPTY`), AnyDesk/RustDesk (`DPAPI`), identifiants partagés et onglets multi-sessions, avec texte ajusté sans troncature.
+  - Correction de la largeur des boutons dans l'onglet **Avancé** afin de conserver la marge droite de `28 px` à droite de *« Revenir au dossier par défaut »*.
+
+### Testé
+- **111 tests unitaires et d'intégration (100 % passants)**, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` et vérification PE (`FileVersion = 1.0.8.0`, `ProductVersion = 1.0.8`).
+
 ## [1.0.7] — Gestionnaire d'identifiants partagés (2026-11-18)
 
 ### Ajouté & Amélioré

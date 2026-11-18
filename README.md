@@ -2,11 +2,15 @@
 
 Application native **Windows 11 x64** de gestion de connexions distantes, écrite en **Rust** avec `windows-rs` (Win32 natif + COM/ActiveX + SQLite embarqué + DPAPI).
 
-**Version actuelle :** `1.0.7` (V1.0.7 Portable)
+**Version actuelle :** `1.0.8` (V1.0.8 Portable)
 
 ---
 
-## Fonctionnalités principales (V1.0.7)
+## Fonctionnalités principales (V1.0.8)
+
+- **Onglet « Accueil » permanent & finitions UI (V1.0.8)** :
+  - L'onglet **Accueil** reste désormais affiché en permanence tout à gauche de la barre d'onglets : vous pouvez basculer librement entre l'accueil et vos sessions ouvertes (RDP, FTP, SSH) sans les fermer.
+  - Mise à jour de la description dans **Paramètres > À propos** et alignement de la marge droite des boutons dans **Paramètres > Avancé**.
 
 - **Gestionnaire d'identifiants partagés DPAPI (V1.0.7)** :
   - Nouveau bouton **« Identifiants »** dans le pied de barre latérale ouvrant le **Gestionnaire d'identifiants partagés** (`Nouveau…`, `Modifier…`, `Supprimer`, compteur de connexions liées).

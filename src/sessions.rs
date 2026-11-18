@@ -330,6 +330,15 @@ impl SessionManager {
         true
     }
 
+    /// Revient à l'onglet permanent « Accueil » (`active_session_id = None`)
+    /// en masquant les onglets de session ouverts sans les fermer.
+    pub fn select_home(&mut self) {
+        self.active_session_id = None;
+        for tab in &mut self.tabs {
+            tab.host.set_visible(false);
+        }
+    }
+
     /// Ferme un onglet de session RDP : désabonne immédiatement le sink COM (`deactivate_events`),
     /// déconnecte proprement la session si nécessaire et détruit son conteneur ActiveX sans affecter
     /// les autres sessions. Sélectionne un autre onglet RDP s'il en reste, ou revient à `Accueil` (`None`).
@@ -918,6 +927,13 @@ mod tests {
             assert_eq!(mgr.tabs().len(), 2);
             assert!(!hwnd1.is_invalid());
             assert!(!hwnd2.is_invalid());
+
+            // Basculer sur l'onglet permanent « Accueil » sans fermer les sessions actives
+            mgr.select_home();
+            assert_eq!(mgr.active_session_id(), None);
+            assert_eq!(mgr.tabs().len(), 2);
+            assert!(mgr.select_tab(2, viewport));
+            assert_eq!(mgr.active_session_id(), Some(2));
 
             // Fermer l'onglet 2 : l'onglet 1 redevient automatiquement l'onglet actif
             assert!(mgr.close_tab(2, viewport));
