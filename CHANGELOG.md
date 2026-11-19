@@ -2,6 +2,27 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
+## [1.0.10] — Wake-on-LAN, Menus Fluent, Modale MAJ au lancement & Correctif SSH (2026-11-19)
+
+### Corrigé
+- **Double `Entrée` en session SSH (`src/ssh.rs`)** :
+  - Ajout de `should_skip_ssh_wm_char()` dans `ssh_host_wnd_proc` afin d'ignorer `\r`, `\n` (sans `Ctrl`), `\x08`, `\t` et `\x1b` lors de `WM_CHAR`, évitant le double envoi après `WM_KEYDOWN` (`VK_RETURN`, `VK_BACK`, `VK_TAB`, `VK_ESCAPE`).
+- **Icône Malvision dans toutes les fenêtres modales (`src/ui.rs`)** :
+  - Extraction de `apply_malvision_window_icon()` et application systématique sur les modales *Wake-on-LAN*, *Mise à jour au lancement*, *Saisie texte* et *Identifiants*.
+
+### Ajouté & Amélioré
+- **Wake-on-LAN (WoL) par connexion (`src/models.rs`, `src/storage.rs`, `src/ui.rs`)** :
+  - Migration automatique de schéma SQLite **v7 -> v8** ajoutant `wol_host`, `wol_mac` et `wol_port` (défaut `9`) sur la table `connections`.
+  - Nouvelle entrée **`Wake On Lan…`** dans le menu contextuel d'une connexion ouvrant `run_wol_config_dialog` (IP ou FQDN / sous-domaine résolu par DNS, adresse MAC normalisée, port UDP `9` par défaut, boutons *Enregistrer*, *Effacer*, *Annuler*).
+  - Affichage dynamique de **`⚡ Réveiller (Wake-on-LAN)`** dès qu'une configuration WoL est enregistrée, envoyant le Magic Packet UDP de 102 octets (`6 × 0xFF` + `16 × MAC`).
+- **Menus contextuels thématisés Fluent (`src/ui.rs`, `src/ftp.rs`)** :
+  - Remplacement des menus `TrackPopupMenu` blancs natifs par `track_themed_popup_menu()` (owner-drawn `MFT_OWNERDRAW` respectant `GdiPalette` Dark/Light, séparateurs, sous-menus et barre d'accent au survol).
+- **Modale de mise à jour au lancement (`src/ui.rs`)** :
+  - Lorsqu'une nouvelle version est détectée au démarrage (`WM_APP_UPDATE_AVAILABLE`), ouverture de `run_startup_update_dialog` avec le grand logo Malvision (style *À propos*), l'état d'avancement en direct et les actions **Télécharger et redémarrer** (vérification SHA-256 + assistant de mise à jour via `spawn_update_install_worker`) ou **Ignorer pour l'instant**.
+
+### Testé
+- **117 tests unitaires et d'intégration (100 % passants)**, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` et build `--release` (`1.0.10`).
+
 ## [1.0.9] — Arborescence de recherche & Édition FTP intégrée / externe (2026-11-19)
 
 ### Ajouté & Amélioré

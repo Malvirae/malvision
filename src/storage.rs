@@ -18,7 +18,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const CURRENT_SCHEMA_VERSION: i32 = 7;
+const CURRENT_SCHEMA_VERSION: i32 = 8;
 
 /// Résumé du diagnostic et du résultat d'un import de configuration SQLite.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -496,6 +496,24 @@ impl Storage {
 
             tx.commit()
                 .map_err(|e| format!("Échec de validation de la migration SQLite v7 : {e}"))?;
+        }
+
+        if version < 8 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Impossible d'ouvrir la transaction de migration v8 : {e}"))?;
+
+            tx.execute_batch(
+                "ALTER TABLE connections ADD COLUMN wol_host TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE connections ADD COLUMN wol_mac TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE connections ADD COLUMN wol_port INTEGER NOT NULL DEFAULT 9;
+                 PRAGMA user_version = 8;",
+            )
+            .map_err(|e| format!("Échec de la migration SQLite v8 : {e}"))?;
+
+            tx.commit()
+                .map_err(|e| format!("Échec de validation de la migration SQLite v8 : {e}"))?;
         }
 
         if version > CURRENT_SCHEMA_VERSION {
@@ -1067,7 +1085,8 @@ impl Storage {
                         is_favorite, is_priority, save_password,
                         (encrypted_password IS NOT NULL AND length(encrypted_password) > 0) AS has_pwd,
                         dynamic_resolution, redirect_clipboard, sort_order,
-                        created_at, updated_at, last_connected_at, credential_id
+                        created_at, updated_at, last_connected_at, credential_id,
+                        wol_host, wol_mac, wol_port
                  FROM connections WHERE id = ?1",
                 params![connection_id],
                 Self::map_connection_row,
@@ -1084,7 +1103,8 @@ impl Storage {
                         is_favorite, is_priority, save_password,
                         (encrypted_password IS NOT NULL AND length(encrypted_password) > 0) AS has_pwd,
                         dynamic_resolution, redirect_clipboard, sort_order,
-                        created_at, updated_at, last_connected_at, credential_id
+                        created_at, updated_at, last_connected_at, credential_id,
+                        wol_host, wol_mac, wol_port
                  FROM connections
                  ORDER BY sort_order ASC, name COLLATE NOCASE ASC, id ASC",
             )
@@ -1115,7 +1135,8 @@ impl Storage {
                         is_favorite, is_priority, save_password,
                         (encrypted_password IS NOT NULL AND length(encrypted_password) > 0) AS has_pwd,
                         dynamic_resolution, redirect_clipboard, sort_order,
-                        created_at, updated_at, last_connected_at, credential_id
+                        created_at, updated_at, last_connected_at, credential_id,
+                        wol_host, wol_mac, wol_port
                  FROM connections
                  WHERE lower(name) LIKE ?1
                     OR lower(host) LIKE ?1
@@ -1378,6 +1399,7 @@ impl Storage {
                         (c.encrypted_password IS NOT NULL AND length(c.encrypted_password) > 0) AS has_pwd,
                         c.dynamic_resolution, c.redirect_clipboard, c.sort_order,
                         c.created_at, c.updated_at, c.last_connected_at, c.credential_id,
+                        c.wol_host, c.wol_mac, c.wol_port,
                         r.connected_at
                  FROM recent_connections r
                  JOIN connections c ON c.id = r.connection_id
@@ -1389,7 +1411,7 @@ impl Storage {
         let rows = stmt
             .query_map(params![limit as i64], |row| {
                 let conn_item = Self::map_connection_row(row)?;
-                let connected_at: i64 = row.get(20)?;
+                let connected_at: i64 = row.get(23)?;
                 Ok(RecentConnectionEntry {
                     connection: conn_item,
                     connected_at,
@@ -1760,6 +1782,24 @@ impl Storage {
         Ok(summary)
     }
 
+    /// Enregistre ou efface les paramètres Wake-on-LAN d'une connexion.
+    pub fn update_connection_wol(
+        &self,
+        connection_id: i64,
+        wol_host: &str,
+        wol_mac: &str,
+        wol_port: u16,
+    ) -> Result<(), String> {
+        let now = unix_timestamp();
+        self.conn
+            .execute(
+                "UPDATE connections SET wol_host = ?1, wol_mac = ?2, wol_port = ?3, updated_at = ?4 WHERE id = ?5",
+                params![wol_host.trim(), wol_mac.trim(), wol_port as i32, now, connection_id],
+            )
+            .map_err(|e| format!("Erreur sauvegarde Wake-on-LAN : {e}"))?;
+        Ok(())
+    }
+
     fn connection_exists(&self, connection_id: i64) -> Result<bool, String> {
         let count: i64 = self
             .conn
@@ -1797,6 +1837,9 @@ impl Storage {
             updated_at: row.get(17)?,
             last_connected_at: row.get(18)?,
             credential_id: row.get(19)?,
+            wol_host: row.get(20)?,
+            wol_mac: row.get(21)?,
+            wol_port: u16::try_from(row.get::<_, i32>(22)?).unwrap_or(9),
         })
     }
 
@@ -2102,7 +2145,7 @@ mod tests {
     #[test]
     fn test_schema_migration_and_settings() {
         let mut store = Storage::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 7);
+        assert_eq!(store.schema_version().unwrap(), 8);
         assert_eq!(
             store.get_setting("theme_mode").unwrap().as_deref(),
             Some("dark")
@@ -2674,7 +2717,7 @@ mod tests {
 
         // Ouvrir avec Malvision Storage : les migrations v4 puis v5 doivent s'exécuter
         let mut store = Storage::open_at_path(&db_path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 7);
+        assert_eq!(store.schema_version().unwrap(), 8);
 
         let conns = store.list_connections().unwrap();
         assert_eq!(conns.len(), 1);
@@ -2813,5 +2856,41 @@ mod tests {
         store.delete_credential(cred.id).unwrap();
         let rdp_after = store.get_connection(rdp.id).unwrap().unwrap();
         assert_eq!(rdp_after.credential_id, None);
+    }
+
+    #[test]
+    fn test_connection_wol_persistence_and_schema_v8() {
+        let mut store = Storage::open_in_memory().unwrap();
+        let conn = store
+            .create_connection(ConnectionDraft {
+                folder_id: None,
+                credential_id: None,
+                name: "PC Bureau".to_string(),
+                protocol: Protocol::Rdp,
+                host: "bureau.exemple.fr".to_string(),
+                port: 3389,
+                username: "admin".to_string(),
+                domain: String::new(),
+                description: String::new(),
+                is_favorite: false,
+                is_priority: false,
+                save_password: false,
+                keep_existing_password: false,
+                password: SecretString::new(String::new()),
+                dynamic_resolution: true,
+                redirect_clipboard: true,
+            })
+            .unwrap();
+        assert!(!conn.has_wol_configured());
+        assert_eq!(conn.wol_port, 9);
+
+        store
+            .update_connection_wol(conn.id, "wake.exemple.fr", "AA:BB:CC:DD:EE:FF", 7)
+            .unwrap();
+        let reloaded = store.get_connection(conn.id).unwrap().unwrap();
+        assert!(reloaded.has_wol_configured());
+        assert_eq!(reloaded.wol_host, "wake.exemple.fr");
+        assert_eq!(reloaded.wol_mac, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(reloaded.wol_port, 7);
     }
 }

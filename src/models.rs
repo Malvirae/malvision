@@ -155,9 +155,16 @@ pub struct ConnectionItem {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_connected_at: Option<i64>,
+    pub wol_host: String,
+    pub wol_mac: String,
+    pub wol_port: u16,
 }
 
 impl ConnectionItem {
+    /// Indique si le Wake-on-LAN est configuré sur cette connexion (cible + MAC non vides).
+    pub fn has_wol_configured(&self) -> bool {
+        !self.wol_host.trim().is_empty() && !self.wol_mac.trim().is_empty()
+    }
     /// Retourne une étiquette d'adresse lisible (ex. `192.168.1.10:3389`, `ftp.serveur.fr:2121` ou l'ID AnyDesk/RustDesk).
     pub fn endpoint_label(&self) -> String {
         match self.protocol {
@@ -543,6 +550,100 @@ pub fn collect_tree_ordered_connections(
     result
 }
 
+/// Parse et valide une adresse MAC (`AA:BB:CC:DD:EE:FF`, `AA-BB-CC-DD-EE-FF`, `AABB.CCDD.EEFF` ou `AABBCCDDEEFF`).
+pub fn normalize_mac_address(raw: &str) -> Result<[u8; 6], String> {
+    let hex_only: String = raw
+        .chars()
+        .filter(|c| !matches!(c, ':' | '-' | '.' | ' ' | '\t'))
+        .collect();
+    if hex_only.len() != 12 || !hex_only.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(
+            "Adresse MAC invalide. Format attendu : AA:BB:CC:DD:EE:FF (ou AA-BB-CC-DD-EE-FF)."
+                .to_string(),
+        );
+    }
+    let mut mac = [0u8; 6];
+    for (i, slot) in mac.iter_mut().enumerate() {
+        let pair = &hex_only[i * 2..i * 2 + 2];
+        *slot = u8::from_str_radix(pair, 16)
+            .map_err(|_| "Adresse MAC invalide : octets hexadécimaux incorrects.".to_string())?;
+    }
+    Ok(mac)
+}
+
+pub fn format_mac_address(mac: [u8; 6]) -> String {
+    format!(
+        "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
+}
+
+/// Construit un Magic Packet Wake-on-LAN standard de 102 octets (`6 x 0xFF` + `16 x MAC`).
+pub fn build_magic_packet(mac: [u8; 6]) -> [u8; 102] {
+    let mut packet = [0xFFu8; 102];
+    for i in 0..16 {
+        let offset = 6 + i * 6;
+        packet[offset..offset + 6].copy_from_slice(&mac);
+    }
+    packet
+}
+
+/// Résout une cible IP ou FQDN et envoie le Magic Packet Wake-on-LAN en UDP sur le port donné.
+pub fn send_wake_on_lan(host: &str, mac_str: &str, port: u16) -> Result<String, String> {
+    let clean_host = host.trim();
+    if clean_host.is_empty() {
+        return Err("L'adresse IP ou le FQDN Wake-on-LAN est obligatoire.".to_string());
+    }
+    if port == 0 {
+        return Err("Le port UDP Wake-on-LAN doit être compris entre 1 et 65535.".to_string());
+    }
+    let mac = normalize_mac_address(mac_str)?;
+    let packet = build_magic_packet(mac);
+
+    let addrs: Vec<std::net::SocketAddr> =
+        std::net::ToSocketAddrs::to_socket_addrs(&(clean_host, port))
+            .map_err(|e| format!("Impossible de résoudre « {clean_host} » : {e}"))?
+            .collect();
+    if addrs.is_empty() {
+        return Err(format!(
+            "Aucune adresse réseau trouvée pour « {clean_host} »."
+        ));
+    }
+
+    let mut sent_to: Vec<String> = Vec::new();
+    let mut last_err: Option<String> = None;
+    for target in addrs {
+        let bind_addr = if target.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        match std::net::UdpSocket::bind(bind_addr) {
+            Ok(sock) => {
+                let _ = sock.set_broadcast(true);
+                match sock.send_to(&packet, target) {
+                    Ok(_) => sent_to.push(target.to_string()),
+                    Err(e) => last_err = Some(format!("Échec envoi UDP vers {target} : {e}")),
+                }
+            }
+            Err(e) => last_err = Some(format!("Impossible d'ouvrir le socket UDP : {e}")),
+        }
+    }
+
+    if sent_to.is_empty() {
+        return Err(
+            last_err.unwrap_or_else(|| "Échec de l'envoi du paquet Wake-on-LAN.".to_string())
+        );
+    }
+
+    Ok(format!(
+        "Paquet Wake-on-LAN envoyé à {} ({}) pour la MAC {}.",
+        clean_host,
+        sent_to.join(", "),
+        format_mac_address(mac)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,6 +774,9 @@ mod tests {
                 updated_at: 0,
                 last_connected_at: None,
                 credential_id: None,
+                wol_host: String::new(),
+                wol_mac: String::new(),
+                wol_port: 9,
             },
             ConnectionItem {
                 id: 11,
@@ -695,6 +799,9 @@ mod tests {
                 updated_at: 0,
                 last_connected_at: None,
                 credential_id: None,
+                wol_host: String::new(),
+                wol_mac: String::new(),
+                wol_port: 9,
             },
             // Dans dossier 1 ("Clients") : connexions directes
             ConnectionItem {
@@ -718,6 +825,9 @@ mod tests {
                 updated_at: 0,
                 last_connected_at: None,
                 credential_id: None,
+                wol_host: String::new(),
+                wol_mac: String::new(),
+                wol_port: 9,
             },
             ConnectionItem {
                 id: 21,
@@ -740,6 +850,9 @@ mod tests {
                 updated_at: 0,
                 last_connected_at: None,
                 credential_id: None,
+                wol_host: String::new(),
+                wol_mac: String::new(),
+                wol_port: 9,
             },
             // Dans dossier 3 ("client a")
             ConnectionItem {
@@ -763,6 +876,9 @@ mod tests {
                 updated_at: 0,
                 last_connected_at: None,
                 credential_id: None,
+                wol_host: String::new(),
+                wol_mac: String::new(),
+                wol_port: 9,
             },
             // Dans dossier 2 ("Client B")
             ConnectionItem {
@@ -786,6 +902,9 @@ mod tests {
                 updated_at: 0,
                 last_connected_at: None,
                 credential_id: None,
+                wol_host: String::new(),
+                wol_mac: String::new(),
+                wol_port: 9,
             },
             // Dans dossier 4 ("Administration")
             ConnectionItem {
@@ -809,6 +928,9 @@ mod tests {
                 updated_at: 0,
                 last_connected_at: None,
                 credential_id: None,
+                wol_host: String::new(),
+                wol_mac: String::new(),
+                wol_port: 9,
             },
         ];
 
@@ -880,6 +1002,9 @@ mod tests {
             updated_at: 0,
             last_connected_at: None,
             credential_id: None,
+            wol_host: String::new(),
+            wol_mac: String::new(),
+            wol_port: 9,
         };
 
         let connections = vec![
@@ -1016,5 +1141,37 @@ mod tests {
             keep_existing_password: false,
         };
         assert!(draft.validate_and_normalize().is_err());
+    }
+
+    #[test]
+    fn test_wol_mac_normalization_magic_packet_and_udp_send() {
+        let mac = normalize_mac_address("aa-bb-cc-dd-ee-ff").expect("MAC valide");
+        assert_eq!(mac, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        assert_eq!(format_mac_address(mac), "AA:BB:CC:DD:EE:FF");
+        assert_eq!(
+            normalize_mac_address("0011.2233.4455").unwrap(),
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]
+        );
+        assert!(normalize_mac_address("ZZ:BB:CC:DD:EE:FF").is_err());
+        assert!(normalize_mac_address("AA:BB:CC").is_err());
+
+        let pkt = build_magic_packet(mac);
+        assert_eq!(pkt.len(), 102);
+        assert_eq!(&pkt[0..6], &[0xFF; 6]);
+        for i in 0..16 {
+            assert_eq!(&pkt[6 + i * 6..12 + i * 6], &mac);
+        }
+
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("Bind UDP test");
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let port = sock.local_addr().unwrap().port();
+        let msg = send_wake_on_lan("127.0.0.1", "AA:BB:CC:DD:EE:FF", port).expect("Envoi WoL");
+        assert!(msg.contains("AA:BB:CC:DD:EE:FF"));
+
+        let mut buf = [0u8; 128];
+        let (n, _) = sock.recv_from(&mut buf).expect("Réception Magic Packet");
+        assert_eq!(n, 102);
+        assert_eq!(&buf[..102], &pkt);
     }
 }

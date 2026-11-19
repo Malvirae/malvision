@@ -1602,6 +1602,15 @@ unsafe fn resize_terminal_to_window(state: &mut SshWndState, w: i32, h: i32) {
     }
 }
 
+/// Évite le double envoi des touches déjà transmises dans `WM_KEYDOWN` (`Entrée`, `Retour arrière`, `Tab`, `Échap`).
+fn should_skip_ssh_wm_char(ch: char, ctrl_down: bool) -> bool {
+    match ch {
+        '\x08' | '\t' | '\x1b' => true,
+        '\r' | '\n' if !ctrl_down => true,
+        _ => false,
+    }
+}
+
 unsafe extern "system" fn ssh_host_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -1849,16 +1858,15 @@ unsafe extern "system" fn ssh_host_wnd_proc(
                 if !ptr.is_null() {
                     let state = &mut *ptr;
                     if let Some(ch) = char::from_u32(wparam.0 as u32) {
+                        if should_skip_ssh_wm_char(ch, is_key_down(VK_CONTROL.0)) {
+                            return LRESULT(0);
+                        }
                         if let Ok(mut rt) = state.runtime.lock() {
                             rt.term.view_scroll = 0;
                         }
-                        if ch == '\r' {
-                            send_bytes_to_pty(state, b"\r");
-                        } else {
-                            let mut buf = [0u8; 4];
-                            let s = ch.encode_utf8(&mut buf);
-                            send_bytes_to_pty(state, s.as_bytes());
-                        }
+                        let mut buf = [0u8; 4];
+                        let s = ch.encode_utf8(&mut buf);
+                        send_bytes_to_pty(state, s.as_bytes());
                     }
                 }
                 LRESULT(0)
@@ -2174,5 +2182,16 @@ mod tests {
         // Effacer la ligne et revenir au début
         vt.feed_bytes(b"\r\x1b[2K");
         assert_eq!(vt.visible_cell(1, 0).ch, ' ');
+    }
+
+    #[test]
+    fn test_should_skip_ssh_wm_char_prevents_double_enter() {
+        assert!(should_skip_ssh_wm_char('\r', false));
+        assert!(should_skip_ssh_wm_char('\n', false));
+        assert!(should_skip_ssh_wm_char('\x08', false));
+        assert!(should_skip_ssh_wm_char('\t', false));
+        assert!(should_skip_ssh_wm_char('\x1b', false));
+        assert!(!should_skip_ssh_wm_char('a', false));
+        assert!(!should_skip_ssh_wm_char('\x03', true)); // Ctrl+C
     }
 }

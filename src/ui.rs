@@ -25,25 +25,26 @@ use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, ClientToScreen, CreateBitmap,
     CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen,
     CreateSolidBrush, DIB_RGB_COLORS, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT,
-    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW,
-    EndPaint, FONT_CHARSET, FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY, FillRect,
-    GetStockObject, HBITMAP, HBRUSH, HDC, HFONT, InvalidateRect, LineTo, MoveToEx, NULL_BRUSH,
-    PAINTSTRUCT, PS_SOLID, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
-    RedrawWindow, RoundRect, ScreenToClient, SelectObject, SetBkColor, SetBkMode, SetTextColor,
-    TRANSPARENT, UpdateWindow,
+    DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject,
+    DrawTextW, EndPaint, FONT_CHARSET, FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY,
+    FillRect, GetStockObject, GetTextExtentPoint32W, HBITMAP, HBRUSH, HDC, HFONT, InvalidateRect,
+    LineTo, MoveToEx, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME,
+    RDW_INVALIDATE, RDW_UPDATENOW, RedrawWindow, RoundRect, ScreenToClient, SelectObject,
+    SetBkColor, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDIS_HOT, CDIS_SELECTED, CDRF_NOTIFYITEMDRAW,
     CDRF_SKIPDEFAULT, DRAWITEMSTRUCT, HTREEITEM, MEASUREITEMSTRUCT, NM_CLICK, NM_CUSTOMDRAW,
     NM_DBLCLK, NM_RCLICK, NMHDR, NMTREEVIEWW, NMTVCUSTOMDRAW, ODS_FOCUS, ODS_SELECTED, ODT_BUTTON,
-    ODT_COMBOBOX, SetWindowTheme, TV_FIRST, TVE_COLLAPSE, TVE_EXPAND, TVGN_CARET, TVGN_DROPHILITE,
-    TVGN_FIRSTVISIBLE, TVGN_NEXTVISIBLE, TVHITTESTINFO, TVHT_ONITEMBUTTON, TVI_LAST, TVI_ROOT,
-    TVIF_HANDLE, TVIF_PARAM, TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW, TVIS_EXPANDED, TVITEMEXW,
-    TVITEMW, TVM_DELETEITEM, TVM_EXPAND, TVM_GETITEMRECT, TVM_GETITEMW, TVM_GETNEXTITEM,
-    TVM_HITTEST, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETBKCOLOR, TVM_SETTEXTCOLOR, TVN_BEGINDRAGW,
-    TVN_ITEMEXPANDEDW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW, TVS_FULLROWSELECT, TVS_HASBUTTONS,
-    TVS_SHOWSELALWAYS, WC_BUTTONW, WC_COMBOBOXW, WC_EDITW, WC_TREEVIEWW, WM_MOUSELEAVE,
+    ODT_COMBOBOX, ODT_MENU, SetWindowTheme, TV_FIRST, TVE_COLLAPSE, TVE_EXPAND, TVGN_CARET,
+    TVGN_DROPHILITE, TVGN_FIRSTVISIBLE, TVGN_NEXTVISIBLE, TVHITTESTINFO, TVHT_ONITEMBUTTON,
+    TVI_LAST, TVI_ROOT, TVIF_HANDLE, TVIF_PARAM, TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW,
+    TVIS_EXPANDED, TVITEMEXW, TVITEMW, TVM_DELETEITEM, TVM_EXPAND, TVM_GETITEMRECT, TVM_GETITEMW,
+    TVM_GETNEXTITEM, TVM_HITTEST, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETBKCOLOR,
+    TVM_SETTEXTCOLOR, TVN_BEGINDRAGW, TVN_ITEMEXPANDEDW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW,
+    TVS_FULLROWSELECT, TVS_HASBUTTONS, TVS_SHOWSELALWAYS, WC_BUTTONW, WC_COMBOBOXW, WC_EDITW,
+    WC_TREEVIEWW, WM_MOUSELEAVE,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -62,18 +63,20 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
     DestroyWindow, DispatchMessageW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, ES_AUTOHSCROLL,
     ES_PASSWORD, GWL_STYLE, GWLP_USERDATA, GWLP_WNDPROC, GetClientRect, GetCursorPos, GetDlgCtrlID,
-    GetMessageW, GetParent, GetPropW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, HICON, HMENU, ICON_BIG, ICON_SMALL, ICONINFO, IDC_ARROW,
-    IDC_HAND, IDC_SIZEWE, IDNO, IDRETRY, IDYES, IMAGE_ICON, IsChild, IsIconic, IsWindow,
-    IsWindowVisible, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MB_ICONERROR,
-    MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_RETRYCANCEL, MB_YESNO,
-    MB_YESNOCANCEL, MF_SEPARATOR, MF_STRING, MINMAXINFO, MSG, MessageBoxW, MoveWindow,
+    GetMenuItemCount, GetMenuItemInfoW, GetMessageW, GetParent, GetPropW, GetSystemMetrics,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HICON, HMENU, ICON_BIG,
+    ICON_SMALL, ICONINFO, IDC_ARROW, IDC_HAND, IDC_SIZEWE, IDNO, IDRETRY, IDYES, IMAGE_ICON,
+    IsChild, IsIconic, IsWindow, IsWindowVisible, KillTimer, LR_DEFAULTCOLOR, LoadCursorW,
+    LoadImageW, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK,
+    MB_RETRYCANCEL, MB_YESNO, MB_YESNOCANCEL, MENUINFO, MENUITEMINFOW, MF_SEPARATOR, MF_STRING,
+    MFS_DISABLED, MFT_OWNERDRAW, MFT_SEPARATOR, MIIM_DATA, MIIM_FTYPE, MIIM_STATE, MIIM_STRING,
+    MIIM_SUBMENU, MIM_APPLYTOSUBMENUS, MIM_BACKGROUND, MINMAXINFO, MSG, MessageBoxW, MoveWindow,
     PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, RemovePropW,
     SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SW_HIDE, SW_RESTORE,
-    SW_SHOW, SendMessageW, SetCursor, SetForegroundWindow, SetPropW, SetTimer, SetWindowLongPtrW,
-    SetWindowTextW, ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_TOPALIGN, TrackPopupMenu,
-    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU,
-    WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
+    SW_SHOW, SendMessageW, SetCursor, SetForegroundWindow, SetMenuInfo, SetMenuItemInfoW, SetPropW,
+    SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TrackPopupMenu, TranslateMessage,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_CREATE,
+    WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
     WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
     WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_NOTIFY, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SETFONT, WM_SETICON,
@@ -257,6 +260,8 @@ const CMD_CTX_MOVE: u32 = 3006;
 const CMD_CTX_DELETE: u32 = 3007;
 const CMD_CTX_NEW_CONN_HERE: u32 = 3008;
 const CMD_CTX_NEW_SUBFOLDER: u32 = 3009;
+const CMD_CTX_WOL_WAKE: u32 = 3011;
+const CMD_CTX_WOL_CONFIG: u32 = 3012;
 
 // Commandes du menu d'actions de session active RDP
 const CMD_SESSION_CAD: u32 = 3201;
@@ -488,6 +493,40 @@ impl Drop for GdiPalette {
 
 /// Génère en mémoire une icône 32×32 ARGB identifiable pour Malvision (badge bleu Fluent avec monogramme « M »),
 /// intégrée directement au binaire sans dépendre d'aucun fichier `.ico` externe.
+unsafe fn apply_malvision_window_icon(hwnd: HWND, owner: HWND) {
+    unsafe {
+        const WM_GETICON: u32 = 0x007F;
+        let owner_icon_sm = SendMessageW(owner, WM_GETICON, Some(WPARAM(0)), Some(LPARAM(0))).0;
+        let owner_icon_lg = SendMessageW(owner, WM_GETICON, Some(WPARAM(1)), Some(LPARAM(0))).0;
+        if owner_icon_sm != 0 {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(0)),
+                Some(LPARAM(owner_icon_sm)),
+            );
+        } else {
+            let fallback_icon = create_malvision_app_icon();
+            if !fallback_icon.is_invalid() {
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(fallback_icon.0 as isize)),
+                );
+            }
+        }
+        if owner_icon_lg != 0 {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(1)),
+                Some(LPARAM(owner_icon_lg)),
+            );
+        }
+    }
+}
+
 unsafe fn create_malvision_app_icon() -> HICON {
     unsafe {
         let size = 32i32;
@@ -1352,19 +1391,11 @@ impl AppWindowState {
             );
 
             let _ = SetForegroundWindow(self.hwnd);
-            let cmd = TrackPopupMenu(
-                hmenu,
-                TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
-                cursor.x,
-                cursor.y,
-                Some(0),
-                self.hwnd,
-                None,
-            );
+            let cmd = track_themed_popup_menu(self.hwnd, hmenu, cursor.x, cursor.y, &self.palette);
             let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
             let _ = DestroyMenu(hmenu);
 
-            match cmd.0 as u32 {
+            match cmd {
                 CMD_TRAY_OPEN => self.restore_from_tray(),
                 CMD_TRAY_EXIT => {
                     let _ = self.request_explicit_exit();
@@ -4771,18 +4802,11 @@ impl AppWindowState {
             );
 
             let _ = SetForegroundWindow(self.hwnd);
-            let cmd = TrackPopupMenu(
-                hmenu,
-                TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
-                screen_pt.x,
-                screen_pt.y,
-                Some(0),
-                self.hwnd,
-                None,
-            );
+            let cmd =
+                track_themed_popup_menu(self.hwnd, hmenu, screen_pt.x, screen_pt.y, &self.palette);
             let _ = DestroyMenu(hmenu);
 
-            match cmd.0 as u32 {
+            match cmd {
                 CMD_SESSION_CAD => match self.sessions.send_cad_to_active() {
                     Ok(()) => {
                         self.status_override = Some(
@@ -4858,11 +4882,26 @@ impl AppWindowState {
                     let conn_opt = self.storage.get_connection(cid).ok().flatten();
                     let is_fav = conn_opt.as_ref().is_some_and(|c| c.is_favorite);
                     let is_prio = conn_opt.as_ref().is_some_and(|c| c.is_priority);
+                    let has_wol = conn_opt.as_ref().is_some_and(|c| c.has_wol_configured());
                     let _ = AppendMenuW(
                         hmenu,
                         MF_STRING,
                         CMD_CTX_CONNECT as usize,
                         w!("Se connecter"),
+                    );
+                    if has_wol {
+                        let _ = AppendMenuW(
+                            hmenu,
+                            MF_STRING,
+                            CMD_CTX_WOL_WAKE as usize,
+                            w!("⚡ Réveiller (Wake-on-LAN)"),
+                        );
+                    }
+                    let _ = AppendMenuW(
+                        hmenu,
+                        MF_STRING,
+                        CMD_CTX_WOL_CONFIG as usize,
+                        w!("Wake On Lan…"),
                     );
                     let _ = AppendMenuW(
                         hmenu,
@@ -4967,19 +5006,11 @@ impl AppWindowState {
                 }
             }
 
-            let cmd = TrackPopupMenu(
-                hmenu,
-                TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
-                cursor.x,
-                cursor.y,
-                Some(0),
-                self.hwnd,
-                None,
-            );
+            let cmd = track_themed_popup_menu(self.hwnd, hmenu, cursor.x, cursor.y, &self.palette);
             let _ = DestroyMenu(hmenu);
 
-            if cmd.0 != 0 {
-                self.execute_context_command(cmd.0 as u32);
+            if cmd != 0 {
+                self.execute_context_command(cmd);
             }
         }
     }
@@ -5034,6 +5065,53 @@ impl AppWindowState {
             }
             CMD_CTX_MOVE => self.prompt_move_selected(),
             CMD_CTX_DELETE => self.prompt_delete_selected(),
+            CMD_CTX_WOL_WAKE => {
+                if let Some(TreeNodeKind::Connection(cid)) = self.selected_node
+                    && let Ok(Some(conn)) = self.storage.get_connection(cid)
+                {
+                    match crate::models::send_wake_on_lan(
+                        &conn.wol_host,
+                        &conn.wol_mac,
+                        conn.wol_port,
+                    ) {
+                        Ok(msg) => {
+                            self.status_override = Some(msg.clone());
+                            self.invalidate_canvas();
+                            show_info_dialog(self.hwnd, "Wake-on-LAN", &msg);
+                        }
+                        Err(err) => {
+                            self.status_override = Some(format!("Erreur Wake-on-LAN : {err}"));
+                            self.invalidate_canvas();
+                            show_error_dialog(self.hwnd, "Erreur Wake-on-LAN", &err);
+                        }
+                    }
+                }
+            }
+            CMD_CTX_WOL_CONFIG => {
+                if let Some(TreeNodeKind::Connection(cid)) = self.selected_node
+                    && let Ok(Some(conn)) = self.storage.get_connection(cid)
+                    && let Some((wol_host, wol_mac, wol_port)) =
+                        run_wol_config_dialog(self.hwnd, &conn, &self.palette)
+                {
+                    match self
+                        .storage
+                        .update_connection_wol(cid, &wol_host, &wol_mac, wol_port)
+                    {
+                        Ok(()) => {
+                            self.status_override = Some(if wol_host.is_empty() {
+                                format!("Configuration Wake-on-LAN effacée pour « {} ».", conn.name)
+                            } else {
+                                format!(
+                                    "Wake-on-LAN enregistré pour « {} » ({wol_host}:{wol_port} — {wol_mac}).",
+                                    conn.name
+                                )
+                            });
+                            self.rebuild_treeview();
+                        }
+                        Err(err) => show_error_dialog(self.hwnd, "Erreur Wake-on-LAN", &err),
+                    }
+                }
+            }
             CMD_CTX_NEW_CONN_HERE => {
                 let folder_id = self.selected_folder_context();
                 self.open_connection_dialog(None, folder_id);
@@ -8987,6 +9065,7 @@ pub(crate) fn run_text_prompt_dialog(
             None,
         )
         .ok()?;
+        apply_malvision_window_icon(hwnd, owner);
 
         let dark_mode: i32 = 1;
         let _ = DwmSetWindowAttribute(
@@ -9913,6 +9992,7 @@ fn run_ftp_credentials_dialog(
             None,
         )
         .ok()?;
+        apply_malvision_window_icon(hwnd, owner);
 
         let dark_mode: i32 = i32::from(is_active_theme_dark());
         let _ = DwmSetWindowAttribute(
@@ -10303,6 +10383,7 @@ fn run_folder_picker_dialog(
             None,
         )
         .ok()?;
+        apply_malvision_window_icon(hwnd, owner);
 
         let dark_mode: i32 = 1;
         let _ = DwmSetWindowAttribute(
@@ -10687,6 +10768,84 @@ fn notify_update_error(dlg_hwnd_raw: isize, err: String) {
             );
         }
     }
+}
+
+fn spawn_update_install_worker(
+    dlg_hwnd_raw: isize,
+    owner_hwnd_raw: isize,
+    asset_url: String,
+    expected_hash_str: String,
+) {
+    std::thread::spawn(move || {
+        let updates_dir = match crate::updater::get_updates_temp_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                notify_update_error(dlg_hwnd_raw, e);
+                return;
+            }
+        };
+        let new_exe_temp = updates_dir.join("new_version.exe");
+        if new_exe_temp.exists() {
+            let _ = std::fs::remove_file(&new_exe_temp);
+        }
+
+        notify_update_status(dlg_hwnd_raw, "Téléchargement de la nouvelle version…");
+        if let Err(e) = crate::updater::download_and_verify_asset(
+            &asset_url,
+            &new_exe_temp,
+            Some(&expected_hash_str),
+        ) {
+            notify_update_error(dlg_hwnd_raw, format!("Échec du téléchargement : {e}"));
+            return;
+        }
+
+        notify_update_status(dlg_hwnd_raw, "Vérification de l'intégrité SHA-256…");
+        match crate::security::compute_file_sha256(&new_exe_temp) {
+            Ok(h) if h.eq_ignore_ascii_case(&expected_hash_str) => {}
+            _ => {
+                notify_update_error(
+                    dlg_hwnd_raw,
+                    "Empreinte cryptographique SHA-256 non conforme.".to_string(),
+                );
+                return;
+            }
+        }
+
+        notify_update_status(dlg_hwnd_raw, "Préparation de l'installation…");
+        let prep = match crate::updater::prepare_update_helper(&new_exe_temp, &expected_hash_str) {
+            Ok(p) => p,
+            Err(e) => {
+                notify_update_error(
+                    dlg_hwnd_raw,
+                    format!("Préparation de l'installation impossible : {e}"),
+                );
+                return;
+            }
+        };
+
+        notify_update_status(dlg_hwnd_raw, "Redémarrage de Malvision…");
+        if let Err(e) =
+            crate::updater::launch_helper_and_wait_ready(&prep, std::time::Duration::from_secs(5))
+        {
+            notify_update_error(
+                dlg_hwnd_raw,
+                format!("Le processus auxiliaire de mise à jour n'a pas répondu : {e}"),
+            );
+            return;
+        }
+
+        let owner_hwnd = HWND(owner_hwnd_raw as *mut _);
+        let dlg_hwnd = HWND(dlg_hwnd_raw as *mut _);
+        unsafe {
+            let _ = PostMessageW(Some(dlg_hwnd), WM_CLOSE, WPARAM(1), LPARAM(0));
+            let _ = PostMessageW(
+                Some(owner_hwnd),
+                WM_DEFERRED_ACTION,
+                WPARAM(DEFERRED_APPLY_UPDATE_AND_EXIT),
+                LPARAM(0),
+            );
+        }
+    });
 }
 
 unsafe extern "system" fn settings_dlg_wnd_proc(
@@ -12075,100 +12234,12 @@ unsafe extern "system" fn settings_dlg_wnd_proc(
                             // 3. Thread d'arrière-plan pour ne pas bloquer l'UI
                             let asset_url = asset.download_url.clone();
                             let expected_hash_str = expected_hash.unwrap().trim().to_string();
-                            let dlg_hwnd_raw = hwnd.0 as isize;
-                            let owner_hwnd_raw = state.owner.0 as isize;
-
-                            std::thread::spawn(move || {
-                                let updates_dir = match crate::updater::get_updates_temp_dir() {
-                                    Ok(d) => d,
-                                    Err(e) => {
-                                        notify_update_error(dlg_hwnd_raw, e);
-                                        return;
-                                    }
-                                };
-                                let new_exe_temp = updates_dir.join("new_version.exe");
-                                if new_exe_temp.exists() {
-                                    let _ = std::fs::remove_file(&new_exe_temp);
-                                }
-
-                                notify_update_status(
-                                    dlg_hwnd_raw,
-                                    "Téléchargement de la nouvelle version…",
-                                );
-                                if let Err(e) = crate::updater::download_and_verify_asset(
-                                    &asset_url,
-                                    &new_exe_temp,
-                                    Some(&expected_hash_str),
-                                ) {
-                                    notify_update_error(
-                                        dlg_hwnd_raw,
-                                        format!("Échec du téléchargement : {e}"),
-                                    );
-                                    return;
-                                }
-
-                                notify_update_status(
-                                    dlg_hwnd_raw,
-                                    "Vérification de l'intégrité SHA-256…",
-                                );
-                                match crate::security::compute_file_sha256(&new_exe_temp) {
-                                    Ok(h) if h.eq_ignore_ascii_case(&expected_hash_str) => {}
-                                    _ => {
-                                        notify_update_error(
-                                            dlg_hwnd_raw,
-                                            "Empreinte cryptographique SHA-256 non conforme."
-                                                .to_string(),
-                                        );
-                                        return;
-                                    }
-                                }
-
-                                notify_update_status(
-                                    dlg_hwnd_raw,
-                                    "Préparation de l'installation…",
-                                );
-                                let prep = match crate::updater::prepare_update_helper(
-                                    &new_exe_temp,
-                                    &expected_hash_str,
-                                ) {
-                                    Ok(p) => p,
-                                    Err(e) => {
-                                        notify_update_error(
-                                            dlg_hwnd_raw,
-                                            format!(
-                                                "Préparation de l'installation impossible : {e}"
-                                            ),
-                                        );
-                                        return;
-                                    }
-                                };
-
-                                notify_update_status(dlg_hwnd_raw, "Redémarrage de Malvision…");
-                                if let Err(e) = crate::updater::launch_helper_and_wait_ready(
-                                    &prep,
-                                    std::time::Duration::from_secs(5),
-                                ) {
-                                    notify_update_error(
-                                        dlg_hwnd_raw,
-                                        format!(
-                                            "Le processus auxiliaire de mise à jour n'a pas répondu : {e}"
-                                        ),
-                                    );
-                                    return;
-                                }
-
-                                // Fermer la boîte de dialogue et demander la fermeture propre et sortie du processus principal
-                                let owner_hwnd = HWND(owner_hwnd_raw as *mut _);
-                                let dlg_hwnd = HWND(dlg_hwnd_raw as *mut _);
-                                let _ =
-                                    PostMessageW(Some(dlg_hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
-                                let _ = PostMessageW(
-                                    Some(owner_hwnd),
-                                    WM_DEFERRED_ACTION,
-                                    WPARAM(DEFERRED_APPLY_UPDATE_AND_EXIT),
-                                    LPARAM(0),
-                                );
-                            });
+                            spawn_update_install_worker(
+                                hwnd.0 as isize,
+                                state.owner.0 as isize,
+                                asset_url,
+                                expected_hash_str,
+                            );
                         }
                     } else if id == IDC_SET_UPDATE_MANUAL_DOWNLOAD {
                         if let Some(info) = &state.latest_release
@@ -13780,6 +13851,1132 @@ unsafe fn handle_adv_reset_default_path(hwnd: HWND, state: &mut SettingsDialogSt
     }
 }
 
+struct ThemedMenuItemData {
+    text: String,
+    is_separator: bool,
+    is_disabled: bool,
+    has_submenu: bool,
+}
+
+struct ThemedMenuContext {
+    dpi: DpiMetrics,
+    font_ui: HFONT,
+    brush_bg: HBRUSH,
+    hover_color: u32,
+    border_color: u32,
+    accent_color: u32,
+    text_primary: u32,
+    text_muted: u32,
+    items: Vec<ThemedMenuItemData>,
+}
+
+std::thread_local! {
+    static ACTIVE_THEMED_MENU: std::cell::RefCell<Option<ThemedMenuContext>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+unsafe fn prepare_themed_menu_items(hmenu: HMENU, items: &mut Vec<ThemedMenuItemData>) {
+    unsafe {
+        let count = GetMenuItemCount(Some(hmenu));
+        if count <= 0 {
+            return;
+        }
+        for pos in 0..(count as u32) {
+            let mut text_buf = [0u16; 256];
+            let mut mii = MENUITEMINFOW {
+                cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_FTYPE | MIIM_STATE | MIIM_STRING | MIIM_SUBMENU | MIIM_DATA,
+                dwTypeData: windows::core::PWSTR(text_buf.as_mut_ptr()),
+                cch: text_buf.len() as u32,
+                ..Default::default()
+            };
+            if GetMenuItemInfoW(hmenu, pos, true, &mut mii).is_err() {
+                continue;
+            }
+            let is_separator = (mii.fType.0 & MFT_SEPARATOR.0) != 0;
+            let is_disabled = (mii.fState.0 & MFS_DISABLED.0) != 0;
+            let has_submenu = !mii.hSubMenu.is_invalid() && !mii.hSubMenu.0.is_null();
+            let len = text_buf
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(text_buf.len());
+            let text = String::from_utf16_lossy(&text_buf[..len]);
+
+            let idx = items.len();
+            items.push(ThemedMenuItemData {
+                text,
+                is_separator,
+                is_disabled,
+                has_submenu,
+            });
+
+            let update = MENUITEMINFOW {
+                cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_FTYPE | MIIM_DATA,
+                fType: if is_separator {
+                    MFT_OWNERDRAW | MFT_SEPARATOR
+                } else {
+                    MFT_OWNERDRAW
+                },
+                dwItemData: idx,
+                ..Default::default()
+            };
+            let _ = SetMenuItemInfoW(hmenu, pos, true, &update);
+
+            if has_submenu {
+                prepare_themed_menu_items(mii.hSubMenu, items);
+            }
+        }
+    }
+}
+
+pub(crate) unsafe fn track_themed_popup_menu(
+    owner: HWND,
+    hmenu: HMENU,
+    x: i32,
+    y: i32,
+    palette: &GdiPalette,
+) -> u32 {
+    unsafe {
+        let mi = MENUINFO {
+            cbSize: std::mem::size_of::<MENUINFO>() as u32,
+            fMask: MIM_BACKGROUND | MIM_APPLYTOSUBMENUS,
+            hbrBack: palette.brush_bg_surface,
+            ..Default::default()
+        };
+        let _ = SetMenuInfo(hmenu, &mi);
+
+        let mut items = Vec::new();
+        prepare_themed_menu_items(hmenu, &mut items);
+
+        let ctx = ThemedMenuContext {
+            dpi: DpiMetrics::for_window(owner),
+            font_ui: palette.font_ui,
+            brush_bg: palette.brush_bg_surface,
+            hover_color: col_bg_hover(),
+            border_color: col_border(),
+            accent_color: col_accent(),
+            text_primary: col_text_primary(),
+            text_muted: col_text_muted(),
+            items,
+        };
+
+        ACTIVE_THEMED_MENU.with(|cell| {
+            *cell.borrow_mut() = Some(ctx);
+        });
+
+        let flags = windows::Win32::UI::WindowsAndMessaging::TPM_LEFTALIGN
+            | windows::Win32::UI::WindowsAndMessaging::TPM_TOPALIGN
+            | windows::Win32::UI::WindowsAndMessaging::TPM_RETURNCMD;
+        let cmd = TrackPopupMenu(hmenu, flags, x, y, Some(0), owner, None).0 as u32;
+
+        ACTIVE_THEMED_MENU.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+
+        cmd
+    }
+}
+
+pub(crate) unsafe fn handle_themed_menu_measure_item(lparam: LPARAM) -> Option<LRESULT> {
+    unsafe {
+        let mis = lparam.0 as *mut MEASUREITEMSTRUCT;
+        if mis.is_null() || (*mis).CtlType != ODT_MENU {
+            return None;
+        }
+        let idx = (*mis).itemData;
+        ACTIVE_THEMED_MENU.with(|cell| {
+            let guard = cell.borrow();
+            let ctx = guard.as_ref()?;
+            let item = ctx.items.get(idx)?;
+            if item.is_separator {
+                (*mis).itemWidth = ctx.dpi.scale(160) as u32;
+                (*mis).itemHeight = ctx.dpi.scale(9) as u32;
+                return Some(LRESULT(1));
+            }
+            let hdc = windows::Win32::Graphics::Gdi::GetDC(None);
+            let old_font = SelectObject(hdc, ctx.font_ui.into());
+            let wide: Vec<u16> = item.text.encode_utf16().collect();
+            let mut sz = windows::Win32::Foundation::SIZE::default();
+            if !wide.is_empty() {
+                let _ = GetTextExtentPoint32W(hdc, &wide, &mut sz);
+            }
+            let _ = SelectObject(hdc, old_font);
+            let _ = windows::Win32::Graphics::Gdi::ReleaseDC(None, hdc);
+
+            let extra_right = if item.has_submenu {
+                ctx.dpi.scale(32)
+            } else {
+                ctx.dpi.scale(16)
+            };
+            (*mis).itemWidth =
+                (sz.cx + ctx.dpi.scale(28) + extra_right).max(ctx.dpi.scale(180)) as u32;
+            (*mis).itemHeight = ctx.dpi.scale(30) as u32;
+            Some(LRESULT(1))
+        })
+    }
+}
+
+pub(crate) unsafe fn handle_themed_menu_draw_item(lparam: LPARAM) -> Option<LRESULT> {
+    unsafe {
+        let dis = lparam.0 as *const DRAWITEMSTRUCT;
+        if dis.is_null() || (*dis).CtlType != ODT_MENU {
+            return None;
+        }
+        let d = &*dis;
+        let idx = d.itemData;
+        ACTIVE_THEMED_MENU.with(|cell| {
+            let guard = cell.borrow();
+            let ctx = guard.as_ref()?;
+            let item = ctx.items.get(idx)?;
+            let hdc = d.hDC;
+            let rc = d.rcItem;
+
+            let _ = FillRect(hdc, &rc, ctx.brush_bg);
+
+            if item.is_separator {
+                let mid_y = (rc.top + rc.bottom) / 2;
+                draw_horizontal_line(
+                    hdc,
+                    rc.left + ctx.dpi.scale(8),
+                    rc.right - ctx.dpi.scale(8),
+                    mid_y,
+                    ctx.border_color,
+                );
+                return Some(LRESULT(1));
+            }
+
+            let selected = (d.itemState.0 & ODS_SELECTED.0) != 0 && !item.is_disabled;
+            if selected {
+                let pill_rc = RECT {
+                    left: rc.left + ctx.dpi.scale(4),
+                    top: rc.top + ctx.dpi.scale(2),
+                    right: rc.right - ctx.dpi.scale(4),
+                    bottom: rc.bottom - ctx.dpi.scale(2),
+                };
+                draw_rounded_box(hdc, pill_rc, ctx.hover_color, ctx.hover_color);
+                let accent_bar = RECT {
+                    left: pill_rc.left + ctx.dpi.scale(2),
+                    top: pill_rc.top + ctx.dpi.scale(5),
+                    right: pill_rc.left + ctx.dpi.scale(5),
+                    bottom: pill_rc.bottom - ctx.dpi.scale(5),
+                };
+                draw_rounded_box(hdc, accent_bar, ctx.accent_color, ctx.accent_color);
+            }
+
+            let _ = SetBkMode(hdc, TRANSPARENT);
+            let old_font = SelectObject(hdc, ctx.font_ui.into());
+            let _ = SetTextColor(
+                hdc,
+                COLORREF(if item.is_disabled {
+                    ctx.text_muted
+                } else {
+                    ctx.text_primary
+                }),
+            );
+
+            let mut text_rc = RECT {
+                left: rc.left + ctx.dpi.scale(14),
+                top: rc.top,
+                right: rc.right - ctx.dpi.scale(if item.has_submenu { 24 } else { 12 }),
+                bottom: rc.bottom,
+            };
+            let mut wide: Vec<u16> = item.text.encode_utf16().collect();
+            let _ = DrawTextW(
+                hdc,
+                &mut wide,
+                &mut text_rc,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+
+            if item.has_submenu {
+                let mut arrow_rc = RECT {
+                    left: rc.right - ctx.dpi.scale(22),
+                    top: rc.top,
+                    right: rc.right - ctx.dpi.scale(8),
+                    bottom: rc.bottom,
+                };
+                let mut arrow: Vec<u16> = "›".encode_utf16().collect();
+                let _ = SetTextColor(hdc, COLORREF(ctx.text_muted));
+                let _ = DrawTextW(
+                    hdc,
+                    &mut arrow,
+                    &mut arrow_rc,
+                    DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+                );
+            }
+
+            let _ = SelectObject(hdc, old_font);
+            Some(LRESULT(1))
+        })
+    }
+}
+
+const IDC_WOL_HOST: usize = 4901;
+const IDC_WOL_MAC: usize = 4902;
+const IDC_WOL_PORT: usize = 4903;
+const IDC_WOL_SAVE: usize = 4904;
+const IDC_WOL_CLEAR: usize = 4905;
+
+struct WolConfigDialogState {
+    owner: HWND,
+    dpi: DpiMetrics,
+    font_ui: HFONT,
+    font_bold: HFONT,
+    font_subtitle: HFONT,
+    brush_bg: HBRUSH,
+    brush_input: HBRUSH,
+    conn_name: String,
+    host_box_rc: RECT,
+    mac_box_rc: RECT,
+    port_box_rc: RECT,
+    divider_y: i32,
+    ed_host: HWND,
+    ed_mac: HWND,
+    ed_port: HWND,
+    result: Option<(String, String, u16)>,
+}
+
+unsafe extern "system" fn wol_config_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_ERASEBKGND => LRESULT(1),
+            WM_CTLCOLORSTATIC => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WolConfigDialogState;
+                if !ptr.is_null() {
+                    let hdc = HDC(wparam.0 as *mut _);
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkMode(hdc, TRANSPARENT);
+                    return LRESULT((*ptr).brush_bg.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_CTLCOLOREDIT => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WolConfigDialogState;
+                if !ptr.is_null() {
+                    let hdc = HDC(wparam.0 as *mut _);
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_input()));
+                    return LRESULT((*ptr).brush_input.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_DRAWITEM => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WolConfigDialogState;
+                let dis = lparam.0 as *const DRAWITEMSTRUCT;
+                if !ptr.is_null() && !dis.is_null() {
+                    let state = &*ptr;
+                    let d = &*dis;
+                    if d.CtlType == ODT_BUTTON {
+                        let id = d.CtlID as usize;
+                        draw_owner_button(d, id == IDC_WOL_SAVE, state.font_ui, state.font_bold);
+                        return LRESULT(1);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_PAINT => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WolConfigDialogState;
+                if ptr.is_null() {
+                    return DefWindowProcW(hwnd, msg, wparam, lparam);
+                }
+                let state = &*ptr;
+                let mut ps = PAINTSTRUCT::default();
+                let hdc_screen = BeginPaint(hwnd, &mut ps);
+                let mut rc = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rc);
+                let w = (rc.right - rc.left).max(1);
+                let h = (rc.bottom - rc.top).max(1);
+
+                let hdc = CreateCompatibleDC(Some(hdc_screen));
+                let hbm = CreateCompatibleBitmap(hdc_screen, w, h);
+                let old_bm = SelectObject(hdc, hbm.into());
+                let _ = SetBkMode(hdc, TRANSPARENT);
+                let _ = FillRect(hdc, &rc, state.brush_bg);
+
+                let pad_x = state.dpi.scale(24);
+                let _ = SelectObject(hdc, state.font_subtitle.into());
+                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                draw_text_line(
+                    hdc,
+                    &format!("Wake-on-LAN — {}", state.conn_name),
+                    RECT {
+                        left: pad_x,
+                        top: state.dpi.scale(16),
+                        right: w - pad_x,
+                        bottom: state.dpi.scale(42),
+                    },
+                );
+
+                let _ = SelectObject(hdc, state.font_ui.into());
+                let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
+                draw_text_line(
+                    hdc,
+                    "Adresse IP ou FQDN (ex: 192.168.1.254 ou nas.mondomaine.fr)",
+                    RECT {
+                        left: pad_x,
+                        top: state.dpi.scale(52),
+                        right: w - pad_x,
+                        bottom: state.dpi.scale(72),
+                    },
+                );
+                draw_text_line(
+                    hdc,
+                    "Adresse MAC (ex: AA:BB:CC:DD:EE:FF)",
+                    RECT {
+                        left: pad_x,
+                        top: state.dpi.scale(122),
+                        right: w - pad_x,
+                        bottom: state.dpi.scale(142),
+                    },
+                );
+                draw_text_line(
+                    hdc,
+                    "Port UDP (9 par défaut)",
+                    RECT {
+                        left: pad_x,
+                        top: state.dpi.scale(192),
+                        right: w - pad_x,
+                        bottom: state.dpi.scale(212),
+                    },
+                );
+
+                let focus = GetFocus();
+                draw_rounded_box(
+                    hdc,
+                    state.host_box_rc,
+                    col_bg_input(),
+                    if focus == state.ed_host {
+                        col_accent()
+                    } else {
+                        col_border()
+                    },
+                );
+                draw_rounded_box(
+                    hdc,
+                    state.mac_box_rc,
+                    col_bg_input(),
+                    if focus == state.ed_mac {
+                        col_accent()
+                    } else {
+                        col_border()
+                    },
+                );
+                draw_rounded_box(
+                    hdc,
+                    state.port_box_rc,
+                    col_bg_input(),
+                    if focus == state.ed_port {
+                        col_accent()
+                    } else {
+                        col_border()
+                    },
+                );
+
+                draw_horizontal_line(hdc, pad_x, w - pad_x, state.divider_y, col_border());
+
+                let _ = windows::Win32::Graphics::Gdi::BitBlt(
+                    hdc_screen,
+                    0,
+                    0,
+                    w,
+                    h,
+                    Some(hdc),
+                    0,
+                    0,
+                    windows::Win32::Graphics::Gdi::SRCCOPY,
+                );
+                let _ = SelectObject(hdc, old_bm);
+                let _ = DeleteObject(hbm.into());
+                let _ = DeleteDC(hdc);
+                let _ = EndPaint(hwnd, &ps);
+                LRESULT(0)
+            }
+            WM_COMMAND => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WolConfigDialogState;
+                if !ptr.is_null() {
+                    let state = &mut *ptr;
+                    let id = wparam.0 & 0xFFFF;
+                    let code = ((wparam.0 >> 16) & 0xFFFF) as u32;
+                    if code == EN_SETFOCUS || code == EN_KILLFOCUS {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        return LRESULT(0);
+                    }
+                    if id == IDC_WOL_SAVE || id == 1 {
+                        let host = get_window_text(state.ed_host).trim().to_string();
+                        let mac_raw = get_window_text(state.ed_mac).trim().to_string();
+                        let port_raw = get_window_text(state.ed_port).trim().to_string();
+
+                        if host.is_empty() {
+                            show_warning_dialog(
+                                hwnd,
+                                "Champ requis",
+                                "Veuillez saisir une adresse IP ou un FQDN.",
+                            );
+                            return LRESULT(0);
+                        }
+                        let mac_norm = match crate::models::normalize_mac_address(&mac_raw) {
+                            Ok(bytes) => crate::models::format_mac_address(bytes),
+                            Err(err) => {
+                                show_warning_dialog(hwnd, "Adresse MAC invalide", &err);
+                                return LRESULT(0);
+                            }
+                        };
+                        let port = if port_raw.is_empty() {
+                            9u16
+                        } else {
+                            match port_raw.parse::<u16>() {
+                                Ok(p) if p > 0 => p,
+                                _ => {
+                                    show_warning_dialog(
+                                        hwnd,
+                                        "Port invalide",
+                                        "Le port UDP doit être compris entre 1 et 65535 (9 par défaut).",
+                                    );
+                                    return LRESULT(0);
+                                }
+                            }
+                        };
+
+                        state.result = Some((host, mac_norm, port));
+                        let owner = state.owner;
+                        close_modal_dialog(hwnd, owner);
+                    } else if id == IDC_WOL_CLEAR {
+                        state.result = Some((String::new(), String::new(), 9));
+                        let owner = state.owner;
+                        close_modal_dialog(hwnd, owner);
+                    } else if id == IDC_DLG_CANCEL || id == 2 {
+                        let owner = state.owner;
+                        close_modal_dialog(hwnd, owner);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_CLOSE => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WolConfigDialogState;
+                if !ptr.is_null() {
+                    let owner = (*ptr).owner;
+                    close_modal_dialog(hwnd, owner);
+                } else {
+                    let _ = DestroyWindow(hwnd);
+                }
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+fn run_wol_config_dialog(
+    owner: HWND,
+    conn: &ConnectionItem,
+    palette: &GdiPalette,
+) -> Option<(String, String, u16)> {
+    unsafe {
+        let hinstance = GetModuleHandleW(None).unwrap_or_default();
+        let class_name = w!("MalvisionWolConfigDialog");
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(wol_config_wnd_proc),
+            hInstance: hinstance.into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hbrBackground: palette.brush_bg_sidebar,
+            lpszClassName: class_name,
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+
+        let dpi = DpiMetrics::for_window(owner);
+        let client_w = dpi.scale(480);
+        let client_h = dpi.scale(336);
+        let dlg_style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+        let (win_w, win_h) = calc_dialog_window_size(dlg_style, client_w, client_h);
+
+        let mut owner_rc = RECT::default();
+        let _ = GetWindowRect(owner, &mut owner_rc);
+        let pos_x = owner_rc.left + ((owner_rc.right - owner_rc.left) - win_w) / 2;
+        let pos_y = owner_rc.top + ((owner_rc.bottom - owner_rc.top) - win_h) / 2;
+
+        let title_w: Vec<u16> = "Wake On Lan\0".encode_utf16().collect();
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            class_name,
+            PCWSTR(title_w.as_ptr()),
+            dlg_style,
+            pos_x.max(40),
+            pos_y.max(40),
+            win_w,
+            win_h,
+            Some(owner),
+            None,
+            Some(hinstance.into()),
+            None,
+        )
+        .ok()?;
+        apply_malvision_window_icon(hwnd, owner);
+        let dark_mode: i32 = i32::from(active_theme_colors().is_dark);
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark_mode as *const i32 as *const c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+
+        let pad_x = dpi.scale(24);
+        let host_box_rc = RECT {
+            left: pad_x,
+            top: dpi.scale(76),
+            right: client_w - pad_x,
+            bottom: dpi.scale(112),
+        };
+        let mac_box_rc = RECT {
+            left: pad_x,
+            top: dpi.scale(146),
+            right: client_w - pad_x,
+            bottom: dpi.scale(182),
+        };
+        let port_box_rc = RECT {
+            left: pad_x,
+            top: dpi.scale(216),
+            right: pad_x + dpi.scale(140),
+            bottom: dpi.scale(252),
+        };
+        let divider_y = dpi.scale(270);
+
+        let mut state = Box::new(WolConfigDialogState {
+            owner,
+            dpi,
+            font_ui: palette.font_ui,
+            font_bold: palette.font_ui_bold,
+            font_subtitle: palette.font_subtitle,
+            brush_bg: palette.brush_bg_sidebar,
+            brush_input: palette.brush_bg_input,
+            conn_name: conn.name.clone(),
+            host_box_rc,
+            mac_box_rc,
+            port_box_rc,
+            divider_y,
+            ed_host: HWND::default(),
+            ed_mac: HWND::default(),
+            ed_port: HWND::default(),
+            result: None,
+        });
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&mut *state) as *mut _ as isize);
+
+        let ed_host = create_dark_edit(
+            hwnd,
+            hinstance.into(),
+            host_box_rc,
+            IDC_WOL_HOST,
+            false,
+            palette.font_ui,
+            dpi,
+        );
+        let initial_host = if conn.wol_host.trim().is_empty() {
+            conn.host.trim()
+        } else {
+            conn.wol_host.trim()
+        };
+        set_window_text(ed_host, initial_host);
+        state.ed_host = ed_host;
+
+        let ed_mac = create_dark_edit(
+            hwnd,
+            hinstance.into(),
+            mac_box_rc,
+            IDC_WOL_MAC,
+            false,
+            palette.font_ui,
+            dpi,
+        );
+        set_window_text(ed_mac, conn.wol_mac.trim());
+        state.ed_mac = ed_mac;
+
+        let ed_port = create_dark_edit(
+            hwnd,
+            hinstance.into(),
+            port_box_rc,
+            IDC_WOL_PORT,
+            false,
+            palette.font_ui,
+            dpi,
+        );
+        let port_str = if conn.wol_port == 0 { 9 } else { conn.wol_port }.to_string();
+        set_window_text(ed_port, &port_str);
+        state.ed_port = ed_port;
+
+        let btn_w = dpi.scale(112);
+        let btn_h = dpi.scale(36);
+        let btn_y = dpi.scale(284);
+        let btn_gap = dpi.scale(10);
+
+        let rc_cancel = RECT {
+            left: client_w - pad_x - btn_w,
+            top: btn_y,
+            right: client_w - pad_x,
+            bottom: btn_y + btn_h,
+        };
+        let rc_save = RECT {
+            left: rc_cancel.left - btn_gap - btn_w,
+            top: btn_y,
+            right: rc_cancel.left - btn_gap,
+            bottom: btn_y + btn_h,
+        };
+        let rc_clear = RECT {
+            left: pad_x,
+            top: btn_y,
+            right: pad_x + dpi.scale(100),
+            bottom: btn_y + btn_h,
+        };
+
+        let btn_clear = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Effacer"),
+            rc_clear,
+            IDC_WOL_CLEAR,
+            palette.font_ui,
+        );
+        let btn_save = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Enregistrer"),
+            rc_save,
+            IDC_WOL_SAVE,
+            palette.font_ui_bold,
+        );
+        let btn_cancel = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Annuler"),
+            rc_cancel,
+            IDC_DLG_CANCEL,
+            palette.font_ui,
+        );
+
+        let tab_order = [ed_host, ed_mac, ed_port, btn_save, btn_cancel, btn_clear];
+        let _ = EnableWindow(owner, false);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = UpdateWindow(hwnd);
+        let _ = SetFocus(Some(ed_host));
+
+        run_modal_loop(owner, hwnd, &tab_order);
+
+        state.result.take()
+    }
+}
+
+const IDC_STARTUP_UPD_INSTALL: usize = 4911;
+const IDC_STARTUP_UPD_LATER: usize = 4912;
+
+struct StartupUpdateDialogState {
+    owner: HWND,
+    dpi: DpiMetrics,
+    font_ui: HFONT,
+    font_bold: HFONT,
+    font_title: HFONT,
+    font_small: HFONT,
+    brush_bg: HBRUSH,
+    logo_bitmap: Option<HBITMAP>,
+    logo_size: i32,
+    remote_version: String,
+    asset_url: String,
+    expected_sha256: String,
+    status_text: String,
+    is_updating: bool,
+    btn_install: HWND,
+    btn_later: HWND,
+}
+
+unsafe extern "system" fn startup_update_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_ERASEBKGND => LRESULT(1),
+            WM_DRAWITEM => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const StartupUpdateDialogState;
+                let dis = lparam.0 as *const DRAWITEMSTRUCT;
+                if !ptr.is_null() && !dis.is_null() {
+                    let state = &*ptr;
+                    let d = &*dis;
+                    if d.CtlType == ODT_BUTTON {
+                        let id = d.CtlID as usize;
+                        draw_owner_button(
+                            d,
+                            id == IDC_STARTUP_UPD_INSTALL,
+                            state.font_ui,
+                            state.font_bold,
+                        );
+                        return LRESULT(1);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_APP_UPDATE_PROGRESS => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut StartupUpdateDialogState;
+                if !ptr.is_null() && lparam.0 != 0 {
+                    let state = &mut *ptr;
+                    let is_error = wparam.0 == 1;
+                    let text = *Box::from_raw(lparam.0 as *mut String);
+                    if is_error {
+                        state.is_updating = false;
+                        state.status_text = format!("Mise à jour impossible : {text}");
+                        let _ = EnableWindow(state.btn_install, true);
+                        let _ = EnableWindow(state.btn_later, true);
+                    } else {
+                        state.status_text = text;
+                    }
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                LRESULT(0)
+            }
+            WM_PAINT => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const StartupUpdateDialogState;
+                if ptr.is_null() {
+                    return DefWindowProcW(hwnd, msg, wparam, lparam);
+                }
+                let state = &*ptr;
+                let mut ps = PAINTSTRUCT::default();
+                let hdc_screen = BeginPaint(hwnd, &mut ps);
+                let mut rc = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rc);
+                let w = (rc.right - rc.left).max(1);
+                let h = (rc.bottom - rc.top).max(1);
+
+                let hdc = CreateCompatibleDC(Some(hdc_screen));
+                let hbm = CreateCompatibleBitmap(hdc_screen, w, h);
+                let old_bm = SelectObject(hdc, hbm.into());
+                let _ = SetBkMode(hdc, TRANSPARENT);
+                let _ = FillRect(hdc, &rc, state.brush_bg);
+
+                let pad_x = state.dpi.scale(24);
+                let logo_x = pad_x;
+                let logo_y = state.dpi.scale(24);
+                if let Some(bm) = state.logo_bitmap {
+                    let mem_dc = CreateCompatibleDC(Some(hdc));
+                    let old_logo = SelectObject(mem_dc, bm.into());
+                    let _ = windows::Win32::Graphics::Gdi::BitBlt(
+                        hdc,
+                        logo_x,
+                        logo_y,
+                        state.logo_size,
+                        state.logo_size,
+                        Some(mem_dc),
+                        0,
+                        0,
+                        windows::Win32::Graphics::Gdi::SRCCOPY,
+                    );
+                    let _ = SelectObject(mem_dc, old_logo);
+                    let _ = DeleteDC(mem_dc);
+                }
+
+                let text_left = logo_x + state.logo_size + state.dpi.scale(18);
+                let _ = SelectObject(hdc, state.font_title.into());
+                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                draw_text_line(
+                    hdc,
+                    "MALVISION",
+                    RECT {
+                        left: text_left,
+                        top: state.dpi.scale(22),
+                        right: w - pad_x,
+                        bottom: state.dpi.scale(50),
+                    },
+                );
+
+                let _ = SelectObject(hdc, state.font_bold.into());
+                let _ = SetTextColor(hdc, COLORREF(col_accent()));
+                draw_text_line(
+                    hdc,
+                    &format!("Nouvelle version disponible : v{}", state.remote_version),
+                    RECT {
+                        left: text_left,
+                        top: state.dpi.scale(52),
+                        right: w - pad_x,
+                        bottom: state.dpi.scale(74),
+                    },
+                );
+
+                let _ = SelectObject(hdc, state.font_small.into());
+                let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
+                draw_text_line(
+                    hdc,
+                    &format!(
+                        "Version actuelle : v{} (x64 portable)",
+                        crate::updater::CURRENT_VERSION
+                    ),
+                    RECT {
+                        left: text_left,
+                        top: state.dpi.scale(76),
+                        right: w - pad_x,
+                        bottom: state.dpi.scale(96),
+                    },
+                );
+
+                let card_rc = RECT {
+                    left: pad_x,
+                    top: state.dpi.scale(116),
+                    right: w - pad_x,
+                    bottom: state.dpi.scale(206),
+                };
+                draw_rounded_box(hdc, card_rc, col_bg_surface(), col_border());
+
+                let _ = SelectObject(hdc, state.font_ui.into());
+                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                let mut status_rc = RECT {
+                    left: card_rc.left + state.dpi.scale(14),
+                    top: card_rc.top + state.dpi.scale(12),
+                    right: card_rc.right - state.dpi.scale(14),
+                    bottom: card_rc.bottom - state.dpi.scale(12),
+                };
+                let mut wide: Vec<u16> = state.status_text.encode_utf16().collect();
+                let _ = DrawTextW(
+                    hdc,
+                    &mut wide,
+                    &mut status_rc,
+                    DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
+                );
+
+                draw_horizontal_line(hdc, pad_x, w - pad_x, state.dpi.scale(224), col_border());
+
+                let _ = windows::Win32::Graphics::Gdi::BitBlt(
+                    hdc_screen,
+                    0,
+                    0,
+                    w,
+                    h,
+                    Some(hdc),
+                    0,
+                    0,
+                    windows::Win32::Graphics::Gdi::SRCCOPY,
+                );
+                let _ = SelectObject(hdc, old_bm);
+                let _ = DeleteObject(hbm.into());
+                let _ = DeleteDC(hdc);
+                let _ = EndPaint(hwnd, &ps);
+                LRESULT(0)
+            }
+            WM_COMMAND => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut StartupUpdateDialogState;
+                if !ptr.is_null() {
+                    let state = &mut *ptr;
+                    let id = wparam.0 & 0xFFFF;
+                    if id == IDC_STARTUP_UPD_INSTALL || id == 1 {
+                        if state.is_updating {
+                            return LRESULT(0);
+                        }
+                        if state.asset_url.is_empty() || state.expected_sha256.is_empty() {
+                            show_error_dialog(
+                                hwnd,
+                                "Vérification d'intégrité impossible",
+                                "Aucune empreinte cryptographique SHA-256 officielle ou binaire valide n'a été trouvé pour cette release.\n\nPar mesure de sécurité stricte, la mise à jour automatique est bloquée.",
+                            );
+                            return LRESULT(0);
+                        }
+                        state.is_updating = true;
+                        let _ = EnableWindow(state.btn_install, false);
+                        let _ = EnableWindow(state.btn_later, false);
+                        state.status_text = "Téléchargement de la nouvelle version…".to_string();
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        let _ = UpdateWindow(hwnd);
+
+                        spawn_update_install_worker(
+                            hwnd.0 as isize,
+                            state.owner.0 as isize,
+                            state.asset_url.clone(),
+                            state.expected_sha256.clone(),
+                        );
+                    } else if (id == IDC_STARTUP_UPD_LATER || id == 2) && !state.is_updating {
+                        let owner = state.owner;
+                        close_modal_dialog(hwnd, owner);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_CLOSE => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut StartupUpdateDialogState;
+                if !ptr.is_null() {
+                    let state = &*ptr;
+                    let force_done = wparam.0 == 1;
+                    if !state.is_updating || force_done {
+                        let owner = state.owner;
+                        close_modal_dialog(hwnd, owner);
+                    }
+                } else {
+                    let _ = DestroyWindow(hwnd);
+                }
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut StartupUpdateDialogState;
+                if !ptr.is_null()
+                    && let Some(bm) = (*ptr).logo_bitmap.take()
+                {
+                    let _ = DeleteObject(bm.into());
+                }
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+fn run_startup_update_dialog(
+    owner: HWND,
+    info: &crate::updater::ReleaseInfo,
+    palette: &GdiPalette,
+) {
+    unsafe {
+        let hinstance = GetModuleHandleW(None).unwrap_or_default();
+        let class_name = w!("MalvisionStartupUpdateDialog");
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(startup_update_wnd_proc),
+            hInstance: hinstance.into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hbrBackground: palette.brush_bg_sidebar,
+            lpszClassName: class_name,
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+
+        let dpi = DpiMetrics::for_window(owner);
+        let client_w = dpi.scale(500);
+        let client_h = dpi.scale(292);
+        let dlg_style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+        let (win_w, win_h) = calc_dialog_window_size(dlg_style, client_w, client_h);
+
+        let mut owner_rc = RECT::default();
+        let _ = GetWindowRect(owner, &mut owner_rc);
+        let pos_x = owner_rc.left + ((owner_rc.right - owner_rc.left) - win_w) / 2;
+        let pos_y = owner_rc.top + ((owner_rc.bottom - owner_rc.top) - win_h) / 2;
+
+        let title_w: Vec<u16> = "Mise à jour de Malvision disponible\0"
+            .encode_utf16()
+            .collect();
+        let hwnd = match CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            class_name,
+            PCWSTR(title_w.as_ptr()),
+            dlg_style,
+            pos_x.max(40),
+            pos_y.max(40),
+            win_w,
+            win_h,
+            Some(owner),
+            None,
+            Some(hinstance.into()),
+            None,
+        ) {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        apply_malvision_window_icon(hwnd, owner);
+        let dark_mode: i32 = i32::from(active_theme_colors().is_dark);
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark_mode as *const i32 as *const c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+
+        let logo_size = dpi.scale(72);
+        let logo_bitmap = create_logo_bitmap(logo_size as u32, col_bg_sidebar());
+        let asset_url = info
+            .exe_asset
+            .as_ref()
+            .map(|a| a.download_url.clone())
+            .unwrap_or_default();
+        let expected_sha256 = info
+            .expected_exe_sha256
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        let mut state = Box::new(StartupUpdateDialogState {
+            owner,
+            dpi,
+            font_ui: palette.font_ui,
+            font_bold: palette.font_ui_bold,
+            font_title: palette.font_title,
+            font_small: palette.font_small,
+            brush_bg: palette.brush_bg_sidebar,
+            logo_bitmap,
+            logo_size,
+            remote_version: info.version.to_string(),
+            asset_url,
+            expected_sha256,
+            status_text: format!(
+                "Une nouvelle version (v{}) est disponible sur GitHub.\nVoulez-vous télécharger, vérifier (SHA-256) et installer la mise à jour maintenant ?",
+                info.version
+            ),
+            is_updating: false,
+            btn_install: HWND::default(),
+            btn_later: HWND::default(),
+        });
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&mut *state) as *mut _ as isize);
+
+        let pad_x = dpi.scale(24);
+        let btn_y = dpi.scale(238);
+        let btn_h = dpi.scale(36);
+        let btn_later_w = dpi.scale(156);
+        let btn_install_w = dpi.scale(206);
+        let btn_gap = dpi.scale(12);
+
+        let rc_later = RECT {
+            left: client_w - pad_x - btn_later_w,
+            top: btn_y,
+            right: client_w - pad_x,
+            bottom: btn_y + btn_h,
+        };
+        let rc_install = RECT {
+            left: rc_later.left - btn_gap - btn_install_w,
+            top: btn_y,
+            right: rc_later.left - btn_gap,
+            bottom: btn_y + btn_h,
+        };
+
+        let btn_install = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Télécharger et redémarrer"),
+            rc_install,
+            IDC_STARTUP_UPD_INSTALL,
+            palette.font_ui_bold,
+        );
+        let btn_later = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Ignorer pour l'instant"),
+            rc_later,
+            IDC_STARTUP_UPD_LATER,
+            palette.font_ui,
+        );
+        state.btn_install = btn_install;
+        state.btn_later = btn_later;
+
+        let tab_order = [btn_install, btn_later];
+        let _ = EnableWindow(owner, false);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = UpdateWindow(hwnd);
+        let _ = SetFocus(Some(btn_install));
+
+        run_modal_loop(owner, hwnd, &tab_order);
+    }
+}
+
 unsafe extern "system" fn main_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -13794,6 +14991,18 @@ unsafe extern "system" fn main_wnd_proc(
                 LRESULT(0)
             }
             WM_ERASEBKGND => LRESULT(1),
+            WM_MEASUREITEM => {
+                if let Some(res) = handle_themed_menu_measure_item(lparam) {
+                    return res;
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_DRAWITEM => {
+                if let Some(res) = handle_themed_menu_draw_item(lparam) {
+                    return res;
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
             WM_PAINT => {
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
                 if !ptr.is_null() {
@@ -14213,6 +15422,9 @@ unsafe extern "system" fn main_wnd_proc(
                         info.version
                     ));
                     state.invalidate_canvas();
+                    if !cfg!(test) && IsWindowEnabled(state.hwnd).as_bool() {
+                        run_startup_update_dialog(state.hwnd, &info, &state.palette);
+                    }
                 }
                 LRESULT(0)
             }
@@ -15536,6 +16748,9 @@ mod tests {
                 updated_at: 0,
                 last_connected_at: None,
                 credential_id: None,
+                wol_host: String::new(),
+                wol_mac: String::new(),
+                wol_port: 9,
             };
             let _ = (*ptr).sessions.open_rdp_session(
                 hwnd,
@@ -15607,6 +16822,9 @@ mod tests {
                 updated_at: 0,
                 last_connected_at: None,
                 credential_id: None,
+                wol_host: String::new(),
+                wol_mac: String::new(),
+                wol_port: 9,
             };
             let sid = (*ptr)
                 .sessions
@@ -17562,6 +18780,9 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             last_connected_at: None,
+            wol_host: String::new(),
+            wol_mac: String::new(),
+            wol_port: 9,
         };
         let conn = make_conn(10, Some(3));
         let root_conn = make_conn(11, None);

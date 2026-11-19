@@ -60,11 +60,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetDlgCtrlID, GetWindowLongPtrW, IDC_ARROW, IDC_HAND, IDC_SIZENS, IDC_SIZEWE,
     LoadCursorW, MF_POPUP, MF_SEPARATOR, MF_STRING, MoveWindow, PostMessageW, RegisterClassExW,
     SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SetCursor, SetForegroundWindow, SetWindowLongPtrW, ShowWindow,
-    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_TOPALIGN, TrackPopupMenu, WINDOW_EX_STYLE, WM_APP,
-    WM_CAPTURECHANGED, WM_COMMAND, WM_CONTEXTMENU, WM_CTLCOLOREDIT, WM_DESTROY, WM_DROPFILES,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WNDCLASSEXW, WNDPROC, WS_CHILD,
-    WS_CLIPCHILDREN,
+    WINDOW_EX_STYLE, WM_APP, WM_CAPTURECHANGED, WM_COMMAND, WM_CONTEXTMENU, WM_CTLCOLOREDIT,
+    WM_DESTROY, WM_DROPFILES, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE,
+    WNDCLASSEXW, WNDPROC, WS_CHILD, WS_CLIPCHILDREN,
 };
 use windows_core::{PCWSTR, w};
 
@@ -3309,18 +3308,16 @@ unsafe fn show_ftp_context_menu(state: &mut FtpWndState, screen_pt: POINT) {
             );
 
             let _ = SetForegroundWindow(state.container_hwnd);
-            let cmd = TrackPopupMenu(
+            let cmd = crate::ui::track_themed_popup_menu(
+                state.container_hwnd,
                 hmenu,
-                TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
                 screen_pt.x,
                 screen_pt.y,
-                Some(0),
-                state.container_hwnd,
-                None,
+                &state.palette,
             );
             let _ = DestroyMenu(hmenu);
 
-            match cmd.0 as u32 {
+            match cmd {
                 CMD_FTP_CTX_OPEN => {
                     if let Some(idx) = state.local_selected.iter().next().copied() {
                         activate_local_entry(state, idx);
@@ -3454,18 +3451,16 @@ unsafe fn show_ftp_context_menu(state: &mut FtpWndState, screen_pt: POINT) {
         );
 
         let _ = SetForegroundWindow(state.container_hwnd);
-        let cmd = TrackPopupMenu(
+        let cmd = crate::ui::track_themed_popup_menu(
+            state.container_hwnd,
             hmenu,
-            TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
             screen_pt.x,
             screen_pt.y,
-            Some(0),
-            state.container_hwnd,
-            None,
+            &state.palette,
         );
         let _ = DestroyMenu(hmenu);
 
-        match cmd.0 as u32 {
+        match cmd {
             CMD_FTP_CTX_OPEN => {
                 if let Some(idx) = state.remote_selected.iter().next().copied() {
                     activate_remote_entry(state, idx);
@@ -5117,6 +5112,18 @@ unsafe extern "system" fn ftp_host_wnd_proc(
         let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut FtpWndState;
         match msg {
             WM_ERASEBKGND => LRESULT(1),
+            windows::Win32::UI::WindowsAndMessaging::WM_MEASUREITEM => {
+                if let Some(res) = crate::ui::handle_themed_menu_measure_item(lparam) {
+                    return res;
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_DRAWITEM => {
+                if let Some(res) = crate::ui::handle_themed_menu_draw_item(lparam) {
+                    return res;
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
             WM_CTLCOLOREDIT => {
                 if !ptr.is_null() {
                     let state = &*ptr;
