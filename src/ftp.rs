@@ -23,7 +23,7 @@ use crate::ui::{
     draw_rounded_box, draw_rounded_button, draw_text_line, get_window_text, run_text_prompt_dialog,
     set_window_text, show_error_dialog,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::ffi::c_void;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -42,22 +42,29 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::Storage::FileSystem::GetLogicalDrives;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Registry::{
+    HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_EXPAND_SZ,
+    RRF_RT_REG_SZ, RegCloseKey, RegEnumValueW, RegGetValueW, RegOpenKeyExW,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT,
     TrackMouseEvent, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_F2, VK_F5, VK_HOME,
     VK_RETURN, VK_SHIFT, VK_UP,
 };
-use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
+use windows::Win32::UI::Shell::{
+    DragAcceptFiles, DragFinish, DragQueryFileW, HDROP, ShellExecuteW,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallWindowProcW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DestroyWindow, EN_KILLFOCUS, EN_SETFOCUS, GWLP_USERDATA, GWLP_WNDPROC, GetClientRect,
     GetCursorPos, GetDlgCtrlID, GetWindowLongPtrW, IDC_ARROW, IDC_HAND, IDC_SIZENS, IDC_SIZEWE,
-    LoadCursorW, MF_SEPARATOR, MF_STRING, MoveWindow, PostMessageW, RegisterClassExW, SW_HIDE,
-    SW_SHOW, SetCursor, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TPM_LEFTALIGN,
-    TPM_RETURNCMD, TPM_TOPALIGN, TrackPopupMenu, WINDOW_EX_STYLE, WM_APP, WM_CAPTURECHANGED,
-    WM_COMMAND, WM_CONTEXTMENU, WM_CTLCOLOREDIT, WM_DESTROY, WM_DROPFILES, WM_ERASEBKGND,
-    WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WNDCLASSEXW, WNDPROC, WS_CHILD, WS_CLIPCHILDREN,
+    LoadCursorW, MF_POPUP, MF_SEPARATOR, MF_STRING, MoveWindow, PostMessageW, RegisterClassExW,
+    SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SetCursor, SetForegroundWindow, SetWindowLongPtrW, ShowWindow,
+    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_TOPALIGN, TrackPopupMenu, WINDOW_EX_STYLE, WM_APP,
+    WM_CAPTURECHANGED, WM_COMMAND, WM_CONTEXTMENU, WM_CTLCOLOREDIT, WM_DESTROY, WM_DROPFILES,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WNDCLASSEXW, WNDPROC, WS_CHILD,
+    WS_CLIPCHILDREN,
 };
 use windows_core::{PCWSTR, w};
 
@@ -70,6 +77,12 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 pub const WM_FTP_EVENT: u32 = WM_APP + 120;
 pub const WM_FTP_REQUEST_CREDENTIALS: u32 = WM_APP + 121;
 const WM_FTP_INTERNAL_REFRESH: u32 = WM_APP + 125;
+const WM_FTP_OPEN_EDITOR: u32 = WM_APP + 126;
+const WM_FTP_OPEN_EXTERNAL_EDITOR: u32 = WM_APP + 127;
+const WM_FTP_EXTERNAL_FILE_CHANGED: u32 = WM_APP + 128;
+
+const MAX_EDITABLE_FILE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_EXTERNAL_EDIT_FILE_BYTES: usize = 32 * 1024 * 1024;
 
 pub const FTP_EVT_CONNECTING: usize = 1;
 pub const FTP_EVT_CONNECTED: usize = 2;
@@ -883,6 +896,115 @@ impl FtpClient {
         Ok(transferred)
     }
 
+    pub fn download_bytes(
+        &mut self,
+        remote_name: &str,
+        max_bytes: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<u8>, String> {
+        sanitize_ftp_arg(remote_name)?;
+        if let Some(size) = self.size(remote_name)
+            && size > max_bytes as u64
+        {
+            return Err(format!(
+                "Le fichier « {remote_name} » dépasse la limite d'édition ({} Mo max).",
+                max_bytes / (1024 * 1024)
+            ));
+        }
+
+        let mut data_stream = self.open_data_stream()?;
+        let (code, msg) = self.send_raw_command(&format!("RETR {remote_name}"))?;
+        if code / 100 != 1 {
+            return Err(format!("Échec lecture RETR '{remote_name}' ({msg})"));
+        }
+
+        let mut out = Vec::new();
+        let mut buf = [0u8; 32 * 1024];
+        let mut read_err: Option<String> = None;
+
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                read_err = Some("Lecture du fichier annulée par l'utilisateur.".to_string());
+                break;
+            }
+            match data_stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if out.len().saturating_add(n) > max_bytes {
+                        read_err = Some(format!(
+                            "Le fichier « {remote_name} » dépasse la limite d'édition ({} Mo max).",
+                            max_bytes / (1024 * 1024)
+                        ));
+                        break;
+                    }
+                    out.extend_from_slice(&buf[..n]);
+                }
+                Err(e) => {
+                    read_err = Some(format!("Erreur réception données FTP : {e}"));
+                    break;
+                }
+            }
+        }
+
+        drop(data_stream);
+
+        if let Some(err) = read_err {
+            let _ = self.read_response();
+            return Err(err);
+        }
+
+        let (end_code, end_msg) = self.read_response()?;
+        if end_code / 100 != 2 {
+            return Err(format!("Transfert RETR incomplet ({end_msg})"));
+        }
+
+        Ok(out)
+    }
+
+    pub fn upload_bytes(
+        &mut self,
+        data: &[u8],
+        remote_name: &str,
+        cancel: &AtomicBool,
+    ) -> Result<u64, String> {
+        sanitize_ftp_arg(remote_name)?;
+        let mut data_stream = self.open_data_stream()?;
+        let (code, msg) = self.send_raw_command(&format!("STOR {remote_name}"))?;
+        if code / 100 != 1 {
+            return Err(format!("Échec téléversement STOR '{remote_name}' ({msg})"));
+        }
+
+        let mut offset = 0usize;
+        let mut write_err: Option<String> = None;
+        while offset < data.len() {
+            if cancel.load(Ordering::Relaxed) {
+                write_err = Some("Téléversement annulé par l'utilisateur.".to_string());
+                break;
+            }
+            let end = (offset + 32 * 1024).min(data.len());
+            if let Err(e) = data_stream.write_all(&data[offset..end]) {
+                write_err = Some(format!("Erreur envoi données FTP : {e}"));
+                break;
+            }
+            offset = end;
+        }
+
+        let _ = data_stream.flush();
+        drop(data_stream);
+
+        if let Some(err) = write_err {
+            let _ = self.read_response();
+            return Err(err);
+        }
+
+        let (end_code, end_msg) = self.read_response()?;
+        if end_code / 100 != 2 {
+            return Err(format!("Transfert STOR incomplet ({end_msg})"));
+        }
+
+        Ok(data.len() as u64)
+    }
+
     pub fn mkdir(&mut self, name: &str) -> Result<(), String> {
         sanitize_ftp_arg(name)?;
         let (code, msg) = self.send_raw_command(&format!("MKD {name}"))?;
@@ -966,6 +1088,37 @@ pub struct FtpSharedState {
     pub status_detail: String,
     pub error_banner: Option<String>,
     pub path_dirty: bool,
+    pub pending_edit_file: Option<(String, String, Vec<u8>)>,
+    pending_external_launch: Option<PendingExternalLaunch>,
+    pending_external_changes: VecDeque<PendingExternalChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExternalEditorApp {
+    display_name: String,
+    exe_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+enum ExternalEditTarget {
+    App(ExternalEditorApp),
+    SystemChooser,
+}
+
+#[derive(Debug, Clone)]
+struct PendingExternalLaunch {
+    remote_dir: String,
+    remote_name: String,
+    local_path: PathBuf,
+    initial_bytes: Vec<u8>,
+    target: ExternalEditTarget,
+}
+
+#[derive(Debug, Clone)]
+struct PendingExternalChange {
+    remote_dir: String,
+    remote_name: String,
+    new_bytes: Vec<u8>,
 }
 
 enum FtpWorkerCommand {
@@ -994,6 +1147,20 @@ enum FtpWorkerCommand {
     Delete {
         name: String,
         is_dir: bool,
+    },
+    FetchForEdit {
+        remote_name: String,
+        size_hint: Option<u64>,
+    },
+    FetchForExternalEdit {
+        remote_name: String,
+        size_hint: Option<u64>,
+        target: ExternalEditTarget,
+    },
+    SaveEditedFile {
+        remote_dir: String,
+        remote_name: String,
+        content: Vec<u8>,
     },
     Quit,
 }
@@ -1042,6 +1209,10 @@ const CMD_FTP_CTX_MKDIR: u32 = 5205;
 const CMD_FTP_CTX_RENAME: u32 = 5206;
 const CMD_FTP_CTX_DELETE: u32 = 5207;
 const CMD_FTP_CTX_REFRESH: u32 = 5208;
+const CMD_FTP_CTX_EDIT: u32 = 5209;
+const CMD_FTP_CTX_EDIT_WITH_OTHER: u32 = 5210;
+const CMD_FTP_CTX_EDIT_WITH_BASE: u32 = 5220;
+const MAX_EXTERNAL_EDITORS_MENU: usize = 20;
 
 struct FtpWndState {
     session_id: u32,
@@ -1082,6 +1253,8 @@ struct FtpWndState {
     last_transfer_active: bool,
     hovered_zone: Option<FtpUiZone>,
     hit_zones: Vec<FtpHitZone>,
+    external_watch_stop: Arc<AtomicBool>,
+    external_temp_dirs: Vec<PathBuf>,
 }
 
 const PROP_FTP_OLD_EDIT_PROC: PCWSTR = w!("MalvisionFtpPathOldProc");
@@ -2133,6 +2306,351 @@ fn spawn_ftp_worker(
                             );
                         }
                     }
+                    FtpWorkerCommand::FetchForEdit {
+                        remote_name,
+                        size_hint,
+                    } => {
+                        if let Some(sz) = size_hint
+                            && sz > MAX_EDITABLE_FILE_BYTES as u64
+                        {
+                            let msg = format!(
+                                "Le fichier « {remote_name} » est trop volumineux pour l'éditeur intégré ({} Mo max).",
+                                MAX_EDITABLE_FILE_BYTES / (1024 * 1024)
+                            );
+                            if let Ok(mut st) = shared.lock() {
+                                st.error_banner = Some(msg.clone());
+                                st.status_detail = msg.clone();
+                            }
+                            push_ftp_log(&shared, msg, true, false);
+                            post_notify(
+                                container_hwnd_raw,
+                                main_hwnd_raw,
+                                session_id,
+                                FTP_EVT_STATUS_TEXT,
+                            );
+                            continue;
+                        }
+                        if client.is_none()
+                            && !connect_and_resume(
+                                &mut client,
+                                &mut last_remote_dir,
+                                &active_user,
+                                &active_pass,
+                                true,
+                            )
+                        {
+                            continue;
+                        }
+                        if let Some(ref mut c) = client {
+                            cancel_transfer.store(false, Ordering::Relaxed);
+                            if let Ok(mut st) = shared.lock() {
+                                st.error_banner = None;
+                                st.status_detail =
+                                    format!("Ouverture de « {remote_name} » dans l'éditeur...");
+                            }
+                            post_notify(
+                                container_hwnd_raw,
+                                main_hwnd_raw,
+                                session_id,
+                                FTP_EVT_STATUS_TEXT,
+                            );
+                            match c.download_bytes(
+                                &remote_name,
+                                MAX_EDITABLE_FILE_BYTES,
+                                &cancel_transfer,
+                            ) {
+                                Ok(bytes) => {
+                                    let remote_dir =
+                                        last_remote_dir.clone().unwrap_or_else(|| "/".to_string());
+                                    if let Ok(mut st) = shared.lock() {
+                                        st.pending_edit_file =
+                                            Some((remote_dir, remote_name.clone(), bytes));
+                                        st.status_detail = format!("Édition de « {remote_name} ».");
+                                    }
+                                    push_ftp_log(
+                                        &shared,
+                                        format!("Fichier « {remote_name} » chargé pour édition."),
+                                        false,
+                                        true,
+                                    );
+                                    unsafe {
+                                        let _ = PostMessageW(
+                                            Some(HWND(container_hwnd_raw as *mut c_void)),
+                                            WM_FTP_OPEN_EDITOR,
+                                            WPARAM(0),
+                                            LPARAM(0),
+                                        );
+                                    }
+                                }
+                                Err(err) => {
+                                    if let Ok(mut st) = shared.lock() {
+                                        st.error_banner = Some(err.clone());
+                                        st.status_detail = err.clone();
+                                    }
+                                    push_ftp_log(&shared, err, true, false);
+                                }
+                            }
+                            post_notify(
+                                container_hwnd_raw,
+                                main_hwnd_raw,
+                                session_id,
+                                FTP_EVT_STATUS_TEXT,
+                            );
+                        }
+                    }
+                    FtpWorkerCommand::FetchForExternalEdit {
+                        remote_name,
+                        size_hint,
+                        target,
+                    } => {
+                        if let Some(sz) = size_hint
+                            && sz > MAX_EXTERNAL_EDIT_FILE_BYTES as u64
+                        {
+                            let msg = format!(
+                                "Le fichier « {remote_name} » dépasse la limite d'édition externe ({} Mo max).",
+                                MAX_EXTERNAL_EDIT_FILE_BYTES / (1024 * 1024)
+                            );
+                            if let Ok(mut st) = shared.lock() {
+                                st.error_banner = Some(msg.clone());
+                                st.status_detail = msg.clone();
+                            }
+                            push_ftp_log(&shared, msg, true, false);
+                            post_notify(
+                                container_hwnd_raw,
+                                main_hwnd_raw,
+                                session_id,
+                                FTP_EVT_STATUS_TEXT,
+                            );
+                            continue;
+                        }
+                        if client.is_none()
+                            && !connect_and_resume(
+                                &mut client,
+                                &mut last_remote_dir,
+                                &active_user,
+                                &active_pass,
+                                true,
+                            )
+                        {
+                            continue;
+                        }
+                        if let Some(ref mut c) = client {
+                            cancel_transfer.store(false, Ordering::Relaxed);
+                            if let Ok(mut st) = shared.lock() {
+                                st.error_banner = None;
+                                st.status_detail = format!(
+                                    "Téléchargement de « {remote_name} » pour l'éditeur externe..."
+                                );
+                            }
+                            post_notify(
+                                container_hwnd_raw,
+                                main_hwnd_raw,
+                                session_id,
+                                FTP_EVT_STATUS_TEXT,
+                            );
+                            match c.download_bytes(
+                                &remote_name,
+                                MAX_EXTERNAL_EDIT_FILE_BYTES,
+                                &cancel_transfer,
+                            ) {
+                                Ok(bytes) => {
+                                    let safe_name: String = remote_name
+                                        .chars()
+                                        .map(|ch| {
+                                            if matches!(
+                                                ch,
+                                                '/' | '\\'
+                                                    | ':'
+                                                    | '*'
+                                                    | '?'
+                                                    | '"'
+                                                    | '<'
+                                                    | '>'
+                                                    | '|'
+                                            ) {
+                                                '_'
+                                            } else {
+                                                ch
+                                            }
+                                        })
+                                        .collect();
+                                    let unique_ns = SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .map(|d| d.as_millis())
+                                        .unwrap_or(0);
+                                    let temp_dir = std::env::temp_dir()
+                                        .join("Malvision")
+                                        .join("ftp_edit")
+                                        .join(format!("s{session_id}_{unique_ns}"));
+                                    if let Err(err) = std::fs::create_dir_all(&temp_dir) {
+                                        let msg = format!(
+                                            "Impossible de préparer le dossier temporaire : {err}"
+                                        );
+                                        if let Ok(mut st) = shared.lock() {
+                                            st.error_banner = Some(msg.clone());
+                                            st.status_detail = msg.clone();
+                                        }
+                                        push_ftp_log(&shared, msg, true, false);
+                                    } else {
+                                        let local_path = temp_dir.join(if safe_name.is_empty() {
+                                            "fichier.txt"
+                                        } else {
+                                            safe_name.as_str()
+                                        });
+                                        if let Err(err) = std::fs::write(&local_path, &bytes) {
+                                            let msg = format!(
+                                                "Impossible d'écrire le fichier temporaire : {err}"
+                                            );
+                                            if let Ok(mut st) = shared.lock() {
+                                                st.error_banner = Some(msg.clone());
+                                                st.status_detail = msg.clone();
+                                            }
+                                            push_ftp_log(&shared, msg, true, false);
+                                        } else {
+                                            let remote_dir = last_remote_dir
+                                                .clone()
+                                                .unwrap_or_else(|| "/".to_string());
+                                            if let Ok(mut st) = shared.lock() {
+                                                st.pending_external_launch =
+                                                    Some(PendingExternalLaunch {
+                                                        remote_dir,
+                                                        remote_name: remote_name.clone(),
+                                                        local_path,
+                                                        initial_bytes: bytes,
+                                                        target,
+                                                    });
+                                                st.status_detail = format!(
+                                                    "Ouverture externe de « {remote_name} »."
+                                                );
+                                            }
+                                            push_ftp_log(
+                                                &shared,
+                                                format!(
+                                                    "Fichier « {remote_name} » prêt pour édition externe."
+                                                ),
+                                                false,
+                                                true,
+                                            );
+                                            unsafe {
+                                                let _ = PostMessageW(
+                                                    Some(HWND(container_hwnd_raw as *mut c_void)),
+                                                    WM_FTP_OPEN_EXTERNAL_EDITOR,
+                                                    WPARAM(0),
+                                                    LPARAM(0),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    if let Ok(mut st) = shared.lock() {
+                                        st.error_banner = Some(err.clone());
+                                        st.status_detail = err.clone();
+                                    }
+                                    push_ftp_log(&shared, err, true, false);
+                                }
+                            }
+                            post_notify(
+                                container_hwnd_raw,
+                                main_hwnd_raw,
+                                session_id,
+                                FTP_EVT_STATUS_TEXT,
+                            );
+                        }
+                    }
+                    FtpWorkerCommand::SaveEditedFile {
+                        remote_dir,
+                        remote_name,
+                        content,
+                    } => {
+                        if client.is_none()
+                            && !connect_and_resume(
+                                &mut client,
+                                &mut last_remote_dir,
+                                &active_user,
+                                &active_pass,
+                                true,
+                            )
+                        {
+                            continue;
+                        }
+                        if let Some(ref mut c) = client {
+                            cancel_transfer.store(false, Ordering::Relaxed);
+                            let prev_dir =
+                                last_remote_dir.clone().unwrap_or_else(|| "/".to_string());
+                            if remote_dir != prev_dir
+                                && let Err(err) = c.cwd(&remote_dir)
+                            {
+                                if let Ok(mut st) = shared.lock() {
+                                    st.error_banner = Some(err.clone());
+                                    st.status_detail = err.clone();
+                                }
+                                push_ftp_log(&shared, err, true, false);
+                                post_notify(
+                                    container_hwnd_raw,
+                                    main_hwnd_raw,
+                                    session_id,
+                                    FTP_EVT_STATUS_TEXT,
+                                );
+                                continue;
+                            }
+                            if let Ok(mut st) = shared.lock() {
+                                st.error_banner = None;
+                                st.status_detail =
+                                    format!("Enregistrement de « {remote_name} » sur le FTP...");
+                            }
+                            post_notify(
+                                container_hwnd_raw,
+                                main_hwnd_raw,
+                                session_id,
+                                FTP_EVT_STATUS_TEXT,
+                            );
+                            match c.upload_bytes(&content, &remote_name, &cancel_transfer) {
+                                Ok(bytes_written) => {
+                                    if let Ok(mut st) = shared.lock() {
+                                        st.status_detail = format!(
+                                            "« {remote_name} » enregistré ({bytes_written} octets)."
+                                        );
+                                    }
+                                    push_ftp_log(
+                                        &shared,
+                                        format!(
+                                            "Fichier « {remote_name} » enregistré ({bytes_written} octets)."
+                                        ),
+                                        false,
+                                        true,
+                                    );
+                                    if remote_dir != prev_dir {
+                                        let _ = c.cwd(&prev_dir);
+                                    }
+                                    let mut cur =
+                                        last_remote_dir.clone().unwrap_or_else(|| "/".to_string());
+                                    if let Ok(entries) =
+                                        refresh_dir(c, &mut cur, &mut last_remote_dir)
+                                        && let Ok(mut st) = shared.lock()
+                                    {
+                                        st.entries = entries;
+                                    }
+                                }
+                                Err(err) => {
+                                    if remote_dir != prev_dir {
+                                        let _ = c.cwd(&prev_dir);
+                                    }
+                                    if let Ok(mut st) = shared.lock() {
+                                        st.error_banner = Some(err.clone());
+                                        st.status_detail = err.clone();
+                                    }
+                                    push_ftp_log(&shared, err, true, false);
+                                }
+                            }
+                            post_notify(
+                                container_hwnd_raw,
+                                main_hwnd_raw,
+                                session_id,
+                                FTP_EVT_STATUS_TEXT,
+                            );
+                        }
+                    }
                     FtpWorkerCommand::Quit => {
                         if let Some(mut c) = client.take() {
                             c.quit();
@@ -2832,6 +3350,7 @@ unsafe fn show_ftp_context_menu(state: &mut FtpWndState, screen_pt: POINT) {
             .count();
         let sel_first = selected_remote_entry(state);
 
+        let mut discovered_editors: Vec<ExternalEditorApp> = Vec::new();
         if file_count > 1 {
             let lbl: Vec<u16> = format!("Télécharger {file_count} fichiers vers le dossier local")
                 .encode_utf16()
@@ -2844,6 +3363,39 @@ unsafe fn show_ftp_context_menu(state: &mut FtpWndState, screen_pt: POINT) {
                 PCWSTR(lbl.as_ptr()),
             );
         } else if file_count == 1 {
+            let _ = AppendMenuW(hmenu, MF_STRING, CMD_FTP_CTX_EDIT as usize, w!("Éditer"));
+            if let Some(first_file) = sel_items.iter().find(|e| e.kind == FtpEntryKind::File) {
+                discovered_editors = discover_external_editors(&first_file.name);
+            }
+            if let Ok(hsub) = CreatePopupMenu() {
+                for (idx, app) in discovered_editors
+                    .iter()
+                    .take(MAX_EXTERNAL_EDITORS_MENU)
+                    .enumerate()
+                {
+                    let app_w: Vec<u16> = app
+                        .display_name
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .collect();
+                    let _ = AppendMenuW(
+                        hsub,
+                        MF_STRING,
+                        (CMD_FTP_CTX_EDIT_WITH_BASE + idx as u32) as usize,
+                        PCWSTR(app_w.as_ptr()),
+                    );
+                }
+                if !discovered_editors.is_empty() {
+                    let _ = AppendMenuW(hsub, MF_SEPARATOR, 0, PCWSTR::null());
+                }
+                let _ = AppendMenuW(
+                    hsub,
+                    MF_STRING,
+                    CMD_FTP_CTX_EDIT_WITH_OTHER as usize,
+                    w!("Choisir une autre application…"),
+                );
+                let _ = AppendMenuW(hmenu, MF_POPUP, hsub.0 as usize, w!("Éditer avec"));
+            }
             let _ = AppendMenuW(
                 hmenu,
                 MF_STRING,
@@ -2919,6 +3471,19 @@ unsafe fn show_ftp_context_menu(state: &mut FtpWndState, screen_pt: POINT) {
                     activate_remote_entry(state, idx);
                 }
             }
+            CMD_FTP_CTX_EDIT => trigger_ftp_edit(state),
+            CMD_FTP_CTX_EDIT_WITH_OTHER => {
+                trigger_ftp_edit_with(state, ExternalEditTarget::SystemChooser)
+            }
+            c if (CMD_FTP_CTX_EDIT_WITH_BASE
+                ..CMD_FTP_CTX_EDIT_WITH_BASE + MAX_EXTERNAL_EDITORS_MENU as u32)
+                .contains(&c) =>
+            {
+                let idx = (c - CMD_FTP_CTX_EDIT_WITH_BASE) as usize;
+                if let Some(app) = discovered_editors.get(idx) {
+                    trigger_ftp_edit_with(state, ExternalEditTarget::App(app.clone()));
+                }
+            }
             CMD_FTP_CTX_DOWNLOAD => trigger_ftp_download_to_local_or_prompt(state, false),
             CMD_FTP_CTX_DOWNLOAD_AS => trigger_ftp_download_to_local_or_prompt(state, true),
             CMD_FTP_CTX_UPLOAD => trigger_ftp_upload(state),
@@ -2932,6 +3497,496 @@ unsafe fn show_ftp_context_menu(state: &mut FtpWndState, screen_pt: POINT) {
         }
     }
 }
+
+fn trigger_ftp_edit(state: &FtpWndState) {
+    let files: Vec<FtpEntry> = selected_remote_entries(state)
+        .into_iter()
+        .filter(|e| e.kind == FtpEntryKind::File)
+        .collect();
+    if files.len() != 1 {
+        return;
+    }
+    let entry = &files[0];
+    let _ = state.cmd_tx.send(FtpWorkerCommand::FetchForEdit {
+        remote_name: entry.name.clone(),
+        size_hint: entry.size,
+    });
+}
+
+fn trigger_ftp_edit_with(state: &FtpWndState, target: ExternalEditTarget) {
+    let files: Vec<FtpEntry> = selected_remote_entries(state)
+        .into_iter()
+        .filter(|e| e.kind == FtpEntryKind::File)
+        .collect();
+    if files.len() != 1 {
+        return;
+    }
+    let entry = &files[0];
+    let _ = state.cmd_tx.send(FtpWorkerCommand::FetchForExternalEdit {
+        remote_name: entry.name.clone(),
+        size_hint: entry.size,
+        target,
+    });
+}
+
+fn reg_read_string(root: HKEY, subkey: &str, value_name: Option<&str>) -> Option<String> {
+    let subkey_w: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
+    let val_w: Option<Vec<u16>> =
+        value_name.map(|v| v.encode_utf16().chain(std::iter::once(0)).collect());
+    unsafe {
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(
+            root,
+            PCWSTR(subkey_w.as_ptr()),
+            Some(0),
+            KEY_READ,
+            &mut hkey,
+        )
+        .is_err()
+        {
+            return None;
+        }
+        let val_ptr = val_w
+            .as_ref()
+            .map(|v| PCWSTR(v.as_ptr()))
+            .unwrap_or(PCWSTR::null());
+        let mut size_bytes: u32 = 0;
+        let ok = RegGetValueW(
+            hkey,
+            PCWSTR::null(),
+            val_ptr,
+            RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+            None,
+            None,
+            Some(&mut size_bytes),
+        )
+        .is_ok();
+        let res = if ok && size_bytes >= 2 {
+            let mut buf = vec![0u16; (size_bytes as usize) / 2 + 1];
+            let mut actual = size_bytes;
+            if RegGetValueW(
+                hkey,
+                PCWSTR::null(),
+                val_ptr,
+                RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+                None,
+                Some(buf.as_mut_ptr() as *mut c_void),
+                Some(&mut actual),
+            )
+            .is_ok()
+            {
+                let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                Some(String::from_utf16_lossy(&buf[..len]))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let _ = RegCloseKey(hkey);
+        res
+    }
+}
+
+fn reg_enum_string_values(root: HKEY, subkey: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let subkey_w: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(
+            root,
+            PCWSTR(subkey_w.as_ptr()),
+            Some(0),
+            KEY_READ,
+            &mut hkey,
+        )
+        .is_err()
+        {
+            return out;
+        }
+        let mut idx = 0u32;
+        loop {
+            let mut name_buf = [0u16; 256];
+            let mut name_len = name_buf.len() as u32;
+            let mut data_buf = [0u8; 1024];
+            let mut data_len = data_buf.len() as u32;
+            let mut val_type = 0u32;
+            let err = RegEnumValueW(
+                hkey,
+                idx,
+                Some(windows::core::PWSTR(name_buf.as_mut_ptr())),
+                &mut name_len,
+                None,
+                Some(&mut val_type),
+                Some(data_buf.as_mut_ptr()),
+                Some(&mut data_len),
+            );
+            if err.is_err() {
+                break;
+            }
+            let name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+            let val = if (val_type == 1 || val_type == 2) && data_len >= 2 {
+                let u16_slice = std::slice::from_raw_parts(
+                    data_buf.as_ptr() as *const u16,
+                    (data_len as usize) / 2,
+                );
+                let end = u16_slice
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(u16_slice.len());
+                String::from_utf16_lossy(&u16_slice[..end])
+            } else {
+                String::new()
+            };
+            out.push((name, val));
+            idx += 1;
+        }
+        let _ = RegCloseKey(hkey);
+    }
+    out
+}
+
+fn extract_exe_path_from_command(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let candidate = if let Some(rest) = trimmed.strip_prefix('"') {
+        rest.split('"').next().unwrap_or("").trim()
+    } else if let Some(idx) = trimmed.to_ascii_lowercase().find(".exe") {
+        trimmed[..idx + 4].trim()
+    } else {
+        trimmed.split_whitespace().next().unwrap_or("")
+    };
+    if candidate.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(candidate);
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+    {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn resolve_exe_via_app_paths(exe_name: &str) -> Option<PathBuf> {
+    let key = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{exe_name}");
+    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        if let Some(val) = reg_read_string(root, &key, None)
+            && let Some(p) = extract_exe_path_from_command(&val)
+            && p.is_file()
+        {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn push_unique_editor(
+    out: &mut Vec<ExternalEditorApp>,
+    seen_paths: &mut std::collections::HashSet<String>,
+    display_name: &str,
+    exe_path: PathBuf,
+) {
+    if !exe_path.is_file() {
+        return;
+    }
+    let lower_name = exe_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if lower_name == "malvision.exe" || lower_name == "rundll32.exe" || lower_name == "cmd.exe" {
+        return;
+    }
+    let norm = exe_path.to_string_lossy().to_ascii_lowercase();
+    if seen_paths.insert(norm) {
+        out.push(ExternalEditorApp {
+            display_name: display_name.to_string(),
+            exe_path,
+        });
+    }
+}
+
+fn discover_external_editors(remote_name: &str) -> Vec<ExternalEditorApp> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+    let program_files_x86 = std::env::var_os("ProgramFiles(x86)").map(PathBuf::from);
+    let system_root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+
+    // 1. Éditeurs de code / texte courants détectés sur le poste
+    let known: &[(&str, &str, &[&str])] = &[
+        (
+            "Visual Studio Code",
+            "Code.exe",
+            &[
+                r"Programs\Microsoft VS Code\Code.exe",
+                r"Microsoft VS Code\Code.exe",
+            ],
+        ),
+        (
+            "VS Code Insiders",
+            "Code - Insiders.exe",
+            &[
+                r"Programs\Microsoft VS Code Insiders\Code - Insiders.exe",
+                r"Microsoft VS Code Insiders\Code - Insiders.exe",
+            ],
+        ),
+        (
+            "Cursor",
+            "Cursor.exe",
+            &[r"Programs\cursor\Cursor.exe", r"Cursor\Cursor.exe"],
+        ),
+        (
+            "Windsurf",
+            "Windsurf.exe",
+            &[r"Programs\Windsurf\Windsurf.exe", r"Windsurf\Windsurf.exe"],
+        ),
+        ("Zed", "Zed.exe", &[r"Programs\Zed\Zed.exe", r"Zed\Zed.exe"]),
+        ("Notepad++", "notepad++.exe", &[r"Notepad++\notepad++.exe"]),
+        (
+            "Sublime Text",
+            "sublime_text.exe",
+            &[
+                r"Sublime Text\sublime_text.exe",
+                r"Sublime Text 3\sublime_text.exe",
+            ],
+        ),
+        (
+            "VSCodium",
+            "VSCodium.exe",
+            &[r"Programs\VSCodium\VSCodium.exe", r"VSCodium\VSCodium.exe"],
+        ),
+    ];
+
+    for (label, exe_name, rel_paths) in known {
+        if let Some(p) = resolve_exe_via_app_paths(exe_name) {
+            push_unique_editor(&mut out, &mut seen, label, p);
+            continue;
+        }
+        let roots = [
+            local_app_data.as_ref(),
+            program_files.as_ref(),
+            program_files_x86.as_ref(),
+        ];
+        'search_known: for root_opt in roots.into_iter().flatten() {
+            for rel in *rel_paths {
+                let cand = root_opt.join(rel);
+                if cand.is_file() {
+                    push_unique_editor(&mut out, &mut seen, label, cand);
+                    break 'search_known;
+                }
+            }
+        }
+    }
+
+    // 2. Bloc-notes Windows (toujours disponible)
+    push_unique_editor(
+        &mut out,
+        &mut seen,
+        "Bloc-notes (Notepad)",
+        system_root.join("System32").join("notepad.exe"),
+    );
+
+    // 3. Applications associées à l'extension du fichier dans le Registre Windows
+    if let Some(ext) = Path::new(remote_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| !e.is_empty())
+    {
+        let dot_ext = format!(".{}", ext.to_ascii_lowercase());
+        let user_owl = format!(
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\{dot_ext}\\OpenWithList"
+        );
+        let mut exe_candidates: Vec<String> = Vec::new();
+        for (name, val) in reg_enum_string_values(HKEY_CURRENT_USER, &user_owl) {
+            if !name.eq_ignore_ascii_case("MRUList") && val.to_ascii_lowercase().ends_with(".exe") {
+                exe_candidates.push(val);
+            }
+        }
+        for exe_name in exe_candidates {
+            if out.len() >= MAX_EXTERNAL_EDITORS_MENU {
+                break;
+            }
+            let cmd_key = format!("Applications\\{exe_name}\\shell\\open\\command");
+            let exe_path = reg_read_string(HKEY_CLASSES_ROOT, &cmd_key, None)
+                .and_then(|c| extract_exe_path_from_command(&c))
+                .or_else(|| resolve_exe_via_app_paths(&exe_name));
+            if let Some(p) = exe_path {
+                let app_key = format!("Applications\\{exe_name}");
+                let friendly =
+                    reg_read_string(HKEY_CLASSES_ROOT, &app_key, Some("FriendlyAppName"))
+                        .filter(|s| !s.trim().is_empty() && !s.starts_with('@'))
+                        .unwrap_or_else(|| {
+                            p.file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or(&exe_name)
+                                .to_string()
+                        });
+                push_unique_editor(&mut out, &mut seen, &friendly, p);
+            }
+        }
+
+        let user_progids = format!(
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\{dot_ext}\\OpenWithProgids"
+        );
+        let mut progids: Vec<String> = reg_enum_string_values(HKEY_CURRENT_USER, &user_progids)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        let cr_progids = format!("{dot_ext}\\OpenWithProgids");
+        progids.extend(
+            reg_enum_string_values(HKEY_CLASSES_ROOT, &cr_progids)
+                .into_iter()
+                .map(|(k, _)| k),
+        );
+        for progid in progids {
+            if out.len() >= MAX_EXTERNAL_EDITORS_MENU {
+                break;
+            }
+            let cmd_key = format!("{progid}\\shell\\open\\command");
+            if let Some(cmd) = reg_read_string(HKEY_CLASSES_ROOT, &cmd_key, None)
+                && let Some(p) = extract_exe_path_from_command(&cmd)
+            {
+                let friendly = reg_read_string(HKEY_CLASSES_ROOT, &progid, None)
+                    .filter(|s| !s.trim().is_empty() && !s.starts_with('@'))
+                    .unwrap_or_else(|| {
+                        p.file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Application")
+                            .to_string()
+                    });
+                push_unique_editor(&mut out, &mut seen, &friendly, p);
+            }
+        }
+    }
+
+    out.truncate(MAX_EXTERNAL_EDITORS_MENU);
+    out
+}
+
+fn launch_external_editor(
+    owner: HWND,
+    local_path: &Path,
+    target: &ExternalEditTarget,
+) -> Result<(), String> {
+    let path_str = local_path.to_string_lossy().to_string();
+    let (verb_w, file_w, params_w): (Vec<u16>, Vec<u16>, Option<Vec<u16>>) = match target {
+        ExternalEditTarget::App(app) => {
+            let exe_str = app.exe_path.to_string_lossy().to_string();
+            let quoted_file = format!("\"{path_str}\"");
+            (
+                "open\0".encode_utf16().collect(),
+                exe_str.encode_utf16().chain(std::iter::once(0)).collect(),
+                Some(
+                    quoted_file
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .collect(),
+                ),
+            )
+        }
+        ExternalEditTarget::SystemChooser => (
+            "openas\0".encode_utf16().collect(),
+            path_str.encode_utf16().chain(std::iter::once(0)).collect(),
+            None,
+        ),
+    };
+
+    let hinst = unsafe {
+        ShellExecuteW(
+            Some(owner),
+            PCWSTR(verb_w.as_ptr()),
+            PCWSTR(file_w.as_ptr()),
+            params_w
+                .as_ref()
+                .map(|p| PCWSTR(p.as_ptr()))
+                .unwrap_or(PCWSTR::null()),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if (hinst.0 as isize) <= 32 {
+        return Err(format!(
+            "Impossible de lancer l'éditeur externe (code ShellExecute {}).",
+            hinst.0 as isize
+        ));
+    }
+    Ok(())
+}
+
+fn spawn_external_edit_watcher(
+    container_hwnd_raw: usize,
+    shared: Arc<Mutex<FtpSharedState>>,
+    stop_flag: Arc<AtomicBool>,
+    remote_dir: String,
+    remote_name: String,
+    local_path: PathBuf,
+    initial_bytes: Vec<u8>,
+) {
+    std::thread::spawn(move || {
+        let mut last_bytes = initial_bytes;
+        let mut last_modified = std::fs::metadata(&local_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+
+        while !stop_flag.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(600));
+            if stop_flag.load(Ordering::Relaxed) || !local_path.exists() {
+                break;
+            }
+            let cur_modified = std::fs::metadata(&local_path)
+                .ok()
+                .and_then(|m| m.modified().ok());
+            if cur_modified.is_some() && cur_modified != last_modified {
+                // Laisse le temps à l'éditeur (écriture atomique) de relâcher le fichier
+                std::thread::sleep(Duration::from_millis(160));
+                let mut read_bytes = None;
+                for _ in 0..3 {
+                    if let Ok(b) = std::fs::read(&local_path) {
+                        read_bytes = Some(b);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(120));
+                }
+                last_modified = std::fs::metadata(&local_path)
+                    .ok()
+                    .and_then(|m| m.modified().ok());
+                if let Some(new_bytes) = read_bytes
+                    && new_bytes != last_bytes
+                {
+                    last_bytes = new_bytes.clone();
+                    if let Ok(mut st) = shared.lock() {
+                        st.pending_external_changes
+                            .push_back(PendingExternalChange {
+                                remote_dir: remote_dir.clone(),
+                                remote_name: remote_name.clone(),
+                                new_bytes,
+                            });
+                    }
+                    unsafe {
+                        let _ = PostMessageW(
+                            Some(HWND(container_hwnd_raw as *mut c_void)),
+                            WM_FTP_EXTERNAL_FILE_CHANGED,
+                            WPARAM(0),
+                            LPARAM(0),
+                        );
+                    }
+                }
+            }
+        }
+    });
+}
+
 fn ftp_hit_test(state: &FtpWndState, x: i32, y: i32) -> Option<FtpUiZone> {
     let pt = POINT { x, y };
     for hz in &state.hit_zones {
@@ -4086,6 +5141,92 @@ unsafe extern "system" fn ftp_host_wnd_proc(
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
+            WM_FTP_OPEN_EDITOR => {
+                if !ptr.is_null() {
+                    let state = &*ptr;
+                    let pending = state
+                        .shared
+                        .lock()
+                        .ok()
+                        .and_then(|mut st| st.pending_edit_file.take());
+                    if let Some((remote_dir, remote_name, raw_bytes)) = pending
+                        && let Some(edited_bytes) = crate::ui::run_ftp_file_editor_dialog(
+                            state.main_hwnd,
+                            &remote_dir,
+                            &remote_name,
+                            &raw_bytes,
+                            &state.palette,
+                        )
+                    {
+                        let _ = state.cmd_tx.send(FtpWorkerCommand::SaveEditedFile {
+                            remote_dir,
+                            remote_name,
+                            content: edited_bytes,
+                        });
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_FTP_OPEN_EXTERNAL_EDITOR => {
+                if !ptr.is_null() {
+                    let state = &mut *ptr;
+                    let pending = state
+                        .shared
+                        .lock()
+                        .ok()
+                        .and_then(|mut st| st.pending_external_launch.take());
+                    if let Some(launch) = pending {
+                        if let Some(parent_dir) = launch.local_path.parent() {
+                            state.external_temp_dirs.push(parent_dir.to_path_buf());
+                        }
+                        if let Err(err) = launch_external_editor(
+                            state.main_hwnd,
+                            &launch.local_path,
+                            &launch.target,
+                        ) {
+                            show_error_dialog(state.main_hwnd, "Éditeur externe FTP", &err);
+                        } else {
+                            spawn_external_edit_watcher(
+                                state.container_hwnd.0 as usize,
+                                Arc::clone(&state.shared),
+                                Arc::clone(&state.external_watch_stop),
+                                launch.remote_dir,
+                                launch.remote_name,
+                                launch.local_path,
+                                launch.initial_bytes,
+                            );
+                        }
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_FTP_EXTERNAL_FILE_CHANGED => {
+                if !ptr.is_null() {
+                    let state = &*ptr;
+                    loop {
+                        let next_change = state
+                            .shared
+                            .lock()
+                            .ok()
+                            .and_then(|mut st| st.pending_external_changes.pop_front());
+                        let Some(change) = next_change else {
+                            break;
+                        };
+                        let prompt = format!(
+                            "Le fichier « {} » a été modifié dans l'éditeur externe.\n\nVoulez-vous téléverser les modifications sur le serveur FTP ({}) ?",
+                            change.remote_name, change.remote_dir
+                        );
+                        if confirm_dialog(state.main_hwnd, "Fichier modifié localement", &prompt) {
+                            let _ = state.cmd_tx.send(FtpWorkerCommand::SaveEditedFile {
+                                remote_dir: change.remote_dir,
+                                remote_name: change.remote_name,
+                                content: change.new_bytes,
+                            });
+                        }
+                    }
+                }
+                LRESULT(0)
+            }
             WM_PAINT => {
                 if !ptr.is_null() {
                     paint_ftp_host(&mut *ptr);
@@ -4739,7 +5880,12 @@ unsafe extern "system" fn ftp_host_wnd_proc(
             WM_DESTROY => {
                 if !ptr.is_null() {
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                    drop(Box::from_raw(ptr));
+                    let state = Box::from_raw(ptr);
+                    state.external_watch_stop.store(true, Ordering::Relaxed);
+                    for dir in &state.external_temp_dirs {
+                        let _ = std::fs::remove_dir_all(dir);
+                    }
+                    drop(state);
                 }
                 LRESULT(0)
             }
@@ -4837,6 +5983,9 @@ impl FtpSessionHost {
                 status_detail: format!("Connexion FTP en cours vers {host}:{port}..."),
                 error_banner: None,
                 path_dirty: true,
+                pending_edit_file: None,
+                pending_external_launch: None,
+                pending_external_changes: VecDeque::new(),
             }));
 
             let subclass_edit = |edit_hwnd: HWND| {
@@ -4932,6 +6081,8 @@ impl FtpSessionHost {
                 last_transfer_active: false,
                 hovered_zone: None,
                 hit_zones: Vec::new(),
+                external_watch_stop: Arc::new(AtomicBool::new(false)),
+                external_temp_dirs: Vec::new(),
             });
             refresh_local_entries(&mut state);
             ftp_layout_controls(&mut state, width.max(200), height.max(150));
@@ -5382,5 +6533,121 @@ mod tests {
         // Ctrl+clic sur 2 -> rajoute 2
         apply_row_selection(&mut sel, &mut anchor, 2, true, false, &entries);
         assert_eq!(sel.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_ftp_client_download_and_upload_bytes_for_editor() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("Bind mock FTP");
+        let port = listener.local_addr().unwrap().port();
+
+        let server_thread = std::thread::spawn(move || {
+            let (mut ctrl, _) = listener.accept().unwrap();
+            let mut ctrl_reader = BufReader::new(ctrl.try_clone().unwrap());
+            ctrl.write_all(b"220 Mock FTP Ready\r\n").unwrap();
+
+            let mut file_content: Vec<u8> = b"hello=world\n".to_vec();
+            let mut pending_data_listener: Option<TcpListener> = None;
+
+            loop {
+                let mut line = String::new();
+                if ctrl_reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let cmd_line = line.trim_end_matches(['\r', '\n']);
+                let (cmd, _arg) = cmd_line.split_once(' ').unwrap_or((cmd_line, ""));
+                match cmd.to_ascii_uppercase().as_str() {
+                    "USER" => ctrl.write_all(b"331 Password required\r\n").unwrap(),
+                    "PASS" => ctrl.write_all(b"230 Logged in\r\n").unwrap(),
+                    "OPTS" | "TYPE" => ctrl.write_all(b"200 OK\r\n").unwrap(),
+                    "SIZE" => {
+                        let resp = format!("213 {}\r\n", file_content.len());
+                        ctrl.write_all(resp.as_bytes()).unwrap();
+                    }
+                    "PASV" => {
+                        let dl = TcpListener::bind("127.0.0.1:0").unwrap();
+                        let dport = dl.local_addr().unwrap().port();
+                        pending_data_listener = Some(dl);
+                        let resp = format!(
+                            "227 Entering Passive Mode (127,0,0,1,{},{}).\r\n",
+                            dport >> 8,
+                            dport & 0xFF
+                        );
+                        ctrl.write_all(resp.as_bytes()).unwrap();
+                    }
+                    "RETR" => {
+                        let dl = pending_data_listener.take().unwrap();
+                        ctrl.write_all(b"150 Opening data connection\r\n").unwrap();
+                        let (mut ds, _) = dl.accept().unwrap();
+                        ds.write_all(&file_content).unwrap();
+                        drop(ds);
+                        ctrl.write_all(b"226 Transfer complete\r\n").unwrap();
+                    }
+                    "STOR" => {
+                        let dl = pending_data_listener.take().unwrap();
+                        ctrl.write_all(b"150 Ready for STOR\r\n").unwrap();
+                        let (mut ds, _) = dl.accept().unwrap();
+                        let mut buf = Vec::new();
+                        ds.read_to_end(&mut buf).unwrap();
+                        file_content = buf;
+                        ctrl.write_all(b"226 Transfer complete\r\n").unwrap();
+                    }
+                    "QUIT" => {
+                        ctrl.write_all(b"221 Bye\r\n").unwrap();
+                        break;
+                    }
+                    _ => ctrl.write_all(b"500 Unknown\r\n").unwrap(),
+                }
+            }
+            file_content
+        });
+
+        let pass = SecretString::new("pass".to_string());
+        let mut client = FtpClient::connect("127.0.0.1", port, "user", &pass, |_, _| {})
+            .expect("Connect mock FTP");
+        let cancel = AtomicBool::new(false);
+
+        // Trop volumineux -> refusé avant RETR
+        assert!(client.download_bytes("config.ini", 4, &cancel).is_err());
+
+        // Lecture en mémoire -> édition -> écrasement sur le serveur
+        let initial = client
+            .download_bytes("config.ini", MAX_EDITABLE_FILE_BYTES, &cancel)
+            .expect("download_bytes");
+        assert_eq!(initial, b"hello=world\n");
+
+        let written = client
+            .upload_bytes(b"hello=malvision\n", "config.ini", &cancel)
+            .expect("upload_bytes");
+        assert_eq!(written, 16);
+
+        let reread = client
+            .download_bytes("config.ini", MAX_EDITABLE_FILE_BYTES, &cancel)
+            .expect("re-download");
+        assert_eq!(reread, b"hello=malvision\n");
+
+        client.quit();
+        let final_server_bytes = server_thread.join().unwrap();
+        assert_eq!(final_server_bytes, b"hello=malvision\n");
+    }
+
+    #[test]
+    fn test_extract_exe_path_and_discover_external_editors() {
+        assert_eq!(
+            extract_exe_path_from_command(r#""C:\Program Files\Notepad++\notepad++.exe" "%1""#),
+            Some(PathBuf::from(r"C:\Program Files\Notepad++\notepad++.exe"))
+        );
+        assert_eq!(
+            extract_exe_path_from_command(r"C:\Windows\System32\notepad.exe %1"),
+            Some(PathBuf::from(r"C:\Windows\System32\notepad.exe"))
+        );
+        assert_eq!(extract_exe_path_from_command(""), None);
+
+        let editors = discover_external_editors("index.php");
+        assert!(
+            editors
+                .iter()
+                .any(|e| e.display_name.contains("Bloc-notes")),
+            "Bloc-notes doit toujours être détecté sur Windows"
+        );
     }
 }

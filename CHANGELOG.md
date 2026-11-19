@@ -2,6 +2,22 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
+## [1.0.9] — Arborescence de recherche & Édition FTP intégrée / externe (2026-11-19)
+
+### Ajouté & Amélioré
+- **Arborescence directe dans la recherche (`src/ui.rs`)** :
+  - Ajout de `collect_matching_folder_ids()` pour reconstruire et afficher directement la hiérarchie des dossiers parents contenant des résultats dans `Résultats de recherche`, automatiquement dépliée (`force_expand_all = true`) afin de distinguer visuellement et en un clin d'œil les connexions homonymes sans tronquer ni attendre d'infobulle.
+  - Affichage compact du dossier parent direct `[Dossier]` sur les favoris filtrés pendant une recherche.
+- **Éditeur de fichiers FTP intégré (`src/ftp.rs`, `src/ui.rs`)** :
+  - Nouvelle action **Éditer** (`CMD_FTP_CTX_EDIT`) au clic droit sur un fichier distant dans la vue FTP.
+  - Téléchargement et téléversement en mémoire (`FtpClient::download_bytes`, `FtpClient::upload_bytes`, plafonné à 5 Mo) avec fenêtre d'édition Fluent dédiée (`run_ftp_file_editor_dialog` : police monospace `Consolas`, `Ctrl+S` pour enregistrer et écraser sur le FTP, `Ctrl+A`, confirmation de fermeture si non enregistré, conservation CRLF/LF, alerte si fichier binaire).
+- **Édition FTP avec application externe `Éditer avec >` (`src/ftp.rs`)** :
+  - Sous-menu dynamique **Éditer avec >** listant les éditeurs installés sur le poste (`discover_external_editors` : VS Code, VS Code Insiders, Cursor, Windsurf, Zed, Notepad++, Sublime Text, VSCodium, Bloc-notes) ainsi que les applications associées à l'extension dans le Registre Windows et `Choisir une autre application…` (`ShellExecuteW` `"openas"`).
+  - Téléchargement temporaire isolé dans `%TEMP%\Malvision\ftp_edit\…`, surveillance automatique des modifications sur disque (`spawn_external_edit_watcher`) avec proposition de téléversement sur le serveur FTP à chaque sauvegarde, et nettoyage automatique à la fermeture de l'onglet (`WM_DESTROY`).
+
+### Testé
+- **114 tests unitaires et d'intégration (100 % passants)**, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` et vérification PE (`FileVersion = 1.0.9.0`, `ProductVersion = 1.0.9`).
+
 ## [1.0.8] — Onglet Accueil permanent & Finitions UI (2026-11-18)
 
 ### Ajouté & Corrigé

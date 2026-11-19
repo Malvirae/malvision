@@ -831,6 +831,27 @@ pub struct AppWindowState {
     ftp_prompt_open: bool,
 }
 
+/// Collecte tous les identifiants de dossiers contenant au moins une connexion trouvée
+/// (ainsi que leurs dossiers ancêtres) afin d'afficher l'arborescence filtrée lors d'une recherche.
+fn collect_matching_folder_ids(
+    connections: &[ConnectionItem],
+    folders_by_id: &HashMap<i64, Folder>,
+) -> std::collections::HashSet<i64> {
+    let mut visible = std::collections::HashSet::new();
+    for conn in connections {
+        let mut cur = conn.folder_id;
+        let mut hops = 0usize;
+        while let Some(fid) = cur {
+            if hops >= 64 || !visible.insert(fid) {
+                break;
+            }
+            hops += 1;
+            cur = folders_by_id.get(&fid).and_then(|f| f.parent_id);
+        }
+    }
+    visible
+}
+
 impl AppWindowState {
     unsafe fn initialize(hwnd: HWND, custom_storage: Option<Storage>) -> Self {
         unsafe {
@@ -1575,7 +1596,21 @@ impl AppWindowState {
         }
 
         for fav in &favs {
-            let label = format!("{} {}", fav.protocol.badge_prefix(), fav.name);
+            let label = if is_searching {
+                let parent_name = fav
+                    .folder_id
+                    .and_then(|fid| self.cached_folders.get(&fid))
+                    .map(|f| f.name.as_str())
+                    .unwrap_or("Racine");
+                format!(
+                    "{} {}  [{}]",
+                    fav.protocol.badge_prefix(),
+                    fav.name,
+                    parent_name
+                )
+            } else {
+                format!("{} {}", fav.protocol.badge_prefix(), fav.name)
+            };
             let h =
                 self.insert_tree_item(h_fav_root, &label, TreeNodeKind::Connection(fav.id), false);
             if handle_to_select.is_none()
@@ -1597,45 +1632,39 @@ impl AppWindowState {
             handle_to_select = Some(h_conn_root);
         }
 
-        if is_searching {
-            for conn in &connections {
-                let label = format!(
-                    "{} {}  —  {}",
-                    conn.protocol.badge_prefix(),
-                    conn.name,
-                    conn.endpoint_label()
-                );
-                let h = self.insert_tree_item(
-                    h_conn_root,
-                    &label,
-                    TreeNodeKind::Connection(conn.id),
-                    false,
-                );
-                if previous_selection == Some(TreeNodeKind::Connection(conn.id)) {
-                    handle_to_select = Some(h);
-                }
-            }
+        let visible_folder_ids = if is_searching {
+            Some(collect_matching_folder_ids(
+                &connections,
+                &self.cached_folders,
+            ))
         } else {
-            let mut folders_by_parent: HashMap<Option<i64>, Vec<&Folder>> = HashMap::new();
-            for f in &folders {
-                folders_by_parent.entry(f.parent_id).or_default().push(f);
+            None
+        };
+        let mut folders_by_parent: HashMap<Option<i64>, Vec<&Folder>> = HashMap::new();
+        for f in &folders {
+            if let Some(ref visible) = visible_folder_ids
+                && !visible.contains(&f.id)
+            {
+                continue;
             }
-            let mut conns_by_folder: HashMap<Option<i64>, Vec<&ConnectionItem>> = HashMap::new();
-            for c in &connections {
-                conns_by_folder.entry(c.folder_id).or_default().push(c);
-            }
-
-            let mut visited_folders = Vec::new();
-            self.populate_folder_subtree(
-                h_conn_root,
-                None,
-                &folders_by_parent,
-                &conns_by_folder,
-                previous_selection,
-                &mut handle_to_select,
-                &mut visited_folders,
-            );
+            folders_by_parent.entry(f.parent_id).or_default().push(f);
         }
+        let mut conns_by_folder: HashMap<Option<i64>, Vec<&ConnectionItem>> = HashMap::new();
+        for c in &connections {
+            conns_by_folder.entry(c.folder_id).or_default().push(c);
+        }
+
+        let mut visited_folders = Vec::new();
+        self.populate_folder_subtree(
+            h_conn_root,
+            None,
+            &folders_by_parent,
+            &conns_by_folder,
+            previous_selection,
+            &mut handle_to_select,
+            &mut visited_folders,
+            is_searching,
+        );
 
         unsafe {
             let _ = SendMessageW(
@@ -1748,6 +1777,7 @@ impl AppWindowState {
         previous_selection: Option<TreeNodeKind>,
         handle_to_select: &mut Option<HTREEITEM>,
         visited: &mut Vec<i64>,
+        force_expand_all: bool,
     ) {
         // 1. Les connexions directes apparaissent TOUJOURS AVANT les sous-dossiers : prioritaires d'abord (alphabétique), puis normales (alphabétique)
         if let Some(conns) = conns_by_folder.get(&parent_folder_id) {
@@ -1781,11 +1811,12 @@ impl AppWindowState {
                 }
                 visited.push(folder.id);
 
+                let expanded = force_expand_all || folder.is_expanded;
                 let h_folder = self.insert_tree_item(
                     parent_hitem,
                     &folder.name,
                     TreeNodeKind::Folder(folder.id),
-                    folder.is_expanded,
+                    expanded,
                 );
 
                 if previous_selection == Some(TreeNodeKind::Folder(folder.id)) {
@@ -1800,14 +1831,11 @@ impl AppWindowState {
                     previous_selection,
                     handle_to_select,
                     visited,
+                    force_expand_all,
                 );
 
                 unsafe {
-                    let act = if folder.is_expanded {
-                        TVE_EXPAND
-                    } else {
-                        TVE_COLLAPSE
-                    };
+                    let act = if expanded { TVE_EXPAND } else { TVE_COLLAPSE };
                     let _ = SendMessageW(
                         self.treeview,
                         TVM_EXPAND,
@@ -9054,6 +9082,556 @@ pub(crate) fn run_text_prompt_dialog(
         let _ = UpdateWindow(hwnd);
         let _ = SetFocus(Some(ed_input));
 
+        run_modal_loop(owner, hwnd, &tab_order);
+
+        state.result.take()
+    }
+}
+
+const IDC_FTP_ED_TEXT: usize = 4801;
+const IDC_FTP_ED_SAVE: usize = 4802;
+const IDC_FTP_ED_CANCEL: usize = 4803;
+
+static ORIG_FTP_EDITOR_EDIT_WNDPROC: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+
+unsafe extern "system" fn ftp_editor_edit_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        if msg == WM_KEYDOWN {
+            let vk = wparam.0 as u16;
+            let ctrl =
+                (GetKeyState(windows::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL.0 as i32)
+                    as u16
+                    & 0x8000)
+                    != 0;
+            if ctrl && vk == b'S' as u16 {
+                if let Ok(parent) = GetParent(hwnd) {
+                    let _ =
+                        PostMessageW(Some(parent), WM_COMMAND, WPARAM(IDC_FTP_ED_SAVE), LPARAM(0));
+                }
+                return LRESULT(0);
+            }
+            if ctrl && vk == b'A' as u16 {
+                let _ = SendMessageW(hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+                return LRESULT(0);
+            }
+        }
+        let orig = ORIG_FTP_EDITOR_EDIT_WNDPROC.load(std::sync::atomic::Ordering::Relaxed);
+        if orig != 0 {
+            let proc_fn: WNDPROC = std::mem::transmute(orig);
+            return CallWindowProcW(proc_fn, hwnd, msg, wparam, lparam);
+        }
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+}
+
+struct FtpFileEditorState {
+    owner: HWND,
+    dpi: DpiMetrics,
+    font_ui: HFONT,
+    font_bold: HFONT,
+    font_subtitle: HFONT,
+    font_mono: HFONT,
+    brush_bg: HBRUSH,
+    brush_input: HBRUSH,
+    header_title: String,
+    header_subtitle: String,
+    uses_crlf: bool,
+    ed_content: HWND,
+    btn_save: HWND,
+    btn_cancel: HWND,
+    result: Option<Vec<u8>>,
+}
+
+fn layout_ftp_editor_controls(st: &FtpFileEditorState, client_w: i32, client_h: i32) {
+    unsafe {
+        let pad_x = st.dpi.scale(20);
+        let top_y = st.dpi.scale(74);
+        let bottom_bar_h = st.dpi.scale(62);
+        let ed_w = (client_w - 2 * pad_x).max(160);
+        let ed_h = (client_h - top_y - bottom_bar_h).max(120);
+        let _ = MoveWindow(st.ed_content, pad_x, top_y, ed_w, ed_h, true);
+
+        let btn_h = st.dpi.scale(34);
+        let btn_y = client_h - st.dpi.scale(48);
+        let cancel_w = st.dpi.scale(110);
+        let save_w = st.dpi.scale(204);
+        let gap = st.dpi.scale(10);
+        let right = client_w - pad_x;
+        let _ = MoveWindow(
+            st.btn_cancel,
+            right - cancel_w,
+            btn_y,
+            cancel_w,
+            btn_h,
+            true,
+        );
+        let _ = MoveWindow(
+            st.btn_save,
+            right - cancel_w - gap - save_w,
+            btn_y,
+            save_w,
+            btn_h,
+            true,
+        );
+    }
+}
+
+unsafe extern "system" fn ftp_editor_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_ERASEBKGND => LRESULT(1),
+            WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const FtpFileEditorState;
+                if !ptr.is_null() {
+                    let hdc = HDC(wparam.0 as *mut _);
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_sidebar()));
+                    return LRESULT((*ptr).brush_bg.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_CTLCOLOREDIT => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const FtpFileEditorState;
+                if !ptr.is_null() {
+                    let hdc = HDC(wparam.0 as *mut _);
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    let _ = SetBkColor(hdc, COLORREF(col_bg_input()));
+                    return LRESULT((*ptr).brush_input.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_SIZE => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const FtpFileEditorState;
+                if !ptr.is_null() {
+                    let st = &*ptr;
+                    let mut rc = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut rc);
+                    layout_ftp_editor_controls(st, rc.right - rc.left, rc.bottom - rc.top);
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                LRESULT(0)
+            }
+            WM_GETMINMAXINFO => {
+                let mmi = lparam.0 as *mut windows::Win32::UI::WindowsAndMessaging::MINMAXINFO;
+                if !mmi.is_null() {
+                    (*mmi).ptMinTrackSize.x = 520;
+                    (*mmi).ptMinTrackSize.y = 380;
+                }
+                LRESULT(0)
+            }
+            WM_PAINT => {
+                let mut ps = PAINTSTRUCT::default();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const FtpFileEditorState;
+                if !ptr.is_null() {
+                    let st = &*ptr;
+                    let mut rc = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut rc);
+                    let w = (rc.right - rc.left).max(1);
+                    let h = (rc.bottom - rc.top).max(1);
+                    let mem_dc = CreateCompatibleDC(Some(hdc));
+                    let mem_bmp = CreateCompatibleBitmap(hdc, w, h);
+                    let old_bmp = SelectObject(mem_dc, mem_bmp.into());
+
+                    let _ = FillRect(mem_dc, &rc, st.brush_bg);
+                    let pad_x = st.dpi.scale(20);
+                    let _ = SetBkMode(mem_dc, TRANSPARENT);
+                    let _ = SelectObject(mem_dc, st.font_bold.into());
+                    let _ = SetTextColor(mem_dc, COLORREF(col_text_primary()));
+                    draw_text_line(
+                        mem_dc,
+                        &st.header_title,
+                        RECT {
+                            left: pad_x,
+                            top: st.dpi.scale(14),
+                            right: w - pad_x,
+                            bottom: st.dpi.scale(38),
+                        },
+                    );
+                    let _ = SelectObject(mem_dc, st.font_subtitle.into());
+                    let _ = SetTextColor(mem_dc, COLORREF(col_text_muted()));
+                    draw_text_line(
+                        mem_dc,
+                        &st.header_subtitle,
+                        RECT {
+                            left: pad_x,
+                            top: st.dpi.scale(38),
+                            right: w - pad_x,
+                            bottom: st.dpi.scale(58),
+                        },
+                    );
+                    draw_horizontal_line(mem_dc, pad_x, w - pad_x, st.dpi.scale(64), col_border());
+                    draw_horizontal_line(
+                        mem_dc,
+                        pad_x,
+                        w - pad_x,
+                        h - st.dpi.scale(58),
+                        col_border(),
+                    );
+
+                    let _ = windows::Win32::Graphics::Gdi::BitBlt(
+                        hdc,
+                        0,
+                        0,
+                        w,
+                        h,
+                        Some(mem_dc),
+                        0,
+                        0,
+                        windows::Win32::Graphics::Gdi::SRCCOPY,
+                    );
+                    let _ = SelectObject(mem_dc, old_bmp);
+                    let _ = DeleteObject(mem_bmp.into());
+                    let _ = DeleteDC(mem_dc);
+                }
+                let _ = EndPaint(hwnd, &ps);
+                LRESULT(0)
+            }
+            WM_DRAWITEM => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const FtpFileEditorState;
+                let dis = lparam.0 as *const DRAWITEMSTRUCT;
+                if !ptr.is_null() && !dis.is_null() {
+                    let st = &*ptr;
+                    let d = &*dis;
+                    if d.CtlType == ODT_BUTTON {
+                        let id = d.CtlID as usize;
+                        draw_owner_button(d, id == IDC_FTP_ED_SAVE, st.font_ui, st.font_bold);
+                        return LRESULT(1);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_COMMAND => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut FtpFileEditorState;
+                if !ptr.is_null() {
+                    let st = &mut *ptr;
+                    let id = wparam.0 & 0xFFFF;
+                    if id == IDC_FTP_ED_SAVE || id == 1 {
+                        let edited = get_window_text(st.ed_content);
+                        let normalized = if st.uses_crlf {
+                            edited
+                        } else {
+                            edited.replace("\r\n", "\n")
+                        };
+                        st.result = Some(normalized.into_bytes());
+                        let owner = st.owner;
+                        close_modal_dialog(hwnd, owner);
+                    } else if id == IDC_FTP_ED_CANCEL || id == 2 {
+                        let modified = SendMessageW(
+                            st.ed_content,
+                            0x00B8, // EM_GETMODIFY
+                            Some(WPARAM(0)),
+                            Some(LPARAM(0)),
+                        )
+                        .0 != 0;
+                        if modified
+                            && !confirm_dialog(
+                                hwnd,
+                                "Modifications non enregistrées",
+                                "Le fichier contient des modifications non enregistrées. Fermer sans enregistrer sur le serveur FTP ?",
+                            )
+                        {
+                            return LRESULT(0);
+                        }
+                        let owner = st.owner;
+                        close_modal_dialog(hwnd, owner);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_CLOSE => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut FtpFileEditorState;
+                if !ptr.is_null() {
+                    let st = &mut *ptr;
+                    let modified = SendMessageW(
+                        st.ed_content,
+                        0x00B8, // EM_GETMODIFY
+                        Some(WPARAM(0)),
+                        Some(LPARAM(0)),
+                    )
+                    .0 != 0;
+                    if modified
+                        && !confirm_dialog(
+                            hwnd,
+                            "Modifications non enregistrées",
+                            "Le fichier contient des modifications non enregistrées. Fermer sans enregistrer sur le serveur FTP ?",
+                        )
+                    {
+                        return LRESULT(0);
+                    }
+                    let owner = st.owner;
+                    close_modal_dialog(hwnd, owner);
+                } else {
+                    let _ = DestroyWindow(hwnd);
+                }
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut FtpFileEditorState;
+                if !ptr.is_null() && !(*ptr).font_mono.is_invalid() {
+                    let _ = DeleteObject((*ptr).font_mono.into());
+                    (*ptr).font_mono = HFONT::default();
+                }
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+/// Ouvre l'éditeur de texte intégré pour un fichier distant FTP et retourne les octets modifiés
+/// si l'utilisateur choisit « Enregistrer sur le serveur ».
+pub(crate) fn run_ftp_file_editor_dialog(
+    owner: HWND,
+    remote_dir: &str,
+    remote_name: &str,
+    raw_bytes: &[u8],
+    palette: &GdiPalette,
+) -> Option<Vec<u8>> {
+    let sample_len = raw_bytes.len().min(8192);
+    if raw_bytes[..sample_len].contains(&0)
+        && !confirm_dialog(
+            owner,
+            "Fichier potentiellement binaire",
+            &format!(
+                "Le fichier « {remote_name} » semble contenir des données binaires (octets nuls).\n\nL'ouvrir tout de même dans l'éditeur texte intégré ?"
+            ),
+        )
+    {
+        return None;
+    }
+
+    let text_cow = String::from_utf8_lossy(raw_bytes);
+    let uses_crlf = text_cow.contains("\r\n");
+    let display_text = if uses_crlf {
+        text_cow.into_owned()
+    } else {
+        text_cow.replace('\n', "\r\n")
+    };
+
+    unsafe {
+        let hinstance = GetModuleHandleW(None).unwrap_or_default();
+        let class_name = w!("MalvisionFtpEditorDlgClass");
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(ftp_editor_wnd_proc),
+            hInstance: hinstance.into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hbrBackground: palette.brush_bg_sidebar,
+            lpszClassName: class_name,
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+
+        let dpi = if owner.is_invalid() {
+            palette.dpi
+        } else {
+            DpiMetrics::for_window(owner)
+        };
+        let client_w = dpi.scale(840);
+        let client_h = dpi.scale(580);
+        let dlg_style =
+            WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_CLIPCHILDREN;
+        let (win_w, win_h) = calc_dialog_window_size(dlg_style, client_w, client_h);
+
+        let mut owner_rc = RECT::default();
+        let _ = GetWindowRect(owner, &mut owner_rc);
+        let x = owner_rc.left + ((owner_rc.right - owner_rc.left) - win_w) / 2;
+        let y = owner_rc.top + ((owner_rc.bottom - owner_rc.top) - win_h) / 2;
+
+        let win_title = format!("Éditer — {remote_name}");
+        let mut w_title: Vec<u16> = win_title.encode_utf16().collect();
+        w_title.push(0);
+
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            class_name,
+            PCWSTR(w_title.as_ptr()),
+            dlg_style,
+            x.max(20),
+            y.max(20),
+            win_w,
+            win_h,
+            Some(owner),
+            None,
+            Some(hinstance.into()),
+            None,
+        )
+        .ok()?;
+
+        const WM_GETICON: u32 = 0x007F;
+        let owner_icon_sm = SendMessageW(owner, WM_GETICON, Some(WPARAM(0)), Some(LPARAM(0))).0;
+        let owner_icon_lg = SendMessageW(owner, WM_GETICON, Some(WPARAM(1)), Some(LPARAM(0))).0;
+        if owner_icon_sm != 0 {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(0)),
+                Some(LPARAM(owner_icon_sm)),
+            );
+        }
+        if owner_icon_lg != 0 {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(1)),
+                Some(LPARAM(owner_icon_lg)),
+            );
+        }
+
+        let dark_mode: i32 = i32::from(is_active_theme_dark());
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark_mode as *const i32 as *const c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+
+        let font_mono = CreateFontW(
+            -dpi.scale(14),
+            0,
+            0,
+            0,
+            400,
+            0,
+            0,
+            0,
+            windows::Win32::Graphics::Gdi::FONT_CHARSET(1),
+            windows::Win32::Graphics::Gdi::FONT_OUTPUT_PRECISION(0),
+            windows::Win32::Graphics::Gdi::FONT_CLIP_PRECISION(0),
+            windows::Win32::Graphics::Gdi::FONT_QUALITY(5),
+            1 | (0x03 << 4),
+            w!("Consolas"),
+        );
+
+        let ed_style = WS_CHILD
+            | WS_VISIBLE
+            | WS_TABSTOP
+            | WINDOW_STYLE(
+                0x0020_0000 | 0x0010_0000 | 0x0004 | 0x0040 | 0x0080 | 0x1000 | 0x0080_0000,
+            );
+        // WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_WANTRETURN | WS_BORDER
+        let ed_content = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("EDIT"),
+            w!(""),
+            ed_style,
+            0,
+            0,
+            100,
+            100,
+            Some(hwnd),
+            Some(HMENU(IDC_FTP_ED_TEXT as *mut _)),
+            Some(hinstance.into()),
+            None,
+        )
+        .unwrap_or_default();
+
+        let eff_font = if !font_mono.is_invalid() {
+            font_mono
+        } else {
+            palette.font_ui
+        };
+        let _ = SendMessageW(
+            ed_content,
+            WM_SETFONT,
+            Some(WPARAM(eff_font.0 as usize)),
+            Some(LPARAM(1)),
+        );
+        let _ = SendMessageW(
+            ed_content,
+            0x00C5, // EM_SETLIMITTEXT
+            Some(WPARAM(0)),
+            Some(LPARAM(0)),
+        );
+        let prev_proc = SetWindowLongPtrW(
+            ed_content,
+            GWLP_WNDPROC,
+            ftp_editor_edit_subclass_proc as *const () as usize as isize,
+        );
+        if prev_proc != 0 {
+            let _ = ORIG_FTP_EDITOR_EDIT_WNDPROC.compare_exchange(
+                0,
+                prev_proc,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+
+        let btn_save = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Enregistrer sur le serveur"),
+            RECT::default(),
+            IDC_FTP_ED_SAVE,
+            palette.font_ui_bold,
+        );
+        let btn_cancel = create_dark_button(
+            hwnd,
+            hinstance.into(),
+            w!("Annuler"),
+            RECT::default(),
+            IDC_FTP_ED_CANCEL,
+            palette.font_ui,
+        );
+
+        set_window_text(ed_content, &display_text);
+        let _ = SendMessageW(
+            ed_content,
+            0x00B9, // EM_SETMODIFY = FALSE
+            Some(WPARAM(0)),
+            Some(LPARAM(0)),
+        );
+
+        let full_remote_path = if remote_dir == "/" {
+            format!("/{remote_name}")
+        } else {
+            format!("{}/{remote_name}", remote_dir.trim_end_matches('/'))
+        };
+        let eol_label = if uses_crlf { "CRLF" } else { "LF" };
+        let header_subtitle = format!(
+            "{full_remote_path}  •  UTF-8 ({eol_label})  •  {} octets  •  Ctrl+S pour enregistrer",
+            raw_bytes.len()
+        );
+
+        let mut state = Box::new(FtpFileEditorState {
+            owner,
+            dpi,
+            font_ui: palette.font_ui,
+            font_bold: palette.font_ui_bold,
+            font_subtitle: palette.font_subtitle,
+            font_mono,
+            brush_bg: palette.brush_bg_sidebar,
+            brush_input: palette.brush_bg_input,
+            header_title: format!("Éditeur FTP — {remote_name}"),
+            header_subtitle,
+            uses_crlf,
+            ed_content,
+            btn_save,
+            btn_cancel,
+            result: None,
+        });
+        layout_ftp_editor_controls(&state, client_w, client_h);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&mut *state) as *mut _ as isize);
+
+        let _ = EnableWindow(owner, false);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = UpdateWindow(hwnd);
+        let _ = SetFocus(Some(ed_content));
+
+        let tab_order = [ed_content, btn_save, btn_cancel];
         run_modal_loop(owner, hwnd, &tab_order);
 
         state.result.take()
@@ -16939,5 +17517,59 @@ mod tests {
         assert_eq!(u2, "admin_shared");
         assert_eq!(d2, "~/.ssh/id_ed25519");
         assert_eq!(p2.unwrap().as_str(), "PassShared!2026");
+    }
+
+    #[test]
+    fn test_collect_matching_folder_ids_includes_ancestors_and_ignores_unrelated() {
+        let mut folders = HashMap::new();
+        for (id, parent_id, name) in [
+            (1, None, "Clients"),
+            (2, Some(1), "Acme"),
+            (3, Some(2), "Prod"),
+            (4, None, "Perso"),
+        ] {
+            folders.insert(
+                id,
+                Folder {
+                    id,
+                    parent_id,
+                    name: name.to_string(),
+                    sort_order: 0,
+                    is_expanded: false,
+                    created_at: 0,
+                    updated_at: 0,
+                },
+            );
+        }
+        let make_conn = |id: i64, folder_id: Option<i64>| ConnectionItem {
+            id,
+            folder_id,
+            credential_id: None,
+            name: "zouzou".to_string(),
+            protocol: crate::models::Protocol::Ssh,
+            host: "10.0.0.1".to_string(),
+            port: 22,
+            username: String::new(),
+            domain: String::new(),
+            description: String::new(),
+            is_favorite: false,
+            is_priority: false,
+            save_password: false,
+            has_saved_password: false,
+            dynamic_resolution: true,
+            redirect_clipboard: true,
+            sort_order: 0,
+            created_at: 0,
+            updated_at: 0,
+            last_connected_at: None,
+        };
+        let conn = make_conn(10, Some(3));
+        let root_conn = make_conn(11, None);
+
+        let visible = collect_matching_folder_ids(&[conn, root_conn], &folders);
+        assert!(visible.contains(&1));
+        assert!(visible.contains(&2));
+        assert!(visible.contains(&3));
+        assert!(!visible.contains(&4));
     }
 }
