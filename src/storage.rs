@@ -18,7 +18,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const CURRENT_SCHEMA_VERSION: i32 = 8;
+const CURRENT_SCHEMA_VERSION: i32 = 9;
 
 /// Résumé du diagnostic et du résultat d'un import de configuration SQLite.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -516,6 +516,22 @@ impl Storage {
                 .map_err(|e| format!("Échec de validation de la migration SQLite v8 : {e}"))?;
         }
 
+        if version < 9 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Impossible d'ouvrir la transaction de migration v9 : {e}"))?;
+
+            tx.execute_batch(
+                "ALTER TABLE folders ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
+                 PRAGMA user_version = 9;",
+            )
+            .map_err(|e| format!("Échec de la migration SQLite v9 : {e}"))?;
+
+            tx.commit()
+                .map_err(|e| format!("Échec de validation de la migration SQLite v9 : {e}"))?;
+        }
+
         if version > CURRENT_SCHEMA_VERSION {
             return Err(format!(
                 "La base de données (schéma v{version}) est plus récente que cette version de Malvision (schéma v{CURRENT_SCHEMA_VERSION})."
@@ -577,7 +593,7 @@ impl Storage {
     pub fn get_folder(&self, folder_id: i64) -> Result<Option<Folder>, String> {
         self.conn
             .query_row(
-                "SELECT id, parent_id, name, sort_order, is_expanded, created_at, updated_at
+                "SELECT id, parent_id, name, sort_order, is_expanded, is_pinned, created_at, updated_at
                  FROM folders WHERE id = ?1",
                 params![folder_id],
                 |row| {
@@ -587,8 +603,9 @@ impl Storage {
                         name: row.get(2)?,
                         sort_order: row.get(3)?,
                         is_expanded: row.get::<_, i32>(4)? != 0,
-                        created_at: row.get(5)?,
-                        updated_at: row.get(6)?,
+                        is_pinned: row.get::<_, i32>(5)? != 0,
+                        created_at: row.get(6)?,
+                        updated_at: row.get(7)?,
                     })
                 },
             )
@@ -600,7 +617,7 @@ impl Storage {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, parent_id, name, sort_order, is_expanded, created_at, updated_at
+                "SELECT id, parent_id, name, sort_order, is_expanded, is_pinned, created_at, updated_at
                  FROM folders
                  ORDER BY sort_order ASC, name COLLATE NOCASE ASC, id ASC",
             )
@@ -614,8 +631,9 @@ impl Storage {
                     name: row.get(2)?,
                     sort_order: row.get(3)?,
                     is_expanded: row.get::<_, i32>(4)? != 0,
-                    created_at: row.get(5)?,
-                    updated_at: row.get(6)?,
+                    is_pinned: row.get::<_, i32>(5)? != 0,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             })
             .map_err(|e| format!("Erreur exécution list_folders : {e}"))?;
@@ -657,6 +675,17 @@ impl Storage {
                 params![val, folder_id],
             )
             .map_err(|e| format!("Erreur mise à jour état dossier : {e}"))?;
+        Ok(())
+    }
+
+    pub fn set_folder_pinned(&mut self, folder_id: i64, pinned: bool) -> Result<(), String> {
+        let val = i32::from(pinned);
+        self.conn
+            .execute(
+                "UPDATE folders SET is_pinned = ?1, updated_at = ?2 WHERE id = ?3",
+                params![val, unix_timestamp(), folder_id],
+            )
+            .map_err(|e| format!("Erreur mise à jour épinglage dossier : {e}"))?;
         Ok(())
     }
 
@@ -2145,7 +2174,7 @@ mod tests {
     #[test]
     fn test_schema_migration_and_settings() {
         let mut store = Storage::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 8);
+        assert_eq!(store.schema_version().unwrap(), 9);
         assert_eq!(
             store.get_setting("theme_mode").unwrap().as_deref(),
             Some("dark")
@@ -2717,7 +2746,7 @@ mod tests {
 
         // Ouvrir avec Malvision Storage : les migrations v4 puis v5 doivent s'exécuter
         let mut store = Storage::open_at_path(&db_path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 8);
+        assert_eq!(store.schema_version().unwrap(), 9);
 
         let conns = store.list_connections().unwrap();
         assert_eq!(conns.len(), 1);
@@ -2892,5 +2921,21 @@ mod tests {
         assert_eq!(reloaded.wol_host, "wake.exemple.fr");
         assert_eq!(reloaded.wol_mac, "AA:BB:CC:DD:EE:FF");
         assert_eq!(reloaded.wol_port, 7);
+    }
+
+    #[test]
+    fn test_folder_pinning_persistence_and_schema_v9() {
+        let mut store = Storage::open_in_memory().unwrap();
+        assert_eq!(store.schema_version().unwrap(), 9);
+        let folder = store.create_folder("Production", None).unwrap();
+        assert!(!folder.is_pinned);
+
+        store.set_folder_pinned(folder.id, true).unwrap();
+        let pinned = store.get_folder(folder.id).unwrap().unwrap();
+        assert!(pinned.is_pinned);
+
+        store.set_folder_pinned(folder.id, false).unwrap();
+        let unpinned = store.get_folder(folder.id).unwrap().unwrap();
+        assert!(!unpinned.is_pinned);
     }
 }

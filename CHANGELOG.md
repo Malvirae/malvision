@@ -2,6 +2,22 @@
 
 Toutes les évolutions notables du projet **Malvision** sont documentées dans ce fichier.
 
+## [1.0.11] — Dossiers épinglés, Épinglés & Clignotement de repérage (2026-11-23)
+
+### Ajouté & Amélioré
+- **Renommage « Connexions épinglées » / « Épinglés » (`src/ui.rs`)** :
+  - Remplacement des libellés *Connexions favorites* / *Favoris* par **Connexions épinglées** / **Épinglés** dans l'arborescence, l'accueil, le glisser-déposer, les menus contextuels (`★ Épingler` / `Retirer des épinglés`) et le formulaire de connexion (`Épingler la connexion`).
+- **Épinglage de dossiers (`src/models.rs`, `src/storage.rs`, `src/ui.rs`)** :
+  - Migration automatique de schéma SQLite **v8 -> v9** ajoutant `is_pinned` sur la table `folders`, avec [`set_folder_pinned`](src/storage.rs) et test de persistance dédié.
+  - Épinglage/désépinglage des dossiers depuis l'arborescence, le menu contextuel (`★ Épingler le dossier` / `Retirer des épinglés`) et le glisser-déposer sur `Épinglés`.
+  - Affichage des dossiers épinglés dans la racine `Épinglés (N)` avec leur sous-arborescence et une étoile discrète sur la ligne.
+- **Section « Dossiers épinglés » sur l'accueil & repérage visuel (`src/ui.rs`)** :
+  - Grille compacte responsive (1 à 3 colonnes) affichant les dossiers épinglés avec compteur de connexions/sous-dossiers, bouton rapide `✕` pour désépingler et clic sur la carte pour ouvrir/déplier/sélectionner le dossier dans l'arborescence.
+  - Clignotement bref (3 pulsations à `85 ms`) sur le dossier ciblé dans l'arborescence via `IDT_TREE_FLASH_TIMER` pour le repérer immédiatement.
+
+### Testé
+- **118 tests unitaires et d'intégration (100 % passants)**, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` et build `--release` (`1.0.11`).
+
 ## [1.0.10] — Wake-on-LAN, Menus Fluent, Modale MAJ au lancement & Correctif SSH (2026-11-19)
 
 ### Corrigé

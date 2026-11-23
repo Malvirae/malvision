@@ -1879,9 +1879,9 @@ mod tests {
         let current = current_semver()
             .expect("La version locale doit être dérivée sans erreur de CARGO_PKG_VERSION");
         assert_eq!(current.to_string(), CURRENT_VERSION);
-        assert_eq!(current.to_string(), "1.0.10");
-        assert_eq!(current, SemVer::new(1, 0, 10));
-        assert_eq!(current, SemVer::new(1, 0, 10));
+        assert_eq!(current.to_string(), "1.0.11");
+        assert_eq!(current, SemVer::new(1, 0, 11));
+        assert_eq!(current, SemVer::new(1, 0, 11));
         assert_eq!(SemVer::current().unwrap(), current);
     }
 
@@ -1987,7 +1987,7 @@ mod tests {
         let remote_info_new = ReleaseInfo {
             tag_name: "v1.0.10".to_string(),
             name: "Malvision 1.0.10".to_string(),
-            version: SemVer::new(1, 0, 11),
+            version: SemVer::new(1, 0, 12),
             body: String::new(),
             html_url: String::new(),
             exe_asset: None,
@@ -1997,7 +1997,7 @@ mod tests {
         let is_upgrade_new = remote_info_new.version > local;
         assert!(
             is_upgrade_new,
-            "1.0.11 distant > 1.0.10 local -> Doit indiquer mise à jour disponible"
+            "1.0.12 distant > 1.0.11 local -> Doit indiquer mise à jour disponible"
         );
     }
 

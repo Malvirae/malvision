@@ -38,13 +38,13 @@ use windows::Win32::UI::Controls::{
     CDRF_SKIPDEFAULT, DRAWITEMSTRUCT, HTREEITEM, MEASUREITEMSTRUCT, NM_CLICK, NM_CUSTOMDRAW,
     NM_DBLCLK, NM_RCLICK, NMHDR, NMTREEVIEWW, NMTVCUSTOMDRAW, ODS_FOCUS, ODS_SELECTED, ODT_BUTTON,
     ODT_COMBOBOX, ODT_MENU, SetWindowTheme, TV_FIRST, TVE_COLLAPSE, TVE_EXPAND, TVGN_CARET,
-    TVGN_DROPHILITE, TVGN_FIRSTVISIBLE, TVGN_NEXTVISIBLE, TVHITTESTINFO, TVHT_ONITEMBUTTON,
-    TVI_LAST, TVI_ROOT, TVIF_HANDLE, TVIF_PARAM, TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW,
-    TVIS_EXPANDED, TVITEMEXW, TVITEMW, TVM_DELETEITEM, TVM_EXPAND, TVM_GETITEMRECT, TVM_GETITEMW,
-    TVM_GETNEXTITEM, TVM_HITTEST, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETBKCOLOR,
-    TVM_SETTEXTCOLOR, TVN_BEGINDRAGW, TVN_ITEMEXPANDEDW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW,
-    TVS_FULLROWSELECT, TVS_HASBUTTONS, TVS_SHOWSELALWAYS, WC_BUTTONW, WC_COMBOBOXW, WC_EDITW,
-    WC_TREEVIEWW, WM_MOUSELEAVE,
+    TVGN_CHILD, TVGN_DROPHILITE, TVGN_FIRSTVISIBLE, TVGN_NEXT, TVGN_NEXTVISIBLE, TVGN_ROOT,
+    TVHITTESTINFO, TVHT_ONITEMBUTTON, TVI_LAST, TVI_ROOT, TVIF_HANDLE, TVIF_PARAM, TVIF_STATE,
+    TVIF_TEXT, TVINSERTSTRUCTW, TVIS_EXPANDED, TVITEMEXW, TVITEMW, TVM_DELETEITEM,
+    TVM_ENSUREVISIBLE, TVM_EXPAND, TVM_GETITEMRECT, TVM_GETITEMW, TVM_GETNEXTITEM, TVM_HITTEST,
+    TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETBKCOLOR, TVM_SETTEXTCOLOR, TVN_BEGINDRAGW,
+    TVN_ITEMEXPANDEDW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW, TVS_FULLROWSELECT, TVS_HASBUTTONS,
+    TVS_SHOWSELALWAYS, WC_BUTTONW, WC_COMBOBOXW, WC_EDITW, WC_TREEVIEWW, WM_MOUSELEAVE,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -226,6 +226,10 @@ const IDC_TREEVIEW: usize = 1102;
 // Timer de supervision RDP
 const IDT_RDP_STATE_POLL: usize = 2001;
 const RDP_STATE_POLL_INTERVAL_MS: u32 = 350;
+// Timer de clignotement bref d'un élément révélé dans l'arborescence
+const IDT_TREE_FLASH_TIMER: usize = 2002;
+const TREE_FLASH_INTERVAL_MS: u32 = 85;
+const TREE_FLASH_TOTAL_TICKS: u8 = 6;
 
 // Message différé pour ouvrir un dialogue modal ou lancer une action hors notification
 const WM_DEFERRED_ACTION: u32 = WM_APP + 101;
@@ -262,6 +266,7 @@ const CMD_CTX_NEW_CONN_HERE: u32 = 3008;
 const CMD_CTX_NEW_SUBFOLDER: u32 = 3009;
 const CMD_CTX_WOL_WAKE: u32 = 3011;
 const CMD_CTX_WOL_CONFIG: u32 = 3012;
+const CMD_CTX_TOGGLE_PIN_FOLDER: u32 = 3013;
 
 // Commandes du menu d'actions de session active RDP
 const CMD_SESSION_CAD: u32 = 3201;
@@ -363,6 +368,8 @@ enum InteractiveZone {
     TabNewConnection,
     HomeCardConnect(i64),
     HomeCardEdit(i64),
+    HomeFolderOpen(i64),
+    HomeFolderUnpin(i64),
     HomeQuickNewConnection,
     HomeQuickNewFolder,
 }
@@ -847,6 +854,7 @@ pub struct AppWindowState {
     treeview: HWND,
     search_query: String,
     selected_node: Option<TreeNodeKind>,
+    flash_tree_node: Option<(TreeNodeKind, u8)>,
     dragging_node: Option<TreeNodeKind>,
     resizing_sidebar: bool,
     hovered_zone: Option<InteractiveZone>,
@@ -1117,6 +1125,7 @@ impl AppWindowState {
                 treeview,
                 search_query: String::new(),
                 selected_node: None,
+                flash_tree_node: None,
                 dragging_node: None,
                 resizing_sidebar: false,
                 hovered_zone: None,
@@ -1614,16 +1623,69 @@ impl AppWindowState {
         let is_searching = !self.search_query.trim().is_empty();
         let mut handle_to_select: Option<HTREEITEM> = None;
 
-        // 1. Section Favoris
+        // 1. Section Épinglés (dossiers épinglés + connexions épinglées)
+        let visible_folder_ids = if is_searching {
+            Some(collect_matching_folder_ids(
+                &connections,
+                &self.cached_folders,
+            ))
+        } else {
+            None
+        };
+        let mut folders_by_parent: HashMap<Option<i64>, Vec<&Folder>> = HashMap::new();
+        for f in &folders {
+            if let Some(ref visible) = visible_folder_ids
+                && !visible.contains(&f.id)
+            {
+                continue;
+            }
+            folders_by_parent.entry(f.parent_id).or_default().push(f);
+        }
+        let mut conns_by_folder: HashMap<Option<i64>, Vec<&ConnectionItem>> = HashMap::new();
+        for c in &connections {
+            conns_by_folder.entry(c.folder_id).or_default().push(c);
+        }
+
+        let pinned_folders: Vec<&Folder> = folders.iter().filter(|f| f.is_pinned).collect();
         let favs: Vec<&ConnectionItem> = connections.iter().filter(|c| c.is_favorite).collect();
-        self.fav_count = favs.len();
+        self.fav_count = pinned_folders.len() + favs.len();
         self.conn_count = connections.len();
 
-        let fav_root_label = format!("Favoris ({})", favs.len());
+        let fav_root_label = format!("Épinglés ({})", self.fav_count);
         let h_fav_root =
             self.insert_tree_item(TVI_ROOT, &fav_root_label, TreeNodeKind::FavoritesRoot, true);
         if previous_selection == Some(TreeNodeKind::FavoritesRoot) {
             handle_to_select = Some(h_fav_root);
+        }
+
+        for pf in &pinned_folders {
+            let h_pf =
+                self.insert_tree_item(h_fav_root, &pf.name, TreeNodeKind::Folder(pf.id), true);
+            if handle_to_select.is_none() && previous_selection == Some(TreeNodeKind::Folder(pf.id))
+            {
+                handle_to_select = Some(h_pf);
+            }
+            let mut visited_pin = vec![pf.id];
+            self.populate_folder_subtree(
+                h_pf,
+                Some(pf.id),
+                &folders_by_parent,
+                &conns_by_folder,
+                previous_selection,
+                &mut handle_to_select,
+                &mut visited_pin,
+                is_searching,
+            );
+            if pf.is_expanded || is_searching {
+                unsafe {
+                    let _ = SendMessageW(
+                        self.treeview,
+                        TVM_EXPAND,
+                        Some(WPARAM(TVE_EXPAND.0 as usize)),
+                        Some(LPARAM(h_pf.0)),
+                    );
+                }
+            }
         }
 
         for fav in &favs {
@@ -1661,28 +1723,6 @@ impl AppWindowState {
             self.insert_tree_item(TVI_ROOT, &root_title, TreeNodeKind::ConnectionsRoot, true);
         if previous_selection == Some(TreeNodeKind::ConnectionsRoot) {
             handle_to_select = Some(h_conn_root);
-        }
-
-        let visible_folder_ids = if is_searching {
-            Some(collect_matching_folder_ids(
-                &connections,
-                &self.cached_folders,
-            ))
-        } else {
-            None
-        };
-        let mut folders_by_parent: HashMap<Option<i64>, Vec<&Folder>> = HashMap::new();
-        for f in &folders {
-            if let Some(ref visible) = visible_folder_ids
-                && !visible.contains(&f.id)
-            {
-                continue;
-            }
-            folders_by_parent.entry(f.parent_id).or_default().push(f);
-        }
-        let mut conns_by_folder: HashMap<Option<i64>, Vec<&ConnectionItem>> = HashMap::new();
-        for c in &connections {
-            conns_by_folder.entry(c.folder_id).or_default().push(c);
         }
 
         let mut visited_folders = Vec::new();
@@ -1992,24 +2032,31 @@ impl AppWindowState {
             let is_selected = (tvcd.nmcd.uItemState.0 & CDIS_SELECTED.0) != 0
                 || (kind.is_some() && self.selected_node == kind);
             let is_hot = (tvcd.nmcd.uItemState.0 & CDIS_HOT.0) != 0;
+            let is_flashing = self
+                .flash_tree_node
+                .is_some_and(|(k, rem)| kind == Some(k) && rem % 2 == 0);
 
-            let bg_brush = if is_selected {
-                self.palette.brush_bg_hover
-            } else if is_hot {
-                self.palette.brush_bg_surface
+            if is_flashing {
+                let _ = FillRect(hdc, &row_rc, self.palette.brush_accent);
             } else {
-                self.palette.brush_bg_sidebar
-            };
-            let _ = FillRect(hdc, &row_rc, bg_brush);
-
-            if is_selected {
-                let bar_rc = RECT {
-                    left: 0,
-                    top: row_rc.top + 3,
-                    right: 3,
-                    bottom: row_rc.bottom - 3,
+                let bg_brush = if is_selected {
+                    self.palette.brush_bg_hover
+                } else if is_hot {
+                    self.palette.brush_bg_surface
+                } else {
+                    self.palette.brush_bg_sidebar
                 };
-                let _ = FillRect(hdc, &bar_rc, self.palette.brush_accent);
+                let _ = FillRect(hdc, &row_rc, bg_brush);
+
+                if is_selected {
+                    let bar_rc = RECT {
+                        left: 0,
+                        top: row_rc.top + 3,
+                        right: 3,
+                        bottom: row_rc.bottom - 3,
+                    };
+                    let _ = FillRect(hdc, &bar_rc, self.palette.brush_accent);
+                }
             }
 
             let _ = SetBkMode(hdc, TRANSPARENT);
@@ -2023,7 +2070,7 @@ impl AppWindowState {
                     draw_icon_star(hdc, indent + 16, mid_y - 7, COL_GOLD_STAR);
                     let _ = SelectObject(hdc, self.palette.font_ui_bold.into());
                     let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
-                    let title = format!("Favoris ({})", self.fav_count);
+                    let title = format!("Épinglés ({})", self.fav_count);
                     draw_text_line(
                         hdc,
                         &title,
@@ -2057,32 +2104,51 @@ impl AppWindowState {
                     );
                 }
                 Some(TreeNodeKind::Folder(fid)) => {
-                    draw_icon_chevron(hdc, indent + 4, mid_y, expanded, col_text_muted());
+                    draw_icon_chevron(
+                        hdc,
+                        indent + 4,
+                        mid_y,
+                        expanded,
+                        if is_flashing {
+                            0x00FFFFFF
+                        } else {
+                            col_text_muted()
+                        },
+                    );
                     draw_icon_folder(hdc, indent + 16, mid_y - 6, expanded, COL_FOLDER_AMBER);
                     let _ = SelectObject(
                         hdc,
-                        if is_selected {
+                        if is_selected || is_flashing {
                             self.palette.font_ui_bold.into()
                         } else {
                             self.palette.font_ui.into()
                         },
                     );
-                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
-                    let name = self
-                        .cached_folders
-                        .get(&fid)
-                        .map(|f| f.name.as_str())
-                        .unwrap_or("Dossier");
+                    let _ = SetTextColor(
+                        hdc,
+                        COLORREF(if is_flashing {
+                            0x00FFFFFF
+                        } else {
+                            col_text_primary()
+                        }),
+                    );
+                    let folder_opt = self.cached_folders.get(&fid);
+                    let name = folder_opt.map(|f| f.name.as_str()).unwrap_or("Dossier");
+                    let is_pinned = folder_opt.is_some_and(|f| f.is_pinned);
+                    let right_pad = if is_pinned { 24 } else { 8 };
                     draw_text_line(
                         hdc,
                         name,
                         RECT {
                             left: indent + 36,
                             top: row_rc.top,
-                            right: row_rc.right - 8,
+                            right: (row_rc.right - right_pad).max(indent + 40),
                             bottom: row_rc.bottom,
                         },
                     );
+                    if is_pinned && row_rc.right - 18 > indent + 36 + 15 {
+                        draw_icon_star(hdc, row_rc.right - 18, mid_y - 6, 0x0041B8FF);
+                    }
                 }
                 Some(TreeNodeKind::Connection(cid)) => {
                     if let Some(conn) = self.cached_connections.get(&cid) {
@@ -3003,7 +3069,7 @@ impl AppWindowState {
             let all_folders = self.storage.list_folders().unwrap_or_default();
             let all_conns = self.storage.list_connections().unwrap_or_default();
 
-            // Section 1 : Connexions favorites
+            // Section 1 : Connexions épinglées
             let favorites: Vec<&ConnectionItem> =
                 all_conns.iter().filter(|c| c.is_favorite).take(6).collect();
 
@@ -3013,7 +3079,7 @@ impl AppWindowState {
                 let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
                 draw_text_line(
                     hdc,
-                    "Connexions favorites",
+                    "Connexions épinglées",
                     RECT {
                         left: area.left + pad_x + 22,
                         top: y,
@@ -3023,6 +3089,35 @@ impl AppWindowState {
                 );
                 y += 30;
                 y = self.paint_connection_cards_grid(hdc, area, pad_x, y, &favorites);
+                y += 20;
+            }
+
+            // Section 1b : Dossiers épinglés (grille compacte ergonomique)
+            let pinned_folders: Vec<&Folder> = all_folders.iter().filter(|f| f.is_pinned).collect();
+            if !pinned_folders.is_empty() {
+                draw_icon_folder(hdc, area.left + pad_x, y + 4, false, COL_FOLDER_AMBER);
+                let _ = SelectObject(hdc, self.palette.font_subtitle.into());
+                let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                draw_text_line(
+                    hdc,
+                    "Dossiers épinglés",
+                    RECT {
+                        left: area.left + pad_x + 22,
+                        top: y,
+                        right: area.right - pad_x,
+                        bottom: y + 24,
+                    },
+                );
+                y += 30;
+                y = self.paint_pinned_folders_grid(
+                    hdc,
+                    area,
+                    pad_x,
+                    y,
+                    &pinned_folders,
+                    &all_folders,
+                    &all_conns,
+                );
                 y += 20;
             }
 
@@ -3313,6 +3408,163 @@ impl AppWindowState {
             }
 
             let total_rows = items.len().div_ceil(cols as usize) as i32;
+            start_y + total_rows * (card_h + gap)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn paint_pinned_folders_grid(
+        &mut self,
+        hdc: HDC,
+        area: RECT,
+        pad_x: i32,
+        start_y: i32,
+        pinned_folders: &[&Folder],
+        all_folders: &[Folder],
+        all_conns: &[ConnectionItem],
+    ) -> i32 {
+        unsafe {
+            let avail_w = (area.right - area.left - pad_x * 2).max(300);
+            let cols = if avail_w >= 820 {
+                3
+            } else if avail_w >= 520 {
+                2
+            } else {
+                1
+            };
+            let gap = 14;
+            let card_w = (avail_w - gap * (cols - 1)) / cols;
+            let card_h = 58;
+
+            let mut row = 0;
+            let mut col = 0;
+
+            for folder in pinned_folders {
+                let x = area.left + pad_x + col * (card_w + gap);
+                let y = start_y + row * (card_h + gap);
+
+                let card_rc = RECT {
+                    left: x,
+                    top: y,
+                    right: x + card_w,
+                    bottom: y + card_h,
+                };
+
+                if card_rc.bottom >= area.top && card_rc.top <= area.bottom {
+                    let is_hover =
+                        self.hovered_zone == Some(InteractiveZone::HomeFolderOpen(folder.id));
+                    draw_rounded_box(
+                        hdc,
+                        card_rc,
+                        if is_hover {
+                            col_bg_hover()
+                        } else {
+                            col_bg_surface()
+                        },
+                        if is_hover { col_accent() } else { col_border() },
+                    );
+
+                    draw_icon_folder(
+                        hdc,
+                        card_rc.left + 14,
+                        card_rc.top + 13,
+                        false,
+                        COL_FOLDER_AMBER,
+                    );
+
+                    let _ = SelectObject(hdc, self.palette.font_ui_bold.into());
+                    let _ = SetTextColor(hdc, COLORREF(col_text_primary()));
+                    draw_text_line(
+                        hdc,
+                        &folder.name,
+                        RECT {
+                            left: card_rc.left + 38,
+                            top: card_rc.top + 9,
+                            right: card_rc.right - 34,
+                            bottom: card_rc.top + 28,
+                        },
+                    );
+
+                    let direct_conns = all_conns
+                        .iter()
+                        .filter(|c| c.folder_id == Some(folder.id))
+                        .count();
+                    let child_folders = all_folders
+                        .iter()
+                        .filter(|f| f.parent_id == Some(folder.id))
+                        .count();
+                    let subtitle = match (direct_conns, child_folders) {
+                        (0, 0) => "Dossier vide".to_string(),
+                        (c, 0) => format!("{c} connexion{}", if c > 1 { "s" } else { "" }),
+                        (0, d) => format!("{d} sous-dossier{}", if d > 1 { "s" } else { "" }),
+                        (c, d) => format!(
+                            "{c} connexion{}  •  {d} sous-dossier{}",
+                            if c > 1 { "s" } else { "" },
+                            if d > 1 { "s" } else { "" }
+                        ),
+                    };
+
+                    let _ = SelectObject(hdc, self.palette.font_small.into());
+                    let _ = SetTextColor(hdc, COLORREF(col_text_muted()));
+                    draw_text_line(
+                        hdc,
+                        &subtitle,
+                        RECT {
+                            left: card_rc.left + 14,
+                            top: card_rc.top + 32,
+                            right: card_rc.right - 12,
+                            bottom: card_rc.bottom - 8,
+                        },
+                    );
+
+                    let unpin_rc = RECT {
+                        left: card_rc.right - 28,
+                        top: card_rc.top + 8,
+                        right: card_rc.right - 8,
+                        bottom: card_rc.top + 28,
+                    };
+                    let is_unpin_hover =
+                        self.hovered_zone == Some(InteractiveZone::HomeFolderUnpin(folder.id));
+                    draw_rounded_button(
+                        hdc,
+                        unpin_rc,
+                        if is_unpin_hover {
+                            col_bg_deep()
+                        } else {
+                            col_bg_surface()
+                        },
+                        if is_unpin_hover {
+                            col_accent()
+                        } else {
+                            col_border()
+                        },
+                        "✕",
+                        self.palette.font_small,
+                        if is_unpin_hover {
+                            col_text_primary()
+                        } else {
+                            col_text_muted()
+                        },
+                    );
+
+                    self.hit_zones.push(HitZone {
+                        rect: unpin_rc,
+                        zone: InteractiveZone::HomeFolderUnpin(folder.id),
+                    });
+                    self.hit_zones.push(HitZone {
+                        rect: card_rc,
+                        zone: InteractiveZone::HomeFolderOpen(folder.id),
+                    });
+                }
+
+                col += 1;
+                if col >= cols {
+                    col = 0;
+                    row += 1;
+                }
+            }
+
+            let total_rows = pinned_folders.len().div_ceil(cols as usize) as i32;
             start_y + total_rows * (card_h + gap)
         }
     }
@@ -4290,8 +4542,99 @@ impl AppWindowState {
                         LPARAM(cid as isize),
                     );
                 },
+                InteractiveZone::HomeFolderOpen(fid) => {
+                    self.reveal_folder_in_tree(fid);
+                }
+                InteractiveZone::HomeFolderUnpin(fid) => {
+                    if self.storage.set_folder_pinned(fid, false).is_ok() {
+                        self.rebuild_treeview();
+                        self.invalidate_canvas();
+                    }
+                }
             }
         }
+    }
+
+    fn find_tree_item_by_kind(&self, parent: HTREEITEM, target: TreeNodeKind) -> Option<HTREEITEM> {
+        unsafe {
+            let first_flag = if parent.0 == 0 { TVGN_ROOT } else { TVGN_CHILD };
+            let mut cur = HTREEITEM(
+                SendMessageW(
+                    self.treeview,
+                    TVM_GETNEXTITEM,
+                    Some(WPARAM(first_flag as usize)),
+                    Some(LPARAM(parent.0)),
+                )
+                .0,
+            );
+            while cur.0 != 0 {
+                if self.node_kind_from_hitem(cur) == Some(target) {
+                    return Some(cur);
+                }
+                if let Some(found) = self.find_tree_item_by_kind(cur, target) {
+                    return Some(found);
+                }
+                cur = HTREEITEM(
+                    SendMessageW(
+                        self.treeview,
+                        TVM_GETNEXTITEM,
+                        Some(WPARAM(TVGN_NEXT as usize)),
+                        Some(LPARAM(cur.0)),
+                    )
+                    .0,
+                );
+            }
+            None
+        }
+    }
+
+    fn reveal_folder_in_tree(&mut self, fid: i64) {
+        if let Ok(folders) = self.storage.list_folders() {
+            let mut cur_id = Some(fid);
+            while let Some(id) = cur_id {
+                let _ = self.storage.set_folder_expanded(id, true);
+                cur_id = folders
+                    .iter()
+                    .find(|f| f.id == id)
+                    .and_then(|f| f.parent_id);
+            }
+        }
+        self.rebuild_treeview();
+        if let Some(hitem) = self.find_tree_item_by_kind(HTREEITEM(0), TreeNodeKind::Folder(fid)) {
+            unsafe {
+                let _ = SendMessageW(
+                    self.treeview,
+                    TVM_EXPAND,
+                    Some(WPARAM(TVE_EXPAND.0 as usize)),
+                    Some(LPARAM(hitem.0)),
+                );
+                let _ = SendMessageW(
+                    self.treeview,
+                    TVM_SELECTITEM,
+                    Some(WPARAM(TVGN_CARET as usize)),
+                    Some(LPARAM(hitem.0)),
+                );
+                let _ = SendMessageW(
+                    self.treeview,
+                    TVM_ENSUREVISIBLE,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(hitem.0)),
+                );
+                let _ = SetFocus(Some(self.treeview));
+            }
+        }
+        self.selected_node = Some(TreeNodeKind::Folder(fid));
+        self.flash_tree_node = Some((TreeNodeKind::Folder(fid), TREE_FLASH_TOTAL_TICKS));
+        unsafe {
+            let _ = SetTimer(
+                Some(self.hwnd),
+                IDT_TREE_FLASH_TIMER,
+                TREE_FLASH_INTERVAL_MS,
+                None,
+            );
+            let _ = InvalidateRect(Some(self.treeview), None, false);
+        }
+        self.invalidate_canvas();
     }
 
     /// Détecte de façon déterministe l'élément du TreeView présent sur la rangée spécifiée (`pt`),
@@ -4424,14 +4767,25 @@ impl AppWindowState {
                     .and_then(|c| c.folder_id)
             }
             TreeNodeKind::FavoritesRoot => {
-                // Déposer une connexion sur "Favoris" l'ajoute aux favoris !
-                if let TreeNodeKind::Connection(cid) = source {
-                    if let Err(e) = self.storage.set_connection_favorite(cid, true) {
-                        show_warning_dialog(self.hwnd, "Favori", &e);
-                    } else {
-                        self.status_override = Some("Connexion ajoutée aux favoris.".to_string());
-                        self.rebuild_treeview();
+                // Déposer une connexion ou un dossier sur "Épinglés" l'épingle !
+                match source {
+                    TreeNodeKind::Connection(cid) => {
+                        if let Err(e) = self.storage.set_connection_favorite(cid, true) {
+                            show_warning_dialog(self.hwnd, "Épinglé", &e);
+                        } else {
+                            self.status_override = Some("Connexion épinglée.".to_string());
+                            self.rebuild_treeview();
+                        }
                     }
+                    TreeNodeKind::Folder(fid) => {
+                        if let Err(e) = self.storage.set_folder_pinned(fid, true) {
+                            show_warning_dialog(self.hwnd, "Épinglé", &e);
+                        } else {
+                            self.status_override = Some("Dossier épinglé.".to_string());
+                            self.rebuild_treeview();
+                        }
+                    }
+                    _ => {}
                 }
                 return;
             }
@@ -4915,9 +5269,9 @@ impl AppWindowState {
                         MF_STRING,
                         CMD_CTX_TOGGLE_FAV as usize,
                         if is_fav {
-                            w!("Retirer des favoris")
+                            w!("Retirer des épinglés")
                         } else {
-                            w!("★ Ajouter aux favoris")
+                            w!("★ Épingler")
                         },
                     );
                     let _ = AppendMenuW(
@@ -4956,7 +5310,8 @@ impl AppWindowState {
                         w!("Supprimer..."),
                     );
                 }
-                Some(TreeNodeKind::Folder(_fid)) => {
+                Some(TreeNodeKind::Folder(fid)) => {
+                    let is_pinned = self.cached_folders.get(&fid).is_some_and(|f| f.is_pinned);
                     let _ = AppendMenuW(
                         hmenu,
                         MF_STRING,
@@ -4970,6 +5325,16 @@ impl AppWindowState {
                         w!("+ Nouveau sous-dossier..."),
                     );
                     let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+                    let _ = AppendMenuW(
+                        hmenu,
+                        MF_STRING,
+                        CMD_CTX_TOGGLE_PIN_FOLDER as usize,
+                        if is_pinned {
+                            w!("Retirer des épinglés")
+                        } else {
+                            w!("★ Épingler le dossier")
+                        },
+                    );
                     let _ = AppendMenuW(
                         hmenu,
                         MF_STRING,
@@ -5036,6 +5401,19 @@ impl AppWindowState {
                         .is_ok()
                 {
                     self.rebuild_treeview();
+                    self.invalidate_canvas();
+                }
+            }
+            CMD_CTX_TOGGLE_PIN_FOLDER => {
+                if let Some(TreeNodeKind::Folder(fid)) = self.selected_node
+                    && let Ok(Some(folder)) = self.storage.get_folder(fid)
+                    && self
+                        .storage
+                        .set_folder_pinned(fid, !folder.is_pinned)
+                        .is_ok()
+                {
+                    self.rebuild_treeview();
+                    self.invalidate_canvas();
                 }
             }
             CMD_CTX_TOGGLE_PRIORITY => {
@@ -7727,7 +8105,7 @@ fn run_connection_form_dialog(
         let chk_fav = create_dark_checkbox(
             hwnd,
             hinstance.into(),
-            w!("Marquer comme connexion favorite"),
+            w!("Épingler la connexion"),
             RECT {
                 left: field_left,
                 top: y_chk2,
@@ -13387,6 +13765,7 @@ impl Drop for AppWindowState {
         self.remove_tray_icon();
         unsafe {
             let _ = KillTimer(Some(self.hwnd), IDT_RDP_STATE_POLL);
+            let _ = KillTimer(Some(self.hwnd), IDT_TREE_FLASH_TIMER);
             if !self.app_icon.is_invalid() {
                 let _ = DestroyIcon(self.app_icon);
             }
@@ -15371,6 +15750,21 @@ unsafe extern "system" fn main_wnd_proc(
                         let viewport = (*ptr).rdp_viewport_rect();
                         if (*ptr).sessions.sync_real_states_with_viewport(viewport) {
                             (*ptr).invalidate_canvas();
+                        }
+                    }
+                } else if wparam.0 == IDT_TREE_FLASH_TIMER {
+                    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowState;
+                    if !ptr.is_null() {
+                        if let Some((kind, remaining)) = (*ptr).flash_tree_node {
+                            if remaining <= 1 {
+                                (*ptr).flash_tree_node = None;
+                                let _ = KillTimer(Some(hwnd), IDT_TREE_FLASH_TIMER);
+                            } else {
+                                (*ptr).flash_tree_node = Some((kind, remaining - 1));
+                            }
+                            let _ = InvalidateRect(Some((*ptr).treeview), None, false);
+                        } else {
+                            let _ = KillTimer(Some(hwnd), IDT_TREE_FLASH_TIMER);
                         }
                     }
                 }
@@ -18754,6 +19148,7 @@ mod tests {
                     name: name.to_string(),
                     sort_order: 0,
                     is_expanded: false,
+                    is_pinned: false,
                     created_at: 0,
                     updated_at: 0,
                 },
